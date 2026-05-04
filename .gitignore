@@ -1,0 +1,40 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+!envs/*.tfvars
+.terraform.lock.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# tfsec / checkov / tflint
+.tfsec/
+.checkov.yaml
+.tflint.hcl
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Secrets — never commit
+*.pem
+*.pfx
+*.key
+.env
+.env.*
+!.env.example
+
+# Plan outputs
+*.tfplan
+plan.out
