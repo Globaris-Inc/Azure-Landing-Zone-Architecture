@@ -108,7 +108,7 @@ The Terraform state Storage Account requires CMK encryption per PROMPT.md Sectio
 - B: Bootstrap a dedicated Key Vault in the Management sub today as part of 10a
 - C: Use the Security sub Key Vault (but that sub is built in Section 8 — not yet)
 
-**Recommendation:** B — bootstrap a small dedicated Key Vault in Management sub today. Adds ~15 min of work but avoids the deviation marker.
+**RESOLVED 2026-05-05 (pre-session):** Option B — bootstrap a small dedicated Key Vault in Management sub today. Adds ~15 min of work but avoids deviation marker. The Key Vault becomes part of the bootstrap layer and is later referenced (not destroyed) by Section 8.
 
 ---
 
@@ -127,7 +127,7 @@ The bootstrap layer (state backend, OIDC) needs to be deployed *before* the remo
 - B: Local state, never committed, documented as one-time manual apply
 - C: Use Azure CLI imperative commands for bootstrap, then Terraform takes over with remote state
 
-**Recommendation:** B — local state, manual one-time apply, documented in `bootstrap/README.md` with explicit "this is the chicken-and-egg layer" warning.
+**RESOLVED 2026-05-05 (pre-session):** Option B — local state never committed, manual one-time apply, documented in `bootstrap/README.md` with explicit "this is the chicken-and-egg layer" warning. Bootstrap state file added to `.gitignore`.
 
 ---
 
@@ -139,11 +139,32 @@ The bootstrap layer (state backend, OIDC) needs to be deployed *before* the remo
 - **Priority:** Low
 
 **Question:**
-GitHub-hosted runners are free for public repos, limited for private. Self-hosted runners cost less long-term but add setup. For a portfolio POC repo:
+For a portfolio POC repo, public vs private and runner choice?
 
 **Options:**
-- A: GitHub-hosted, public repo (free, but exposes your code — fine for a portfolio piece)
-- B: GitHub-hosted, private repo (uses included minutes — fine for low-volume)
-- C: Self-hosted on an Azure VM (overkill for POC)
+- A: GitHub-hosted, public repo (free, exposes code as portfolio)
+- B: GitHub-hosted, private repo (uses included minutes, can flip to public later)
+- C: Self-hosted on Azure VM (overkill for POC)
 
-**Recommendation:** A or B depending on whether you want this on your public GitHub as portfolio. For now assume B (private) — easy to flip to public later.
+**RESOLVED 2026-05-05 (pre-session):** Option B — private repo, GitHub-hosted runners. Workflows must be written so they work identically once the repo flips to public.
+
+---
+
+### OQ-008: OIDC SP RBAC scope-down follow-up tracking
+
+- **Raised:** 2026-05-05 (Session 2)
+- **Section:** 12
+- **Blocking:** No (until Section 12)
+- **Priority:** Medium
+
+**Question:**
+Per ADR-006 (this session), the OIDC SP receives Owner at Tenant Root MG to enable ALZ work without per-resource RBAC complexity. This is a deliberate POC compromise that must be scoped down before the POC is "done."
+
+**Action required at Section 12:** Replace Tenant Root Owner with:
+- Per-sub Contributor on the 5 subscriptions
+- Resource Policy Contributor at the relevant MG scopes
+- User Access Administrator only where role assignments are managed
+
+This stays open through every session's start-of-session read until resolved at Section 12.
+
+---
