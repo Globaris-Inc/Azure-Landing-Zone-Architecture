@@ -110,3 +110,100 @@ ALZ canonical pattern uses 6+ subscriptions. Portfolio POC on a Visual Studio be
 - Follow-ups: All Terraform module designs must accept a `subscription_id` variable and not assume sub-per-LZ; policy assignments at the Landing Zones MG must compensate for the shared-sub blast radius
 
 ---
+
+
+### ADR-003: Subscription Model — Platform Multi-Sub, Shared LZ Sub
+
+- **Date:** 2026-05-05
+- **Section:** Foundational (impacts 2, 8, 9, 10)
+- **Status:** Accepted
+- **Decision makers:** user, claude
+
+**Context:**
+ALZ canonical pattern uses 6+ subscriptions. Portfolio POC on a Visual Studio benefit account needs to balance architectural fidelity with realistic provisioning constraints and idle cost.
+
+**Decision:**
+4 dedicated platform subscriptions (Connectivity, Management, Security, Identity) + 1 shared subscription for all Landing Zones (corp-a1, corp-a2, online-p1) and Sandbox, with separation enforced via Resource Groups, Management Group placement, and policy assignment.
+
+**Alternatives considered:**
+- Option A (full 6+ sub multi-sub) — rejected: ~$200–500/mo idle cost; provisioning complexity on Visual Studio benefits
+- Option B (single sub everything) — rejected: eliminates the platform/workload boundary that ALZ exists to demonstrate
+
+**Consequences:**
+- Positive: demonstrates platform/workload boundary at sub-scope; idle cost ~$80–150/mo
+- Negative: corp/online and individual LZ isolation simulated via RG, not enforced at sub level — must be called out in ARCHITECTURE.md
+- Follow-ups: all module designs accept `subscription_id` variable; policy assignments at Landing Zones MG must compensate for shared-sub blast radius
+
+---
+
+### ADR-004: State Backend CMK Approach — Dedicated Bootstrap Key Vault
+
+- **Date:** 2026-05-05
+- **Section:** 10a
+- **Status:** Accepted
+- **Decision makers:** user, claude
+
+**Context:**
+PROMPT.md Section 10 mandates CMK encryption on the Terraform state Storage Account. CMK requires a Key Vault with an encryption key, but the security-subscription Key Vault doesn't exist until Section 8.
+
+**Decision:**
+Bootstrap a dedicated Key Vault in the Management subscription as part of 10a. This Key Vault holds only the storage encryption key plus any future bootstrap-layer secrets. It is referenced (not destroyed) by later sections.
+
+**Alternatives considered:**
+- Microsoft-managed keys — rejected: creates a deviation marker that compounds with later changes
+- Use Security-sub Key Vault — rejected: that sub doesn't exist yet
+
+**Consequences:**
+- Positive: aligned with PROMPT.md from day one, no deviation marker
+- Negative: Management sub now has two Key Vaults (bootstrap + future shared) — naming must distinguish them
+- Follow-ups: Section 8 must NOT replace this KV; it must add a separate `kv-mgmt-shared-*` for application secrets
+
+---
+
+### ADR-005: Bootstrap Layer State Strategy — Local, Never Committed
+
+- **Date:** 2026-05-05
+- **Section:** 10a
+- **Status:** Accepted
+- **Decision makers:** user, claude
+
+**Context:**
+The bootstrap layer creates the remote state backend. Its own state cannot live in the backend it creates — chicken-and-egg.
+
+**Decision:**
+Bootstrap layer uses local Terraform state. The state file is gitignored and never committed. Procedure documented as one-time manual apply in `bootstrap/README.md`. If the bootstrap state is lost, recovery path is `terraform import` against existing Azure resources.
+
+**Alternatives considered:**
+- Local state in private gitignored folder, committed encrypted — rejected: adds SOPS/git-crypt overhead for a one-time apply
+- Imperative Azure CLI bootstrap — rejected: loses Terraform's state and import benefits
+
+**Consequences:**
+- Positive: simplest possible bootstrap; clear separation between "platform" and "platform of platform"
+- Negative: bootstrap can drift if applied from a different machine; recovery requires `terraform import`
+- Follow-ups: Section 12 acceptance criteria must include a documented bootstrap recovery drill
+
+---
+
+### ADR-006: Initial OIDC Service Principal RBAC Scope
+
+- **Date:** 2026-05-05
+- **Section:** 10a
+- **Status:** Accepted (with deliberate scope-down deferral — see OQ-008)
+- **Decision makers:** user, claude
+
+**Context:**
+The OIDC SP needs sufficient privilege to deploy ALZ — creating Management Groups, applying policies at MG scope, creating resources across 5 subscriptions. Strict least-privilege would require careful per-scope role assignments before any deployment can succeed.
+
+**Decision:**
+For Days 2–11, grant the OIDC SP **Owner at Tenant Root Management Group**. This is documented as a deliberate POC compromise. Section 12 must replace this with scoped roles before the POC is treated as "done."
+
+**Alternatives considered:**
+- Per-sub Contributor + Resource Policy Contributor + UAA from day one — rejected: would consume an entire session of RBAC plumbing before any architectural work, and would still need adjustment as new sections add new resource types
+- Owner at each sub individually — rejected: doesn't grant MG-scope policy creation
+
+**Consequences:**
+- Positive: unblocks all subsequent sessions immediately; minimizes RBAC churn during build
+- Negative: SP is over-privileged for the duration of the build; MUST NOT be reused in any other tenant or repurposed for a customer environment
+- Follow-ups (tracked in OQ-008): Section 12 replaces with per-sub Contributor + Resource Policy Contributor at MG + UAA where role assignments are managed
+
+---
