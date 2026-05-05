@@ -46,6 +46,8 @@ ALZ assumes multiple subscriptions (Connectivity, Identity, Management, Security
 
 Recommended for a POC: **C**. Confirm before Section 2.
 
+**RESOLVED 2026-05-05 (Session 2):** Option C — 4 platform subscriptions (Connectivity, Management, Security, Identity) + 1 shared subscription for all Landing Zones and Sandbox simulated via RG and MG-level policy assignment. Rationale: preserves the platform/workload boundary that matters most architecturally, keeps cost manageable for a portfolio POC (~$80–150/mo idle), and uses a sub count realistically provisionable on a Visual Studio benefit account.
+
 ---
 
 ### OQ-002: Identity mode — DCs on IaaS vs Microsoft Entra Domain Services
@@ -90,3 +92,58 @@ Conditional Access, Entra ID, and any custom domain bindings need a domain. Are 
 PROMPT.md suggests `eastus2` (primary) + `centralus` or `westus3` (DR). Confirm or override. Note: `westus3` does not yet have all the same services as `eastus2` — verify availability of Azure Firewall Premium, DNS Private Resolver, and Sentinel before locking in.
 
 ---
+
+### OQ-005: State storage CMK source
+
+- **Raised:** 2026-05-05 (Session 2)
+- **Section:** 10a
+- **Blocking:** Yes — blocks state backend creation
+- **Priority:** High
+
+**Question:**
+The Terraform state Storage Account requires CMK encryption per PROMPT.md Section 10. CMK requires a Key Vault with the encryption key. Which approach?
+
+**Options:**
+- A: Microsoft-managed keys for now (deviation, document in DECISIONS), upgrade to CMK in 10b
+- B: Bootstrap a dedicated Key Vault in the Management sub today as part of 10a
+- C: Use the Security sub Key Vault (but that sub is built in Section 8 — not yet)
+
+**Recommendation:** B — bootstrap a small dedicated Key Vault in Management sub today. Adds ~15 min of work but avoids the deviation marker.
+
+---
+
+### OQ-006: Terraform module organization for bootstrap
+
+- **Raised:** 2026-05-05 (Session 2)
+- **Section:** 10a
+- **Blocking:** No
+- **Priority:** Medium
+
+**Question:**
+The bootstrap layer (state backend, OIDC) needs to be deployed *before* the remote state exists. Where does its own state live?
+
+**Options:**
+- A: Local state, committed to a separate `bootstrap-state/` private folder (gitignored), one-time apply
+- B: Local state, never committed, documented as one-time manual apply
+- C: Use Azure CLI imperative commands for bootstrap, then Terraform takes over with remote state
+
+**Recommendation:** B — local state, manual one-time apply, documented in `bootstrap/README.md` with explicit "this is the chicken-and-egg layer" warning.
+
+---
+
+### OQ-007: GitHub Actions runner choice
+
+- **Raised:** 2026-05-05 (Session 2)
+- **Section:** 10a
+- **Blocking:** No
+- **Priority:** Low
+
+**Question:**
+GitHub-hosted runners are free for public repos, limited for private. Self-hosted runners cost less long-term but add setup. For a portfolio POC repo:
+
+**Options:**
+- A: GitHub-hosted, public repo (free, but exposes your code — fine for a portfolio piece)
+- B: GitHub-hosted, private repo (uses included minutes — fine for low-volume)
+- C: Self-hosted on an Azure VM (overkill for POC)
+
+**Recommendation:** A or B depending on whether you want this on your public GitHub as portfolio. For now assume B (private) — easy to flip to public later.
