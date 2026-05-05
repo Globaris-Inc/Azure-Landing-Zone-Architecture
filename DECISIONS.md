@@ -85,3 +85,28 @@ Use `Azure/avm-ptn-alz` if a stable version (≥ 0.x) exists at the time Section
 - Follow-ups: re-verify module version on the day Section 2 is built
 
 ---
+
+
+### ADR-002: Subscription Model — Platform Multi-Sub, Shared LZ Sub
+
+- **Date:** 2026-05-05
+- **Section:** 1 (foundational, surfaces in 2, 8, 9, 10)
+- **Status:** Accepted
+- **Decision makers:** user, claude
+
+**Context:**
+ALZ canonical pattern uses 6+ subscriptions. Portfolio POC on a Visual Studio benefit account needs to balance architectural fidelity with realistic provisioning constraints and idle cost.
+
+**Decision:**
+4 dedicated platform subscriptions (Connectivity, Management, Security, Identity) + 1 shared subscription for all Landing Zones (corp-a1, corp-a2, online-p1) and Sandbox, with separation enforced via Resource Groups, Management Group placement, and policy assignment.
+
+**Alternatives considered:**
+- Option A (full 6+ sub multi-sub): rejected for cost (~$200–500/mo idle) and provisioning complexity on Visual Studio benefits
+- Option B (single sub everything): rejected because it eliminates the platform/workload boundary that ALZ exists to demonstrate
+
+**Consequences:**
+- Positive: Demonstrates the most architecturally important boundary (platform vs workload) at sub-scope; idle cost ~$80–150/mo manageable
+- Negative: Corp-vs-online and individual LZ isolation is simulated via RG, not enforced at sub level — must be called out in ARCHITECTURE.md
+- Follow-ups: All Terraform module designs must accept a `subscription_id` variable and not assume sub-per-LZ; policy assignments at the Landing Zones MG must compensate for the shared-sub blast radius
+
+---
