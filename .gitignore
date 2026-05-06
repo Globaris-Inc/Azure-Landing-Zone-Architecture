@@ -5,7 +5,9 @@
 *.tfvars
 !*.tfvars.example
 !envs/*.tfvars
-.terraform.lock.hcl
+# Bootstrap lock file not needed (one-time local apply — ADR-005).
+# Lock files for platform/ and landing-zones/ SHOULD be committed for reproducible CI.
+bootstrap/.terraform.lock.hcl
 crash.log
 crash.*.log
 override.tf

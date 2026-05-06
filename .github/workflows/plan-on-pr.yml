@@ -1,0 +1,141 @@
+# .github/workflows/plan-on-pr.yml
+# Purpose: Run terraform plan on every pull request targeting main.
+#          Posts plan output as a PR comment for each root module.
+# Section: 10a — Pipeline & Tooling (bootstrap subset)
+# Last updated: 2026-05-05
+#
+# Authentication: OIDC federated credential — no secrets stored in GitHub.
+# Repository variables required (Settings → Secrets and variables → Variables):
+#   AZURE_CLIENT_ID       — oidc_client_id output from bootstrap/
+#   AZURE_TENANT_ID       — oidc_tenant_id output from bootstrap/
+#   AZURE_SUBSCRIPTION_ID — management_subscription_id output from bootstrap/
+#                           (used as default; per-module sub overrides added in later sections)
+#
+# Adding modules: extend the matrix.module list as sections are completed.
+# Modules that do not yet exist will fail gracefully (init step errors are caught).
+
+name: Terraform Plan (PR)
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "platform/**"
+      - "landing-zones/**"
+      - "modules/**"
+      - "envs/**"
+
+permissions:
+  id-token: write       # required for OIDC token exchange
+  contents: read
+  pull-requests: write  # required to post plan comments
+
+jobs:
+  plan:
+    name: Plan — ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # run all modules even if one fails
+      matrix:
+        module:
+          - platform/management
+          - platform/connectivity
+          - platform/identity
+          - platform/security
+          - landing-zones/corp-a1
+          - landing-zones/corp-a2
+          - landing-zones/online-p1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+          terraform_wrapper: true  # enables stdout capture for plan comment
+
+      - name: Terraform Init
+        id: init
+        working-directory: ${{ matrix.module }}
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform init \
+            -backend-config="../../envs/poc.backend.hcl" \
+            -backend-config="key=${{ matrix.module }}/terraform.tfstate" \
+            -input=false
+        continue-on-error: true  # module may not exist yet during build-out
+
+      - name: Terraform Plan
+        id: plan
+        if: steps.init.outcome == 'success'
+        working-directory: ${{ matrix.module }}
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          terraform plan \
+            -var-file="../../envs/poc.tfvars" \
+            -no-color \
+            -input=false \
+            -out=tfplan
+        continue-on-error: true
+
+      - name: Post Plan Comment
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const module   = '${{ matrix.module }}';
+            const initOk   = '${{ steps.init.outcome }}' === 'success';
+            const planOk   = '${{ steps.plan.outcome }}' === 'success';
+            const planOut  = `${{ steps.plan.outputs.stdout }}` || '(no output)';
+            const planErr  = `${{ steps.plan.outputs.stderr }}` || '';
+
+            let statusLine;
+            if (!initOk)       statusLine = '⚠️ Init failed (module may not exist yet)';
+            else if (planOk)   statusLine = '✅ Plan succeeded';
+            else               statusLine = '❌ Plan failed';
+
+            const body = [
+              `### Terraform Plan — \`${module}\``,
+              '',
+              statusLine,
+              '',
+              '<details><summary>Plan output</summary>',
+              '',
+              '```hcl',
+              planOut.substring(0, 60000),  // GitHub comment limit ~65535 chars
+              '```',
+              planErr ? `\n**stderr:**\n\`\`\`\n${planErr.substring(0, 5000)}\n\`\`\`` : '',
+              '</details>',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Fail if plan failed
+        if: steps.init.outcome == 'success' && steps.plan.outcome == 'failure'
+        run: |
+          echo "Terraform plan failed for ${{ matrix.module }}"
+          exit 1

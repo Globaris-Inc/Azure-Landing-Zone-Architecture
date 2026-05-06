@@ -37,6 +37,110 @@
 
 <!-- Newest at the top. -->
 
+### ADR-006: Initial OIDC SP RBAC scope — Owner at Tenant Root MG
+
+- **Date:** 2026-05-05
+- **Section:** 10a
+- **Status:** Accepted (temporary; see OQ-008 for scope-down at Section 12)
+- **Decision makers:** user
+
+**Context:**
+The OIDC service principal must create Management Groups, Policy assignments, role assignments, and resources across all 5 subscriptions. The granular-minimum role set cannot be computed until all sections are built.
+
+**Decision:**
+Assign `Owner` to the OIDC SP at Tenant Root Management Group scope for the duration of the POC build (Sections 10a–12). At Section 12, replace with the principle-of-least-privilege role set tracked in OQ-008.
+
+**Alternatives considered:**
+
+- Per-subscription Contributor + scoped UAA — rejected for now: cannot enumerate required role assignments until all resource types are known.
+- Owner at subscription level per sub — rejected: Management Group operations (Section 2) require tenant-root scope.
+
+**Consequences:**
+
+- Positive: zero RBAC-related CI failures during build phases 2–11.
+- Negative: over-privileged SP; mitigated by POC being a dedicated demo tenant and OQ-008 tracking remediation.
+- Follow-ups: OQ-008 must be resolved at Section 12.
+
+---
+
+### ADR-005: Bootstrap layer Terraform state — local, never committed
+
+- **Date:** 2026-05-05
+- **Section:** 10a
+- **Status:** Accepted
+- **Decision makers:** user
+
+**Context:**
+The bootstrap layer creates the Azure Storage Account used as remote state backend by all other layers — a chicken-and-egg situation.
+
+**Decision:**
+Bootstrap uses local Terraform state (`bootstrap/terraform.tfstate`), gitignored and never committed. Bootstrap is a one-time manual `terraform apply`. After apply, outputs are pasted into `envs/poc.backend.hcl` for all subsequent root modules.
+
+**Alternatives considered:**
+
+- Local state committed to `bootstrap-state/` — rejected: state files can contain sensitive values; git history is permanent.
+- Azure CLI imperative bootstrap — rejected: defeats "everything as code" and creates undocumented manual state.
+
+**Consequences:**
+
+- Positive: simple, no circular dependency.
+- Negative: bootstrap state is not backed up; if lost, `terraform import` is required (documented in `bootstrap/README.md`).
+- Follow-ups: `bootstrap/terraform.tfstate*` and `bootstrap/.terraform/` added to `.gitignore`.
+
+---
+
+### ADR-004: State storage CMK — bootstrap dedicated Key Vault in Management sub
+
+- **Date:** 2026-05-05
+- **Section:** 10a
+- **Status:** Accepted
+- **Decision makers:** user
+
+**Context:**
+PROMPT.md Section 10 requires CMK encryption for the Terraform state Storage Account. CMK requires a Key Vault not yet built in any other section.
+
+**Decision:**
+Create a dedicated Key Vault (`kv-tfstate-<suffix>-001`) in `rg-tfstate-mgmt-eus2-001` (Management subscription) as part of the bootstrap layer. The KV holds a single RSA-2048 key for Storage Account CMK. It is NOT replaced by the Security sub KV built in Section 8 — that KV is purpose-built for workload secrets.
+
+**Alternatives considered:**
+
+- Microsoft-managed keys now, upgrade later — rejected: PROMPT.md explicitly requires CMK; a deviation marker would persist for 6+ sessions.
+- Security sub KV (built in Section 8) — rejected: blocking CMK on that dependency leaves the state SA unencrypted for 6+ sessions.
+
+**Consequences:**
+
+- Positive: state SA is CMK-encrypted from first `terraform apply`; no deviation markers.
+- Negative: a second Key Vault alongside the future Security sub KV; adds ~$5/mo.
+- Follow-ups: bootstrap KV is referenced (not replaced) when Section 8 builds the Security sub KV.
+
+---
+
+### ADR-003: Subscription model — Option C (4 platform subs + 1 shared LZ sub)
+
+- **Date:** 2026-05-05
+- **Section:** 10a (resolves OQ-001, unblocks Section 2)
+- **Status:** Accepted
+- **Decision makers:** user
+
+**Context:**
+ALZ assumes 6+ subscriptions. For a portfolio POC on a Visual Studio benefit account, options ranged from a single subscription (cheapest) to full multi-sub (most realistic).
+
+**Decision:**
+Option C: 4 platform subscriptions (Connectivity, Management, Security, Identity) + 1 shared subscription hosting all Landing Zones and Sandbox. The platform/workload subscription boundary — the most architecturally significant in ALZ — is real. Within-LZ sub boundaries are simulated via MG scope and Resource Group segmentation.
+
+**Alternatives considered:**
+
+- Full multi-sub (Option A) — rejected: Visual Studio benefit accounts are typically capped at 1–5 subs; cost compounds.
+- Single sub (Option B) — rejected: collapses the platform/workload boundary; cannot demonstrate MG policy inheritance.
+
+**Consequences:**
+
+- Positive: 5 subscriptions feasible on VS Enterprise; MG hierarchy is real; policy at MG scope behaves correctly.
+- Negative: within-LZ sub-level isolation is simulated; documented in `ARCHITECTURE.md`.
+- Follow-ups: Section 2 MG hierarchy maps 5 subscription IDs to MG nodes; IDs supplied via `poc.tfvars`.
+
+---
+
 ### ADR-002: Treat repo root as alz-poc/ — no nested subdirectory
 
 - **Date:** 2026-05-04

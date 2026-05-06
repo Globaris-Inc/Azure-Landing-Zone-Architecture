@@ -1,0 +1,42 @@
+# bootstrap/terraform.tfvars.example
+# Copy to terraform.tfvars (gitignored) and fill in real values before running.
+# NEVER commit terraform.tfvars — it contains subscription and tenant IDs.
+
+# ---------------------------------------------------------------------------
+# Required — replace ALL placeholder values before running terraform apply
+# ---------------------------------------------------------------------------
+
+tenant_id = "00000000-0000-0000-0000-000000000000"  # az account show --query tenantId -o tsv
+
+management_subscription_id = "00000000-0000-0000-0000-000000000001"  # Management sub
+
+github_org  = "your-github-username-or-org"
+github_repo = "alz-poc"
+
+# IP allow list — GitHub Actions runners + your home/work IP.
+#
+# Get current GitHub Actions IP ranges:
+#   curl -s https://api.github.com/meta | jq '.actions[]'
+#
+# As of early 2025, the main Azure-hosted runner ranges include (NOT exhaustive — verify!):
+#   4.148.0.0/16, 20.1.0.0/16, 20.14.0.0/16, etc.
+#   Always fetch fresh from the GitHub meta API before committing.
+#
+# Add your home/office public IP:
+#   curl -s https://api.ipify.org
+ip_allow_list = [
+  "YOUR.HOME.IP.HERE/32",    # Replace with: curl -s https://api.ipify.org
+  # Add GitHub Actions runner ranges from: curl -s https://api.github.com/meta | jq '.actions[]'
+]
+
+# ---------------------------------------------------------------------------
+# Optional overrides (defaults are set in variables.tf)
+# ---------------------------------------------------------------------------
+
+# primary_location = "eastus2"
+# org_prefix       = "contoso"
+# kv_soft_delete_retention_days = 90
+
+# tags = {
+#   CostCenter = "DEMO-9999"
+# }

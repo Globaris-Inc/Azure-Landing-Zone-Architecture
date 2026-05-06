@@ -1,0 +1,310 @@
+# .github/workflows/apply-on-merge.yml
+# Purpose: Run terraform apply in dependency order on every push to main.
+# Section: 10a — Pipeline & Tooling (bootstrap subset)
+# Last updated: 2026-05-05
+#
+# Authentication: OIDC federated credential — no secrets stored in GitHub.
+# Environment gate: the "production" GitHub Environment requires a required
+#   reviewer approval before each job runs. Configure in:
+#   Settings → Environments → production → Required reviewers.
+#
+# Apply order (enforced via `needs`):
+#   1. platform/management   — LA workspace, Automation Account (no VNet dep)
+#   2. platform/connectivity — Hub VNets (depends on management for log destination)
+#   3. platform/identity     — DC VMs or AADDS (depends on connectivity for VNet)
+#   4. platform/security     — Sentinel (depends on management LA workspace)
+#   5. landing-zones         — parallel, all depend on connectivity hub
+#
+# Adding modules: add a new job following the pattern below, referencing the
+# appropriate `needs:` dependency to maintain the apply order.
+
+name: Terraform Apply (Merge to Main)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "platform/**"
+      - "landing-zones/**"
+      - "modules/**"
+      - "envs/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+# Common env block — all jobs inherit these.
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_FILE: "../../envs/poc.tfvars"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Management — first, no dependencies
+  # --------------------------------------------------------------------------
+  apply-management:
+    name: Apply — platform/management
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: platform/management
+        run: |
+          terraform init \
+            -backend-config="../../envs/poc.backend.hcl" \
+            -backend-config="key=platform/management/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: platform/management
+        run: |
+          terraform apply \
+            -var-file="../../envs/poc.tfvars" \
+            -auto-approve \
+            -input=false
+
+  # --------------------------------------------------------------------------
+  # 2. Connectivity — depends on Management (log destination must exist)
+  # --------------------------------------------------------------------------
+  apply-connectivity:
+    name: Apply — platform/connectivity
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [apply-management]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: platform/connectivity
+        run: |
+          terraform init \
+            -backend-config="../../envs/poc.backend.hcl" \
+            -backend-config="key=platform/connectivity/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: platform/connectivity
+        run: |
+          terraform apply \
+            -var-file="../../envs/poc.tfvars" \
+            -auto-approve \
+            -input=false
+
+  # --------------------------------------------------------------------------
+  # 3. Identity — depends on Connectivity (VNet must exist)
+  # --------------------------------------------------------------------------
+  apply-identity:
+    name: Apply — platform/identity
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [apply-connectivity]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: platform/identity
+        run: |
+          terraform init \
+            -backend-config="../../envs/poc.backend.hcl" \
+            -backend-config="key=platform/identity/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: platform/identity
+        run: |
+          terraform apply \
+            -var-file="../../envs/poc.tfvars" \
+            -auto-approve \
+            -input=false
+
+  # --------------------------------------------------------------------------
+  # 4. Security (Sentinel) — depends on Management (LA workspace must exist)
+  # --------------------------------------------------------------------------
+  apply-security:
+    name: Apply — platform/security
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [apply-management]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: platform/security
+        run: |
+          terraform init \
+            -backend-config="../../envs/poc.backend.hcl" \
+            -backend-config="key=platform/security/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: platform/security
+        run: |
+          terraform apply \
+            -var-file="../../envs/poc.tfvars" \
+            -auto-approve \
+            -input=false
+
+  # --------------------------------------------------------------------------
+  # 5. Landing Zones — parallel, all depend on connectivity hub
+  # --------------------------------------------------------------------------
+  apply-corp-a1:
+    name: Apply — landing-zones/corp-a1
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [apply-connectivity, apply-security]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: landing-zones/corp-a1
+        run: |
+          terraform init \
+            -backend-config="../../envs/poc.backend.hcl" \
+            -backend-config="key=landing-zones/corp-a1/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: landing-zones/corp-a1
+        run: |
+          terraform apply \
+            -var-file="../../envs/poc.tfvars" \
+            -auto-approve \
+            -input=false
+
+  apply-corp-a2:
+    name: Apply — landing-zones/corp-a2
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [apply-connectivity, apply-security]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: landing-zones/corp-a2
+        run: |
+          terraform init \
+            -backend-config="../../envs/poc.backend.hcl" \
+            -backend-config="key=landing-zones/corp-a2/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: landing-zones/corp-a2
+        run: |
+          terraform apply \
+            -var-file="../../envs/poc.tfvars" \
+            -auto-approve \
+            -input=false
+
+  apply-online-p1:
+    name: Apply — landing-zones/online-p1
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [apply-connectivity, apply-security]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: landing-zones/online-p1
+        run: |
+          terraform init \
+            -backend-config="../../envs/poc.backend.hcl" \
+            -backend-config="key=landing-zones/online-p1/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: landing-zones/online-p1
+        run: |
+          terraform apply \
+            -var-file="../../envs/poc.tfvars" \
+            -auto-approve \
+            -input=false
