@@ -1,0 +1,83 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Azure/Azure-Landing-Zones-Library/main/schemas/architecture_definition.json",
+  "name": "contoso",
+  "management_groups": [
+    {
+      "id": "contoso",
+      "display_name": "Contoso",
+      "archetypes": ["root"],
+      "parent_id": null,
+      "exists": false
+    },
+    {
+      "id": "platform",
+      "display_name": "Platform",
+      "archetypes": ["platform"],
+      "parent_id": "contoso",
+      "exists": false
+    },
+    {
+      "id": "landingzones",
+      "display_name": "Landing Zones",
+      "archetypes": ["landing_zones"],
+      "parent_id": "contoso",
+      "exists": false
+    },
+    {
+      "id": "decommissioned",
+      "display_name": "Decommissioned",
+      "archetypes": ["decommissioned"],
+      "parent_id": "contoso",
+      "exists": false
+    },
+    {
+      "id": "sandbox",
+      "display_name": "Sandbox",
+      "archetypes": ["sandbox"],
+      "parent_id": "contoso",
+      "exists": false
+    },
+    {
+      "id": "management",
+      "display_name": "Management",
+      "archetypes": ["management"],
+      "parent_id": "platform",
+      "exists": false
+    },
+    {
+      "id": "connectivity",
+      "display_name": "Connectivity",
+      "archetypes": ["connectivity"],
+      "parent_id": "platform",
+      "exists": false
+    },
+    {
+      "id": "identity",
+      "display_name": "Identity",
+      "archetypes": ["identity"],
+      "parent_id": "platform",
+      "exists": false
+    },
+    {
+      "id": "security",
+      "display_name": "Security",
+      "archetypes": ["security"],
+      "parent_id": "platform",
+      "exists": false
+    },
+    {
+      "id": "corp",
+      "display_name": "Corp",
+      "archetypes": ["corp"],
+      "parent_id": "landingzones",
+      "exists": false
+    },
+    {
+      "id": "online",
+      "display_name": "Online",
+      "archetypes": ["online"],
+      "parent_id": "landingzones",
+      "exists": false
+    }
+  ]
+}

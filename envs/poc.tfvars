@@ -1,12 +1,13 @@
 # envs/poc.tfvars
 # Purpose: POC environment variable overrides — passed to all terraform apply invocations.
 # Section: 1 (scaffold), populated incrementally through Section 13.
-# Last updated: 2026-05-04
+# Last updated: 2026-05-06
 #
 # Usage: terraform apply -var-file=../../envs/poc.tfvars
 #
-# IMPORTANT: No subscription IDs, tenant IDs, client secrets, or passwords in this file.
-# Those values come from environment variables (ARM_SUBSCRIPTION_ID etc.) or Key Vault.
+# Subscription IDs and tenant IDs are non-sensitive identifiers (GUIDs visible in the
+# Azure portal) and are safe to commit. Only true secrets (client secrets, passwords,
+# SAS tokens, certificates) must be kept out of source control.
 # This file is safe to commit.
 
 # ---------------------------------------------------------------------------
@@ -28,7 +29,18 @@ org_prefix = "contoso"
 # Management Groups  (Section 2)
 # ---------------------------------------------------------------------------
 
-# management_group_root_name = "Contoso"
+# Tenant ID — set as a TODO so reviewers know it must be populated before apply.
+# Retrieve with: az account show --query tenantId -o tsv
+tenant_id = "TODO-replace-with-real-tenant-id"
+
+# Platform subscriptions (4 dedicated subs — ADR-003 Option C)
+connectivity_subscription_id = "<subscription-id>"
+management_subscription_id   = "<subscription-id>"
+identity_subscription_id     = "<subscription-id>"
+security_subscription_id     = "<subscription-id>"
+
+# Shared landing zone subscription — placed under Corp MG for POC
+landingzones_subscription_id = "<subscription-id>"
 
 # ---------------------------------------------------------------------------
 # FinOps / Tagging  (Section 7)

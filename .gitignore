@@ -17,6 +17,9 @@ override.tf.json
 .terraformrc
 terraform.rc
 
+# ALZ provider cache — populated by `terraform init` when the alz provider downloads library data
+.alzlib
+
 # tfsec / checkov / tflint
 .tfsec/
 .checkov.yaml

@@ -39,6 +39,7 @@ jobs:
       fail-fast: false  # run all modules even if one fails
       matrix:
         module:
+          - platform/management-groups
           - platform/management
           - platform/connectivity
           - platform/identity

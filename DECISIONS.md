@@ -37,6 +37,30 @@
 
 <!-- Newest at the top. -->
 
+### ADR-007: Custom Contoso root management group — override standard ALZ root id
+
+- **Date:** 2026-05-06
+- **Section:** 2
+- **Status:** Accepted
+- **Decision makers:** claude (structural), user (naming)
+
+**Context:**
+The `avm-ptn-alz` module loads architecture definitions from the ALZ Library. The standard `alz` architecture uses root MG id `"alz"` and display name `"Azure Landing Zones"`. The POC uses `"Contoso"` as the organisation name, requiring a custom root MG id.
+
+**Decision:**
+Create `platform/management-groups/lib/contoso.alz_architecture_definition.json` — a custom architecture definition that retains all standard ALZ archetypes (root, platform, landing_zones, management, connectivity, identity, security, corp, online, decommissioned, sandbox) but sets root id `"contoso"` and display name `"Contoso"`. The custom lib directory is passed as a second `library_references` entry to the `alz` provider.
+
+**Alternatives considered:**
+- Use standard `alz` root MG id — rejected: produces `alz` in the Azure portal hierarchy, inconsistent with organisation branding and the expected demo narrative.
+- Rename via `azurerm_management_group` rename — rejected: the AVM module owns the lifecycle; external rename would create a state conflict.
+
+**Consequences:**
+- Positive: hierarchy displays as "Contoso" in Azure portal; consistent with all naming in `poc.tfvars` and `ARCHITECTURE.md`.
+- Negative: a custom lib file must be maintained alongside future ALZ Library updates.
+- Follow-ups: when upgrading ALZ Library ref, re-validate that standard archetype names have not changed.
+
+---
+
 ### ADR-006: Initial OIDC SP RBAC scope — Owner at Tenant Root MG
 
 - **Date:** 2026-05-05
@@ -168,16 +192,16 @@ Treat `d:\Azure POC\Azure-Architecture\` as the repo root (equivalent to `alz-po
 
 ### ADR-001: Use AVM Pattern Module for ALZ Foundation
 
-- **Date:** TBD
+- **Date:** 2026-05-06
 - **Section:** 2
-- **Status:** Proposed
+- **Status:** Accepted — `Azure/avm-ptn-alz` v0.19.1 confirmed on registry.terraform.io 2026-05-06
 - **Decision makers:** user, claude
 
 **Context:**
 The ALZ pattern can be implemented via (a) the official `Azure/avm-ptn-alz` Terraform pattern module, (b) the older `Azure/caf-enterprise-scale` module, or (c) hand-rolled MG and policy resources.
 
 **Decision:**
-Use `Azure/avm-ptn-alz` if a stable version (≥ 0.x) exists at the time Section 2 is built. Fall back to `caf-enterprise-scale` only if the AVM pattern module is not yet GA. Verify at session start.
+Use `Azure/avm-ptn-alz` v0.19.1. Module confirmed published on Terraform Registry. Pinned to exact version in `platform/management-groups/providers.tf`.
 
 **Alternatives considered:**
 - Hand-rolled — rejected: defeats the purpose of using AVM and adds maintenance burden
@@ -186,7 +210,7 @@ Use `Azure/avm-ptn-alz` if a stable version (≥ 0.x) exists at the time Section
 **Consequences:**
 - Positive: aligned with current Microsoft guidance, less custom code to maintain
 - Negative: AVM pattern modules are newer and may have rough edges
-- Follow-ups: re-verify module version on the day Section 2 is built
+- Follow-ups: none — ADR resolved
 
 ---
 

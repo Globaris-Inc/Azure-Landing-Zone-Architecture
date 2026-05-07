@@ -9,6 +9,7 @@
 #   Settings → Environments → production → Required reviewers.
 #
 # Apply order (enforced via `needs`):
+#   0. platform/management-groups — MG tree + subscription placement (must come first)
 #   1. platform/management   — LA workspace, Automation Account (no VNet dep)
 #   2. platform/connectivity — Hub VNets (depends on management for log destination)
 #   3. platform/identity     — DC VMs or AADDS (depends on connectivity for VNet)
@@ -44,12 +45,51 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # 1. Management — first, no dependencies
+  # 0. Management Groups — first; all other jobs depend on MGs existing
+  # --------------------------------------------------------------------------
+  apply-management-groups:
+    name: Apply — platform/management-groups
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: platform/management-groups
+        run: |
+          terraform init \
+            -backend-config="../../envs/poc.backend.hcl" \
+            -backend-config="key=platform/management-groups/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: platform/management-groups
+        run: |
+          terraform apply \
+            -var-file="../../envs/poc.tfvars" \
+            -auto-approve \
+            -input=false
+
+  # --------------------------------------------------------------------------
+  # 1. Management — depends on MGs existing (policy assignments scope to MG)
   # --------------------------------------------------------------------------
   apply-management:
     name: Apply — platform/management
     runs-on: ubuntu-latest
     environment: production
+    needs: [apply-management-groups]
 
     steps:
       - uses: actions/checkout@v4
