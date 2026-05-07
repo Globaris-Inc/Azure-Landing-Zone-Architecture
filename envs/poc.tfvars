@@ -31,7 +31,7 @@ org_prefix = "contoso"
 
 # Tenant ID — set as a TODO so reviewers know it must be populated before apply.
 # Retrieve with: az account show --query tenantId -o tsv
-tenant_id = "TODO-replace-with-real-tenant-id"
+tenant_id = "<tenant-id>"
 
 # Platform subscriptions (4 dedicated subs — ADR-003 Option C)
 connectivity_subscription_id = "<subscription-id>"
