@@ -23,7 +23,7 @@ primary_location = "eastus2"
 secondary_location = "centralus"
 
 # Short org prefix used in resource naming (e.g. "cto" → cto-hub-vnet-eastus2)
-org_prefix = "contoso"
+org_prefix = "globaris"
 
 # ---------------------------------------------------------------------------
 # Management Groups  (Section 2)

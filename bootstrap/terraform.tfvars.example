@@ -34,7 +34,7 @@ ip_allow_list = [
 # ---------------------------------------------------------------------------
 
 # primary_location = "eastus2"
-# org_prefix       = "contoso"
+# org_prefix       = "globaris"
 # kv_soft_delete_retention_days = 90
 
 # tags = {

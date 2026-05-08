@@ -8,9 +8,9 @@
 # them from the known MG IDs in the architecture definition.
 
 output "management_group_ids" {
-  description = "Map of management group logical name to resource ID for all MGs in the Contoso hierarchy."
+  description = "Map of management group logical name to resource ID for all MGs in the Globaris hierarchy."
   value = {
-    contoso        = "/providers/Microsoft.Management/managementGroups/contoso"
+    globaris        = "/providers/Microsoft.Management/managementGroups/globaris"
     platform       = "/providers/Microsoft.Management/managementGroups/platform"
     management     = "/providers/Microsoft.Management/managementGroups/management"
     connectivity   = "/providers/Microsoft.Management/managementGroups/connectivity"

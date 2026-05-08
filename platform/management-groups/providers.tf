@@ -45,8 +45,8 @@ provider "alz" {
       ref  = "2026.01.3"
     },
     {
-      # Custom Contoso hierarchy — defines the contoso architecture,
-      # overriding root MG id "alz" with "contoso".
+      # Custom Globaris hierarchy — defines the globaris architecture,
+      # overriding root MG id "alz" with "globaris".
       custom_url = "${path.root}/lib"
     }
   ]

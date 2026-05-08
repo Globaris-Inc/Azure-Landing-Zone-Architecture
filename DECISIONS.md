@@ -37,7 +37,7 @@
 
 <!-- Newest at the top. -->
 
-### ADR-007: Custom Contoso root management group — override standard ALZ root id
+### ADR-007: Custom Globaris root management group — override standard ALZ root id
 
 - **Date:** 2026-05-06
 - **Section:** 2
@@ -45,17 +45,17 @@
 - **Decision makers:** claude (structural), user (naming)
 
 **Context:**
-The `avm-ptn-alz` module loads architecture definitions from the ALZ Library. The standard `alz` architecture uses root MG id `"alz"` and display name `"Azure Landing Zones"`. The POC uses `"Contoso"` as the organisation name, requiring a custom root MG id.
+The `avm-ptn-alz` module loads architecture definitions from the ALZ Library. The standard `alz` architecture uses root MG id `"alz"` and display name `"Azure Landing Zones"`. The POC uses `"Globaris"` as the organisation name, requiring a custom root MG id.
 
 **Decision:**
-Create `platform/management-groups/lib/contoso.alz_architecture_definition.json` — a custom architecture definition that retains all standard ALZ archetypes (root, platform, landing_zones, management, connectivity, identity, security, corp, online, decommissioned, sandbox) but sets root id `"contoso"` and display name `"Contoso"`. The custom lib directory is passed as a second `library_references` entry to the `alz` provider.
+Create `platform/management-groups/lib/globaris.alz_architecture_definition.json` — a custom architecture definition that retains all standard ALZ archetypes (root, platform, landing_zones, management, connectivity, identity, security, corp, online, decommissioned, sandbox) but sets root id `"globaris"` and display name `"Globaris"`. The custom lib directory is passed as a second `library_references` entry to the `alz` provider.
 
 **Alternatives considered:**
 - Use standard `alz` root MG id — rejected: produces `alz` in the Azure portal hierarchy, inconsistent with organisation branding and the expected demo narrative.
 - Rename via `azurerm_management_group` rename — rejected: the AVM module owns the lifecycle; external rename would create a state conflict.
 
 **Consequences:**
-- Positive: hierarchy displays as "Contoso" in Azure portal; consistent with all naming in `poc.tfvars` and `ARCHITECTURE.md`.
+- Positive: hierarchy displays as "Globaris" in Azure portal; consistent with all naming in `poc.tfvars` and `ARCHITECTURE.md`.
 - Negative: a custom lib file must be maintained alongside future ALZ Library updates.
 - Follow-ups: when upgrading ALZ Library ref, re-validate that standard archetype names have not changed.
 

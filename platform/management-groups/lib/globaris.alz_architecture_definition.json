@@ -1,10 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/Azure/Azure-Landing-Zones-Library/main/schemas/architecture_definition.json",
-  "name": "contoso",
+  "name": "globaris",
   "management_groups": [
     {
-      "id": "contoso",
-      "display_name": "Contoso",
+      "id": "globaris",
+      "display_name": "Globaris",
       "archetypes": ["root"],
       "parent_id": null,
       "exists": false
@@ -13,28 +13,28 @@
       "id": "platform",
       "display_name": "Platform",
       "archetypes": ["platform"],
-      "parent_id": "contoso",
+      "parent_id": "globaris",
       "exists": false
     },
     {
       "id": "landingzones",
       "display_name": "Landing Zones",
       "archetypes": ["landing_zones"],
-      "parent_id": "contoso",
+      "parent_id": "globaris",
       "exists": false
     },
     {
       "id": "decommissioned",
       "display_name": "Decommissioned",
       "archetypes": ["decommissioned"],
-      "parent_id": "contoso",
+      "parent_id": "globaris",
       "exists": false
     },
     {
       "id": "sandbox",
       "display_name": "Sandbox",
       "archetypes": ["sandbox"],
-      "parent_id": "contoso",
+      "parent_id": "globaris",
       "exists": false
     },
     {

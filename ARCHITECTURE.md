@@ -12,7 +12,7 @@
 ```mermaid
 graph TD
     TR[Tenant Root]
-    TR --> C[Contoso]
+    TR --> C[Globaris]
     C --> P[Platform]
     C --> LZ[Landing Zones]
     C --> D[Decommissioned]

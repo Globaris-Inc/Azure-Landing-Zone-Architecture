@@ -1,12 +1,12 @@
-# Purpose: Management Group hierarchy — calls avm-ptn-alz to create the Contoso MG tree
+# Purpose: Management Group hierarchy — calls avm-ptn-alz to create the Globaris MG tree
 #          and places all 5 POC subscriptions under their respective management groups.
 # Section: 2 — Management Group Hierarchy
 # Last updated: 2026-05-06
 #
-# Architecture (defined in lib/contoso.alz_architecture_definition.json):
+# Architecture (defined in lib/globaris.alz_architecture_definition.json):
 #
 #   Tenant Root Group
-#   └── Contoso                     (root — id: contoso)
+#   └── Globaris                     (root — id: globaris)
 #       ├── Platform                (id: platform)
 #       │   ├── Management          (id: management)   ← sub-management-poc-01
 #       │   ├── Connectivity        (id: connectivity) ← sub-connectivity-poc-01
@@ -32,12 +32,12 @@ module "alz_management_groups" {
   source  = "Azure/avm-ptn-alz/azurerm"
   version = "0.19.1"
 
-  # "contoso" matches the name field in contoso.alz_architecture_definition.json.
-  architecture_name = "contoso"
+  # "globaris" matches the name field in globaris.alz_architecture_definition.json.
+  architecture_name = "globaris"
 
   location = var.primary_location
 
-  # Parent of the Contoso root MG is the Tenant Root Group.
+  # Parent of the Globaris root MG is the Tenant Root Group.
   parent_resource_id = "/providers/Microsoft.Management/managementGroups/${data.azapi_client_config.current.tenant_id}"
 
   # Map each subscription to its target management group.

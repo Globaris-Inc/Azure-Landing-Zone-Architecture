@@ -21,7 +21,7 @@ variable "primary_location" {
 variable "org_prefix" {
   description = "Short organisation prefix used in resource names (lower-case, no spaces, max 8 chars)."
   type        = string
-  default     = "contoso"
+  default     = "globaris"
 
   validation {
     condition     = can(regex("^[a-z0-9]{1,8}$", var.org_prefix))
