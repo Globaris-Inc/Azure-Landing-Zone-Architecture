@@ -1,14 +1,16 @@
 # envs/poc.tfvars
-# Purpose: POC environment variable overrides — passed to all terraform apply invocations.
+# Purpose: POC environment variable overrides — non-sensitive config only.
 # Section: 1 (scaffold), populated incrementally through Section 13.
-# Last updated: 2026-05-06
+# Last updated: 2026-05-07
 #
-# Usage: terraform apply -var-file=../../envs/poc.tfvars
+# Usage:
+#   CI   — TF_VAR_* environment variables supply IDs from GitHub Actions secrets.
+#   Local — terraform apply -var-file=../../envs/poc.tfvars \
+#                           -var-file=../../envs/poc.secret.tfvars
 #
-# Subscription IDs and tenant IDs are non-sensitive identifiers (GUIDs visible in the
-# Azure portal) and are safe to commit. Only true secrets (client secrets, passwords,
-# SAS tokens, certificates) must be kept out of source control.
-# This file is safe to commit.
+# Tenant ID, subscription IDs, and other identifiers live in:
+#   - CI:    GitHub Actions secrets (TF_VAR_tenant_id, TF_VAR_*_subscription_id)
+#   - Local: envs/poc.secret.tfvars  (gitignored — see poc.secret.tfvars.example)
 
 # ---------------------------------------------------------------------------
 # Global / shared
@@ -28,29 +30,31 @@ org_prefix = "globaris"
 # ---------------------------------------------------------------------------
 # Management Groups  (Section 2)
 # ---------------------------------------------------------------------------
-
-tenant_id = "<tenant-id>"
-
-# Platform subscriptions (4 dedicated subs — ADR-003 Option C)
-connectivity_subscription_id = "<subscription-id>"
-management_subscription_id   = "<subscription-id>"
-identity_subscription_id     = "<subscription-id>"
-security_subscription_id     = "<subscription-id>"
-
-# Shared landing zone subscription — placed under Corp MG for POC
-landingzones_subscription_id = "<subscription-id>"
+# IDs supplied via GitHub Actions secrets in CI, or poc.secret.tfvars locally.
+# See: envs/poc.secret.tfvars.example
 
 # ---------------------------------------------------------------------------
 # FinOps / Tagging  (Section 7)
 # ---------------------------------------------------------------------------
 
-# default_tags = {
-#   Environment      = "poc"
-#   CostCenter       = "DEMO-9999"
-#   Owner            = "platform-team"
-#   BusinessUnit     = "Platform Engineering"
-#   DataClassification = "Internal"
-# }
+# Monthly budget cap (USD) per subscription. 5 subs × $200 = $1,000/mo ceiling.
+budget_amount_per_subscription = 200
+
+# Monthly budget cap (USD) at management group scope.
+budget_amount_per_mg = 600
+
+# Thresholds (%) at which alert emails fire. Must match across all modules.
+budget_alert_thresholds = [50, 75, 90, 100]
+
+# Budget and cost export start date — first of current month, RFC 3339.
+budget_start_date = "2026-05-01T00:00:00Z"
+
+# Cost export end date — set far enough in the future to cover the POC lifecycle.
+export_end_date = "2030-12-01T00:00:00Z"
+
+# Email addresses for budget threshold breach and cost anomaly alert notifications.
+# Supplied via TF_VAR_budget_alert_contact_emails in CI; set locally in poc.secret.tfvars.
+# budget_alert_contact_emails = ["<email-redacted>"]
 
 # ---------------------------------------------------------------------------
 # Platform components  (Section 8)

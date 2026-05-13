@@ -1,0 +1,98 @@
+# Purpose: Input variables for the Management platform root module.
+# Section: 7 — FinOps: Tagging & Budgets (initial); extended in Section 8.
+# Last updated: 2026-05-12
+
+variable "tenant_id" {
+  description = "Azure Active Directory tenant ID."
+  type        = string
+}
+
+variable "management_subscription_id" {
+  description = "Subscription ID for the Management platform subscription (sub-management-poc-01)."
+  type        = string
+}
+
+variable "connectivity_subscription_id" {
+  description = "Subscription ID for the Connectivity platform subscription."
+  type        = string
+}
+
+variable "identity_subscription_id" {
+  description = "Subscription ID for the Identity platform subscription."
+  type        = string
+}
+
+variable "security_subscription_id" {
+  description = "Subscription ID for the Security platform subscription."
+  type        = string
+}
+
+variable "landingzones_subscription_id" {
+  description = "Subscription ID for the Landing Zones subscription (corp + online workloads)."
+  type        = string
+}
+
+variable "primary_location" {
+  description = "Primary Azure region for resources that require a location."
+  type        = string
+  default     = "eastus2"
+}
+
+variable "org_prefix" {
+  description = "Short organisation identifier used in resource and policy naming (e.g. 'globaris')."
+  type        = string
+}
+
+variable "environment" {
+  description = "Deployment environment label used in resource names and tags (e.g. 'poc')."
+  type        = string
+  default     = "poc"
+}
+
+# ---------------------------------------------------------------------------
+# FinOps — Budgets
+# ---------------------------------------------------------------------------
+
+variable "budget_amount_per_subscription" {
+  description = "Monthly budget cap in USD applied to each of the five platform/LZ subscriptions."
+  type        = number
+  default     = 200
+}
+
+variable "budget_amount_per_mg" {
+  description = "Monthly budget cap in USD applied to management group scope budgets."
+  type        = number
+  default     = 600
+}
+
+variable "budget_alert_thresholds" {
+  description = "Percentage thresholds at which budget alert notifications fire."
+  type        = list(number)
+  default     = [50, 75, 90, 100]
+}
+
+variable "budget_alert_contact_emails" {
+  description = "Email addresses for budget threshold breach and cost anomaly alert notifications."
+  type        = list(string)
+}
+
+variable "budget_start_date" {
+  description = "Budget and cost export start date in RFC 3339 format. Must be the first of a month (e.g. 2026-05-01T00:00:00Z)."
+  type        = string
+}
+
+variable "export_end_date" {
+  description = "Cost export recurrence period end date in RFC 3339 format."
+  type        = string
+  default     = "2030-12-01T00:00:00Z"
+}
+
+# ---------------------------------------------------------------------------
+# Common
+# ---------------------------------------------------------------------------
+
+variable "tags" {
+  description = "Additional tags merged into all resources created by this module."
+  type        = map(string)
+  default     = {}
+}
