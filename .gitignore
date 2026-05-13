@@ -5,6 +5,7 @@
 *.tfvars
 !*.tfvars.example
 !envs/*.tfvars
+envs/poc.secret.tfvars
 # Bootstrap lock file not needed (one-time local apply — ADR-005).
 # Lock files for platform/ and landing-zones/ SHOULD be committed for reproducible CI.
 bootstrap/.terraform.lock.hcl
@@ -31,6 +32,9 @@ terraform.rc
 *.swp
 *.swo
 .DS_Store
+
+# Claude Code — memory and session state; not part of project source
+.claude/
 
 # Secrets — never commit
 *.pem

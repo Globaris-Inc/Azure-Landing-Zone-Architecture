@@ -36,12 +36,21 @@ permissions:
   contents: read
 
 # Common env block — all jobs inherit these.
+# ARM_* vars authenticate the azurerm provider via OIDC.
+# TF_VAR_* vars supply subscription IDs and tenant ID from GitHub Actions secrets.
+# Modules that don't declare a given variable silently ignore its TF_VAR_.
 env:
   ARM_USE_OIDC: "true"
   ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
   ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
   TF_VAR_FILE: "../../envs/poc.tfvars"
+  TF_VAR_tenant_id:                    ${{ secrets.AZURE_TENANT_ID }}
+  TF_VAR_management_subscription_id:   ${{ secrets.MANAGEMENT_SUBSCRIPTION_ID }}
+  TF_VAR_connectivity_subscription_id: ${{ secrets.CONNECTIVITY_SUBSCRIPTION_ID }}
+  TF_VAR_identity_subscription_id:     ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
+  TF_VAR_security_subscription_id:     ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
+  TF_VAR_landingzones_subscription_id: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
 
 jobs:
   # --------------------------------------------------------------------------

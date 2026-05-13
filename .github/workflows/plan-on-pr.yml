@@ -31,6 +31,17 @@ permissions:
   contents: read
   pull-requests: write  # required to post plan comments
 
+# Subscription IDs and tenant ID are stored as GitHub Actions secrets.
+# Terraform picks these up automatically via the TF_VAR_* convention.
+# Modules that don't declare a given variable silently ignore its TF_VAR_.
+env:
+  TF_VAR_tenant_id:                    ${{ secrets.AZURE_TENANT_ID }}
+  TF_VAR_management_subscription_id:   ${{ secrets.MANAGEMENT_SUBSCRIPTION_ID }}
+  TF_VAR_connectivity_subscription_id: ${{ secrets.CONNECTIVITY_SUBSCRIPTION_ID }}
+  TF_VAR_identity_subscription_id:     ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
+  TF_VAR_security_subscription_id:     ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
+  TF_VAR_landingzones_subscription_id: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
+
 jobs:
   plan:
     name: Plan — ${{ matrix.module }}
