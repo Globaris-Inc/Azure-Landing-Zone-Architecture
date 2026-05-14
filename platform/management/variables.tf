@@ -88,6 +88,22 @@ variable "export_end_date" {
 }
 
 # ---------------------------------------------------------------------------
+# Section 8 — Management Platform Monitoring
+# ---------------------------------------------------------------------------
+
+variable "platform_law_retention_days" {
+  description = "Log Analytics workspace data retention period in days (30–730). Section 8 baseline is 90."
+  type        = number
+  default     = 90
+}
+
+variable "platform_law_daily_quota_gb" {
+  description = "Daily ingestion quota in GB for the platform Log Analytics workspace. Null disables the cap."
+  type        = number
+  default     = null
+}
+
+# ---------------------------------------------------------------------------
 # Common
 # ---------------------------------------------------------------------------
 

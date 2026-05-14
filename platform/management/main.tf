@@ -84,6 +84,12 @@ locals {
     }
   }
 
+  # Deterministic workbook GUID for the platform overview workbook.
+  platform_workbook_id = lower(uuidv5("dns", "platform-overview.${var.org_prefix}"))
+
+  # Action group short_name is limited to 12 characters by Azure.
+  action_group_short_name = substr("plt-${var.org_prefix}", 0, 12)
+
   # Three management group scopes for MG-level budgets.
   mg_budget_scopes = {
     globaris = {
@@ -167,6 +173,9 @@ resource "azurerm_policy_set_definition" "tag_governance" {
   display_name = "${title(var.org_prefix)} — Tag Governance Initiative"
   description  = "Enforces 8 mandatory tags on every resource group (Modify) and propagates them to all child resources (Modify). Assigned at the Globaris root management group."
 
+  # DEVIATION: management_group_id is marked deprecated in azurerm ~>4.71 with no documented
+  # replacement. Policy set definitions must be scoped to a management group; this attribute
+  # is the only available mechanism in the current provider. Review when upgrading azurerm.
   management_group_id = local.globaris_mg_id
 
   # For each required tag: add or replace on the resource group (Modify, RG scope).
@@ -329,6 +338,166 @@ resource "azurerm_application_insights_workbook" "carbon_optimization" {
     ]
     isLocked            = false
     fallbackResourceIds = ["azure monitor"]
+  })
+
+  tags = local.common_tags
+}
+
+# ===========================================================================
+# Section 8 — Standard Platform Components: Management sub additions
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Resource Group — management platform monitoring/compute
+# ---------------------------------------------------------------------------
+
+resource "azurerm_resource_group" "management" {
+  name     = "rg-management-${var.org_prefix}-${var.environment}"
+  location = var.primary_location
+  tags     = local.common_tags
+}
+
+# ---------------------------------------------------------------------------
+# Platform Log Analytics Workspace — PerGB2018, 90-day retention
+# ---------------------------------------------------------------------------
+
+module "platform_law" {
+  source  = "Azure/avm-res-operationalinsights-workspace/azurerm"
+  version = "0.5.1"
+
+  name                = "law-platform-${var.org_prefix}-${var.environment}"
+  resource_group_name = azurerm_resource_group.management.name
+  location            = var.primary_location
+
+  log_analytics_workspace_sku               = "PerGB2018"
+  log_analytics_workspace_retention_in_days = var.platform_law_retention_days
+  log_analytics_workspace_daily_quota_gb    = var.platform_law_daily_quota_gb
+
+  tags = local.common_tags
+}
+
+# ---------------------------------------------------------------------------
+# Automation Account — Basic SKU; system-assigned identity for Update Manager
+# ---------------------------------------------------------------------------
+
+# DEVIATION: Using native azurerm_automation_account instead of
+# avm-res-automation-automationaccount v0.2.0; module interface not fully
+# verified against registry docs. Native resource is production-equivalent.
+resource "azurerm_automation_account" "platform" {
+  name                         = "aa-platform-${var.org_prefix}-${var.environment}"
+  resource_group_name          = azurerm_resource_group.management.name
+  location                     = var.primary_location
+  sku_name                     = "Basic"
+  local_authentication_enabled = false
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  tags = local.common_tags
+}
+
+# Link Automation Account diagnostics to the platform LA workspace.
+resource "azurerm_monitor_diagnostic_setting" "automation_account" {
+  name                       = "diag-aa-to-law"
+  target_resource_id         = azurerm_automation_account.platform.id
+  log_analytics_workspace_id = module.platform_law.resource_id
+
+  enabled_log {
+    category_group = "allLogs"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Monitor Action Group — platform alert notifications
+# ---------------------------------------------------------------------------
+
+resource "azurerm_monitor_action_group" "platform" {
+  name                = "ag-platform-${var.org_prefix}-${var.environment}"
+  resource_group_name = azurerm_resource_group.management.name
+  short_name          = local.action_group_short_name
+
+  dynamic "email_receiver" {
+    for_each = { for idx, addr in var.budget_alert_contact_emails : tostring(idx) => addr }
+    content {
+      name                    = "email-${email_receiver.key}"
+      email_address           = email_receiver.value
+      use_common_alert_schema = true
+    }
+  }
+
+  tags = local.common_tags
+}
+
+# ---------------------------------------------------------------------------
+# Platform Overview workbook (placeholder)
+# ---------------------------------------------------------------------------
+
+resource "azurerm_application_insights_workbook" "platform_overview" {
+  name                = local.platform_workbook_id
+  resource_group_name = azurerm_resource_group.management.name
+  location            = var.primary_location
+  display_name        = "Platform Overview — ${title(var.org_prefix)}"
+
+  data_json = jsonencode({
+    version = "Notebook/1.0"
+    items = [
+      {
+        type = 1
+        name = "text-placeholder"
+        content = {
+          json = "# Platform Overview\n\n**Action required:** Replace this placeholder with metric charts for the platform Log Analytics workspace, Automation Account, and cost alerts.\n\n## Quick links\n- Log Analytics workspace: `${module.platform_law.resource_id}`\n- Automation Account: `${azurerm_automation_account.platform.id}`\n- Action Group: `${azurerm_monitor_action_group.platform.id}`"
+        }
+      }
+    ]
+    isLocked            = false
+    fallbackResourceIds = ["azure monitor"]
+  })
+
+  tags = local.common_tags
+}
+
+# ---------------------------------------------------------------------------
+# Shared Portal Dashboard — platform summary
+# ---------------------------------------------------------------------------
+
+resource "azurerm_portal_dashboard" "platform" {
+  name                = "dash-platform-${var.org_prefix}-${var.environment}"
+  resource_group_name = azurerm_resource_group.management.name
+  location            = var.primary_location
+
+  dashboard_properties = jsonencode({
+    lenses = {
+      "0" = {
+        order = 0
+        parts = {
+          "0" = {
+            position = { x = 0, y = 0, colSpan = 12, rowSpan = 4 }
+            metadata = {
+              inputs = []
+              type   = "Extension/HubsExtension/PartType/MarkdownPart"
+              settings = {
+                content = {
+                  settings = {
+                    content  = "## ${title(var.org_prefix)} Platform Overview\n\nReplace with metric tiles for Log Analytics ingestion, Automation job status, and cost alerts."
+                    title    = "Platform Overview"
+                    subtitle = "${upper(var.environment)} — ${title(var.org_prefix)} ALZ POC"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    metadata = {
+      model = {
+        timeRange = {
+          value = { relative = { duration = 24, timeUnit = 1 } }
+          type  = "MsPortalFx.Composition.Configuration.ValueTypes.TimeRange"
+        }
+      }
+    }
   })
 
   tags = local.common_tags

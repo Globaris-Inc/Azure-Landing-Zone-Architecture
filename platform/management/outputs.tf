@@ -61,3 +61,67 @@ output "carbon_optimization_workbook_id" {
   description = "ARM resource ID of the Carbon Optimization Azure Monitor workbook."
   value       = azurerm_application_insights_workbook.carbon_optimization.id
 }
+
+# ---------------------------------------------------------------------------
+# Section 8 — Management sub monitoring outputs
+# ---------------------------------------------------------------------------
+
+output "platform_management_rg_name" {
+  description = "Name of the management platform resource group (holds LA workspace, Automation Account, etc.)."
+  value       = azurerm_resource_group.management.name
+}
+
+output "platform_management_rg_id" {
+  description = "ARM resource ID of the management platform resource group."
+  value       = azurerm_resource_group.management.id
+}
+
+output "platform_law_workspace_id" {
+  description = "ARM resource ID of the platform Log Analytics workspace. Used by Sentinel (Section 8 Batch 3) and Defender (Section 6)."
+  value       = module.platform_law.resource_id
+}
+
+output "platform_law_workspace_name" {
+  description = "Name of the platform Log Analytics workspace."
+  value       = module.platform_law.resource.name
+}
+
+output "platform_law_customer_id" {
+  description = "Workspace GUID (customer_id) of the platform Log Analytics workspace. Required for Sentinel onboarding."
+  value       = module.platform_law.resource.workspace_id
+}
+
+output "automation_account_id" {
+  description = "ARM resource ID of the platform Automation Account."
+  value       = azurerm_automation_account.platform.id
+}
+
+output "automation_account_name" {
+  description = "Name of the platform Automation Account."
+  value       = azurerm_automation_account.platform.name
+}
+
+output "automation_account_principal_id" {
+  description = "Object ID of the system-assigned managed identity on the Automation Account."
+  value       = azurerm_automation_account.platform.identity[0].principal_id
+}
+
+output "platform_action_group_id" {
+  description = "ARM resource ID of the platform Monitor Action Group."
+  value       = azurerm_monitor_action_group.platform.id
+}
+
+output "platform_action_group_name" {
+  description = "Name of the platform Monitor Action Group."
+  value       = azurerm_monitor_action_group.platform.name
+}
+
+output "platform_overview_workbook_id" {
+  description = "ARM resource ID of the Platform Overview Azure Monitor workbook."
+  value       = azurerm_application_insights_workbook.platform_overview.id
+}
+
+output "platform_dashboard_id" {
+  description = "ARM resource ID of the shared platform portal dashboard."
+  value       = azurerm_portal_dashboard.platform.id
+}
