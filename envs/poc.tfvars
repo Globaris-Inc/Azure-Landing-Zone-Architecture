@@ -60,20 +60,20 @@ export_end_date = "2030-12-01T00:00:00Z"
 # Platform components  (Section 8)
 # ---------------------------------------------------------------------------
 
-# enable_ddos_standard = false   # DDoS Standard ~$2,944/mo — disabled for POC cost
+enable_ddos_standard = false   # DDoS Standard ~$2,944/mo — disabled for POC cost
 
 # ---------------------------------------------------------------------------
 # Identity  (Section 8)
 # ---------------------------------------------------------------------------
 
-# identity_mode = "none"   # Options: "dc_vms" | "aadds" | "none"
+identity_mode = "none"   # Options: "dc_vms" | "aadds" | "none"
 
 # ---------------------------------------------------------------------------
 # DR / Networking  (Section 3)
 # ---------------------------------------------------------------------------
 
-# hub_primary_address_space   = "10.0.0.0/16"
-# hub_secondary_address_space = "10.1.0.0/16"
+hub_primary_address_space   = "10.0.0.0/16"
+hub_secondary_address_space = "10.1.0.0/16"
 
 # ---------------------------------------------------------------------------
 # Synthetic workload  (Section 13)
