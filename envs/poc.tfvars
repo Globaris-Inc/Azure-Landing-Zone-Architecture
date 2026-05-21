@@ -76,6 +76,50 @@ hub_primary_address_space   = "10.0.0.0/16"
 hub_secondary_address_space = "10.1.0.0/16"
 
 # ---------------------------------------------------------------------------
+# Landing Zone Spokes  (Section 9)
+# ---------------------------------------------------------------------------
+
+# Spoke VNet CIDR allocations — non-overlapping with hubs (10.0/16, 10.1/16)
+# and with each other.
+corp_a1_spoke_address_space  = "10.10.0.0/16"
+corp_a2_spoke_address_space  = "10.11.0.0/16"
+online_p1_spoke_address_space = "10.20.0.0/16"
+
+# App Service Plan SKU — B2 for POC (2 vCores, 3.5 GB RAM, Linux).
+# Upgrade to P1v3 for production-like performance testing.
+app_service_sku = "B2"
+
+# Recovery Services Vault — GeoRedundant ensures DR data survives region failure.
+rsv_geo_redundant = true
+
+# WAF mode — Prevention blocks malicious requests; Detection only logs them.
+waf_mode = "Prevention"
+
+# App Gateway capacity — minimum 1 for POC; increase for load testing.
+appgw_capacity = 1
+
+# Hub VNet IDs + Firewall IPs — populate from `terraform output` in platform/connectivity
+# after that module is applied. Values look like:
+#   /subscriptions/<conn-sub>/resourceGroups/rg-connectivity-primary-.../providers/Microsoft.Network/virtualNetworks/vnet-hub-primary-...
+#
+# primary_hub_vnet_id         = "TODO: from platform/connectivity output primary_hub_vnet_id"
+# primary_hub_vnet_name       = "TODO: from platform/connectivity output primary_hub_vnet_name"
+# primary_hub_rg_name         = "TODO: rg-connectivity-primary-globaris-poc"
+# primary_firewall_private_ip  = "TODO: from platform/connectivity output primary_firewall_private_ip"
+# secondary_hub_vnet_id        = "TODO: from platform/connectivity output secondary_hub_vnet_id"
+# secondary_hub_vnet_name      = "TODO: from platform/connectivity output secondary_hub_vnet_name"
+# secondary_hub_rg_name        = "TODO: rg-connectivity-secondary-globaris-poc"
+# secondary_firewall_private_ip = "TODO: from platform/connectivity output secondary_firewall_private_ip"
+
+# Platform LA workspace ID — populate from `terraform output` in platform/management.
+# platform_law_workspace_id = "TODO: from platform/management output platform_law_workspace_id"
+# platform_action_group_id  = "TODO: from platform/management output platform_action_group_id"
+
+# SQL Entra admin — set in poc.secret.tfvars (not committed).
+# sql_aad_admin_object_id = "TODO"
+# sql_aad_admin_login     = "TODO"
+
+# ---------------------------------------------------------------------------
 # Synthetic workload  (Section 13)
 # ---------------------------------------------------------------------------
 

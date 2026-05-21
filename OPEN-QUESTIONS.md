@@ -65,6 +65,8 @@ PROMPT.md Section 8 leaves this as a `var.identity_mode` toggle. For the POC def
 - B: Microsoft Entra Domain Services (~$110/mo, less to manage, less to demo)
 - C: Skip entirely for POC, leave the variable but default to `none`
 
+**RESOLVED 2026-05-14:** Option C — `identity_mode = "none"`. Identity sub not built; `platform/identity/` left as scaffold only. No impact on Section 9 (spokes do not require domain services).
+
 ---
 
 ### OQ-003: Domain name(s) for the POC
