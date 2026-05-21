@@ -51,6 +51,25 @@ env:
   TF_VAR_identity_subscription_id:     ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
   TF_VAR_security_subscription_id:     ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
   TF_VAR_landingzones_subscription_id: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
+  # Section 8 — Security
+  TF_VAR_terraform_sp_object_id:       ${{ secrets.TERRAFORM_SP_OBJECT_ID }}
+  TF_VAR_security_contact_email:       ${{ secrets.SECURITY_CONTACT_EMAIL }}
+  TF_VAR_budget_alert_contact_emails:  '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
+  # Section 9 — Landing Zone cross-module values (populate after first connectivity apply)
+  TF_VAR_primary_hub_vnet_id:          ${{ secrets.PRIMARY_HUB_VNET_ID }}
+  TF_VAR_primary_hub_vnet_name:        ${{ secrets.PRIMARY_HUB_VNET_NAME }}
+  TF_VAR_primary_hub_rg_name:          ${{ secrets.PRIMARY_HUB_RG_NAME }}
+  TF_VAR_primary_firewall_private_ip:  ${{ secrets.PRIMARY_FIREWALL_PRIVATE_IP }}
+  TF_VAR_secondary_hub_vnet_id:        ${{ secrets.SECONDARY_HUB_VNET_ID }}
+  TF_VAR_secondary_hub_vnet_name:      ${{ secrets.SECONDARY_HUB_VNET_NAME }}
+  TF_VAR_secondary_hub_rg_name:        ${{ secrets.SECONDARY_HUB_RG_NAME }}
+  TF_VAR_secondary_firewall_private_ip: ${{ secrets.SECONDARY_FIREWALL_PRIVATE_IP }}
+  TF_VAR_platform_law_workspace_id:    ${{ secrets.PLATFORM_LAW_WORKSPACE_ID }}
+  TF_VAR_platform_action_group_id:     ${{ secrets.PLATFORM_ACTION_GROUP_ID }}
+  TF_VAR_sql_aad_admin_object_id:      ${{ secrets.SQL_AAD_ADMIN_OBJECT_ID }}
+  TF_VAR_sql_aad_admin_login:          ${{ secrets.SQL_AAD_ADMIN_LOGIN }}
+  # Section 4 — Private DNS + NSG flow logs
+  TF_VAR_platform_law_customer_id:     ${{ secrets.PLATFORM_LAW_CUSTOMER_ID }}
 
 jobs:
   # --------------------------------------------------------------------------
