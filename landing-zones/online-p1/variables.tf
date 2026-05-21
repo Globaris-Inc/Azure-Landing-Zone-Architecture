@@ -89,6 +89,15 @@ variable "waf_mode" {
 }
 
 # ---------------------------------------------------------------------------
+# Private DNS (Section 4)
+# ---------------------------------------------------------------------------
+
+variable "private_dns_rg_name" {
+  description = "Name of the resource group in the Connectivity subscription that holds all Private Link DNS zones. From platform/connectivity output 'private_dns_rg_name'."
+  type        = string
+}
+
+# ---------------------------------------------------------------------------
 # Observability
 # ---------------------------------------------------------------------------
 
@@ -97,9 +106,20 @@ variable "platform_law_workspace_id" {
   type        = string
 }
 
+variable "platform_law_customer_id" {
+  description = "GUID (customer ID) of the platform Log Analytics workspace. Required for Traffic Analytics in NSG flow logs."
+  type        = string
+}
+
 variable "platform_action_group_id" {
   description = "ARM resource ID of the platform Monitor Action Group."
   type        = string
+}
+
+variable "flow_log_retention_days" {
+  description = "Number of days to retain NSG flow log data in the storage account."
+  type        = number
+  default     = 7
 }
 
 # ---------------------------------------------------------------------------

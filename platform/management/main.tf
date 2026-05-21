@@ -502,3 +502,51 @@ resource "azurerm_portal_dashboard" "platform" {
 
   tags = local.common_tags
 }
+
+# ===========================================================================
+# Section 4 — Private Endpoints + Private DNS: Deny public network access
+# ===========================================================================
+#
+# Custom policy initiative assigned at the Landing Zones management group.
+# Denies creation of SQL Servers, Key Vaults, and Storage Accounts with
+# public network access enabled. Azure Policy Deny effect prevents the
+# resource from being created or updated to a non-compliant state.
+#
+# Built-in policy definition IDs (confirmed on azadvertizer.net 2026-05-21):
+#   1b8ca024-1d5c-4dec-8995-b1a932b41780  "Deny public access for Azure SQL DB"
+#   405c5871-3e91-4644-8a63-58ad8008cbe8  "Azure Key Vault should disable public network access"
+#   34c877ad-507e-4c82-993e-3452a6e0ad3c  "Storage accounts should restrict network access"
+
+resource "azurerm_policy_set_definition" "deny_public_network_access" {
+  name         = "deny-public-network-access-${var.org_prefix}"
+  policy_type  = "Custom"
+  display_name = "${title(var.org_prefix)} — Deny Public Network Access"
+  description  = "Denies enabling public network access on Azure SQL, Key Vault, and Storage in the Landing Zones management group. Enforces private-endpoint-only connectivity."
+
+  management_group_id = local.landingzones_mg_id
+
+  policy_definition_reference {
+    policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/1b8ca024-1d5c-4dec-8995-b1a932b41780"
+    reference_id         = "deny-public-access-sql"
+  }
+
+  policy_definition_reference {
+    policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/405c5871-3e91-4644-8a63-58ad8008cbe8"
+    reference_id         = "deny-public-access-keyvault"
+  }
+
+  policy_definition_reference {
+    policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/34c877ad-507e-4c82-993e-3452a6e0ad3c"
+    reference_id         = "deny-public-access-storage"
+  }
+}
+
+resource "azurerm_management_group_policy_assignment" "deny_public_network_access" {
+  name                 = "deny-pub-net-${var.org_prefix}"
+  management_group_id  = local.landingzones_mg_id
+  policy_definition_id = azurerm_policy_set_definition.deny_public_network_access.id
+  display_name         = "Deny Public Network Access — ${title(var.org_prefix)} Landing Zones"
+  description          = "Enforces private-endpoint-only access for SQL, Key Vault, and Storage in all landing zone subscriptions."
+
+  depends_on = [azurerm_policy_set_definition.deny_public_network_access]
+}

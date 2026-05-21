@@ -60,13 +60,13 @@ export_end_date = "2030-12-01T00:00:00Z"
 # Platform components  (Section 8)
 # ---------------------------------------------------------------------------
 
-enable_ddos_standard = false   # DDoS Standard ~$2,944/mo — disabled for POC cost
+enable_ddos_standard = false # DDoS Standard ~$2,944/mo — disabled for POC cost
 
 # ---------------------------------------------------------------------------
 # Identity  (Section 8)
 # ---------------------------------------------------------------------------
 
-identity_mode = "none"   # Options: "dc_vms" | "aadds" | "none"
+identity_mode = "none" # Options: "dc_vms" | "aadds" | "none"
 
 # ---------------------------------------------------------------------------
 # DR / Networking  (Section 3)
@@ -81,8 +81,8 @@ hub_secondary_address_space = "10.1.0.0/16"
 
 # Spoke VNet CIDR allocations — non-overlapping with hubs (10.0/16, 10.1/16)
 # and with each other.
-corp_a1_spoke_address_space  = "10.10.0.0/16"
-corp_a2_spoke_address_space  = "10.11.0.0/16"
+corp_a1_spoke_address_space   = "10.10.0.0/16"
+corp_a2_spoke_address_space   = "10.11.0.0/16"
 online_p1_spoke_address_space = "10.20.0.0/16"
 
 # App Service Plan SKU — B2 for POC (2 vCores, 3.5 GB RAM, Linux).
@@ -118,6 +118,25 @@ appgw_capacity = 1
 # SQL Entra admin — set in poc.secret.tfvars (not committed).
 # sql_aad_admin_object_id = "TODO"
 # sql_aad_admin_login     = "TODO"
+
+# ---------------------------------------------------------------------------
+# Private DNS + NSG Flow Logs  (Section 4)
+# ---------------------------------------------------------------------------
+
+# Days to retain NSG flow log data in the landing zone storage accounts.
+# Increase to 30 for production-grade forensic retention.
+flow_log_retention_days = 7
+
+# Private DNS RG name — deterministic; matches the name built in platform/connectivity/dns.tf.
+private_dns_rg_name = "rg-dns-globaris-poc"
+
+# platform_law_customer_id is the LA workspace GUID (not the ARM resource ID).
+# Get it with: az monitor log-analytics workspace show \
+#   --resource-group rg-management-globaris-poc \
+#   --workspace-name law-platform-globaris-poc \
+#   --query customerId -o tsv
+# Set this in poc.secret.tfvars (not here — it's a workspace GUID, not a secret
+# but keep it out of the non-secret file to avoid confusion).
 
 # ---------------------------------------------------------------------------
 # Synthetic workload  (Section 13)

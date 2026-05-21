@@ -73,3 +73,17 @@ output "primary_dns_resolver_inbound_ips" {
   description = "IP address(es) of the primary hub DNS Private Resolver inbound endpoint. Configure as DNS server in spoke VNets."
   value       = module.hub_and_spoke.dns_resolver_inbound_endpoint_ip_addresses["primary"]
 }
+
+# ---------------------------------------------------------------------------
+# Section 4 — Private DNS outputs consumed by landing zone dns_links.tf files
+# ---------------------------------------------------------------------------
+
+output "private_dns_rg_name" {
+  description = "Name of the resource group holding all Private Link DNS zones. Passed to spoke landing zones so they can look up zone IDs via data sources."
+  value       = azurerm_resource_group.dns.name
+}
+
+output "private_dns_zone_ids" {
+  description = "Map of private DNS zone name → ARM resource ID. Populated after dns.tf apply. Consumed by spoke landing zones for private_dns_zone_group blocks."
+  value       = module.private_dns_zones.private_dns_zone_resource_ids
+}
