@@ -10,7 +10,7 @@
 output "management_group_ids" {
   description = "Map of management group logical name to resource ID for all MGs in the Globaris hierarchy."
   value = {
-    globaris        = "/providers/Microsoft.Management/managementGroups/globaris"
+    globaris       = "/providers/Microsoft.Management/managementGroups/globaris"
     platform       = "/providers/Microsoft.Management/managementGroups/platform"
     management     = "/providers/Microsoft.Management/managementGroups/management"
     connectivity   = "/providers/Microsoft.Management/managementGroups/connectivity"

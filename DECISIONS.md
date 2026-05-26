@@ -37,6 +37,31 @@
 
 <!-- Newest at the top. -->
 
+### ADR-009: Firewall Policy hierarchy — independent policies per hub (no shared parent for POC)
+
+- **Date:** 2026-05-21
+- **Section:** 3 — Multi-Region DR Topology
+- **Status:** Accepted
+- **Decision makers:** claude
+
+**Context:**
+PROMPT.md §3 requires a shared Azure Firewall Policy with a parent policy in the primary hub and a child policy in the secondary hub (inheriting via `base_policy_id`). The hub VNets are deployed via `Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet/azurerm` v0.17.1, which creates firewall policies internally and does not expose a `base_policy_id` input in the `firewall_policy` configuration block.
+
+**Decision:**
+Each hub has an independent Azure Firewall Premium policy with identical configuration (IDPS Alert mode). A shared parent policy is not implemented for the POC. This is documented as a DEVIATION in `platform/connectivity/dr.tf`.
+
+**Alternatives considered:**
+- Fork the hub module to expose `base_policy_id` — rejected; forking AVM modules breaks the upgrade path and adds maintenance burden for a POC.
+- Migrate firewall policies to standalone `azurerm_firewall_policy` resources outside the module, then link via `base_policy_id` — valid production path; deferred to Section 12 hardening because it requires refactoring the hub module invocation.
+- Create a disconnected parent policy resource — rejected; dead code that isn't wired to anything is misleading in a demo context.
+
+**Consequences:**
+- Positive: Hub module stays unmodified; upgrade path to newer AVM versions preserved.
+- Negative: Rule changes must be applied to both hub policies independently until production path is taken.
+- Follow-ups: Section 12 should migrate firewall policies out of the hub module and establish the parent/child hierarchy.
+
+---
+
 ### ADR-008: Tag governance via built-in Azure Policy Modify initiatives (no AVM, no custom policy JSON)
 
 - **Date:** 2026-05-12
