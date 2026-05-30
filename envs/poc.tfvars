@@ -139,6 +139,20 @@ private_dns_rg_name = "rg-dns-globaris-poc"
 # but keep it out of the non-secret file to avoid confusion).
 
 # ---------------------------------------------------------------------------
+# Zero Trust + Conditional Access  (Section 5)
+# ---------------------------------------------------------------------------
+
+# Conditional Access policy state.
+# "enabledForReportingButNotEnforced" = report-only (safe default for POC).
+# Switch to "enabled" once break-glass accounts are confirmed and tested.
+# Valid values: enabled | disabled | enabledForReportingButNotEnforced
+ca_policy_state = "enabledForReportingButNotEnforced"
+
+# Two-letter ISO 3166-1 country codes that are permitted sign-in locations.
+# Sign-ins from all other countries are blocked by CA-005.
+approved_sign_in_countries = ["US", "CA", "GB"]
+
+# ---------------------------------------------------------------------------
 # Synthetic workload  (Section 13)
 # ---------------------------------------------------------------------------
 

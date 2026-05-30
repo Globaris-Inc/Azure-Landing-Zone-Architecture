@@ -1,0 +1,297 @@
+# Purpose: Zero Trust baseline — Conditional Access policies and Identity Protection.
+# Section: 5 — Zero Trust + Conditional Access
+# Last updated: 2026-05-26
+#
+# Policies deployed (all start in Report-only mode via var.ca_policy_state):
+#   CA-001  Require MFA for all admin roles
+#   CA-002  Block legacy authentication protocols
+#   CA-003  Require compliant or hybrid-joined device for Azure portal + management API
+#   CA-004  Require phishing-resistant MFA when activating roles via PIM
+#   CA-005  Geo-block — deny sign-ins from outside approved countries
+#   CA-006  Sign-in frequency 4 h for admin roles on management applications
+#   CA-007  Block access on high user risk (Identity Protection integration)
+#   CA-008  Require MFA on medium/high sign-in risk (Identity Protection integration)
+#
+# Break-glass exclusion: var.break_glass_group_object_id is excluded from every
+# policy. Set this to a real emergency-access group before enabling policies.
+#
+# Well-known App IDs (stable across tenants, published by Microsoft):
+#   Azure portal:              c44b4083-3bb0-49c1-b47d-974e53cbdf3c
+#   Microsoft Azure Mgmt API:  797f4846-ba00-4fd7-ba43-dac1f8f63013
+#
+# Admin role template IDs (stable across tenants — confirmed on
+# learn.microsoft.com/en-us/entra/identity/role-based-access-control/permissions-reference):
+
+locals {
+  # Break-glass exclusion list — empty list if no group configured.
+  bg_group = compact([var.break_glass_group_object_id])
+
+  # Entra ID directory role template IDs for privileged admin roles.
+  admin_role_template_ids = [
+    "62e90394-69f5-4237-9190-012177145e10", # Global Administrator
+    "e8611ab8-c189-46e8-94e1-60213ab1f814", # Privileged Role Administrator
+    "194ae4cb-b126-40b2-bd5b-6091b380977d", # Security Administrator
+    "fe930be7-5e62-47db-91af-98c3a49a38b1", # User Administrator
+    "c4e39bd9-1100-46d3-8c65-fb160da0071f", # Authentication Administrator
+    "9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3", # Application Administrator
+    "158c047a-c907-4556-b7ef-446551a6b5f7", # Cloud Application Administrator
+    "29232cdf-9323-42fd-abe5-b6e039f7c0d5", # Exchange Administrator
+    "f28a1f50-f6e7-4571-818b-6a12f2af6b6c", # SharePoint Administrator
+    "69091246-20e8-4a56-aa4d-066075b2a7a8", # Teams Administrator
+    "17315797-102d-40b4-93e0-432062caca18", # Compliance Administrator
+    "b0f54661-2d74-4c50-afa3-1ec803f12efa", # Billing Administrator
+    "966707d0-3269-4727-9be2-8c3a10f19b9d", # Password Administrator
+    "17315797-102d-40b4-93e0-432062caca18", # Compliance Data Administrator (same template)
+  ]
+
+  # Azure management app IDs targeted by device compliance + sign-in frequency policies.
+  azure_management_app_ids = [
+    "c44b4083-3bb0-49c1-b47d-974e53cbdf3c", # Azure portal
+    "797f4846-ba00-4fd7-ba43-dac1f8f63013", # Microsoft Azure Management (REST API)
+  ]
+}
+
+# ---------------------------------------------------------------------------
+# Named Location — Approved Countries (geo-block allowlist)
+# ---------------------------------------------------------------------------
+
+resource "azuread_named_location" "approved_countries" {
+  display_name = "Approved Sign-in Countries — ${title(var.org_prefix)}"
+
+  country {
+    countries_and_regions                 = var.approved_sign_in_countries
+    include_unknown_countries_and_regions = false
+  }
+}
+
+# ---------------------------------------------------------------------------
+# CA-001: Require MFA for all admin roles
+# ---------------------------------------------------------------------------
+
+resource "azuread_conditional_access_policy" "require_mfa_admins" {
+  display_name = "CA-001 [${upper(var.org_prefix)}] Require MFA — Admin Roles"
+  state        = var.ca_policy_state
+
+  conditions {
+    client_app_types = ["all"]
+
+    applications {
+      included_applications = ["All"]
+    }
+
+    users {
+      included_roles  = local.admin_role_template_ids
+      excluded_groups = local.bg_group
+    }
+  }
+
+  grant_controls {
+    operator          = "OR"
+    built_in_controls = ["mfa"]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# CA-002: Block legacy authentication protocols
+# Legacy clients (Exchange ActiveSync, IMAP, POP3, SMTP AUTH) bypass MFA.
+# ---------------------------------------------------------------------------
+
+resource "azuread_conditional_access_policy" "block_legacy_auth" {
+  display_name = "CA-002 [${upper(var.org_prefix)}] Block Legacy Authentication"
+  state        = var.ca_policy_state
+
+  conditions {
+    client_app_types = ["exchangeActiveSync", "other"]
+
+    applications {
+      included_applications = ["All"]
+    }
+
+    users {
+      included_users  = ["All"]
+      excluded_groups = local.bg_group
+    }
+  }
+
+  grant_controls {
+    operator          = "OR"
+    built_in_controls = ["block"]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# CA-003: Require compliant or hybrid-joined device for Azure portal + mgmt API
+# ---------------------------------------------------------------------------
+
+resource "azuread_conditional_access_policy" "require_compliant_device_portal" {
+  display_name = "CA-003 [${upper(var.org_prefix)}] Compliant Device — Azure Portal + Mgmt API"
+  state        = var.ca_policy_state
+
+  conditions {
+    client_app_types = ["all"]
+
+    applications {
+      included_applications = local.azure_management_app_ids
+    }
+
+    users {
+      included_users  = ["All"]
+      excluded_groups = local.bg_group
+    }
+  }
+
+  grant_controls {
+    operator          = "OR"
+    built_in_controls = ["compliantDevice", "domainJoinedDevice"]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# CA-004: Require phishing-resistant MFA for PIM role activation
+#
+# DEVIATION: The azuread provider does not expose authentication_strength_policy_id
+# on the built-in "Phishing-resistant MFA" strength without creating a custom
+# authentication strength resource. Using standard MFA here as the grant control.
+# Production path: create azuread_authentication_strength_policy with
+# allowed_combinations = ["fido2", "windowsHelloForBusiness", "x509CertificateMultiFactor"]
+# and reference it via grant_controls.authentication_strength_policy_id.
+# ---------------------------------------------------------------------------
+
+resource "azuread_conditional_access_policy" "phishing_resistant_mfa_pim" {
+  display_name = "CA-004 [${upper(var.org_prefix)}] Require MFA — PIM Role Activation (phishing-resistant in prod)"
+  state        = var.ca_policy_state
+
+  conditions {
+    client_app_types = ["all"]
+
+    applications {
+      included_applications = local.azure_management_app_ids
+    }
+
+    users {
+      included_roles  = local.admin_role_template_ids
+      excluded_groups = local.bg_group
+    }
+  }
+
+  grant_controls {
+    operator          = "OR"
+    built_in_controls = ["mfa"]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# CA-005: Geo-block — deny sign-ins from outside approved countries
+# ---------------------------------------------------------------------------
+
+resource "azuread_conditional_access_policy" "geo_block" {
+  display_name = "CA-005 [${upper(var.org_prefix)}] Geo-Block — Outside Approved Countries"
+  state        = var.ca_policy_state
+
+  conditions {
+    client_app_types = ["all"]
+
+    applications {
+      included_applications = ["All"]
+    }
+
+    users {
+      included_users  = ["All"]
+      excluded_groups = local.bg_group
+    }
+
+    locations {
+      included_locations = ["All"]
+      excluded_locations = [azuread_named_location.approved_countries.id]
+    }
+  }
+
+  grant_controls {
+    operator          = "OR"
+    built_in_controls = ["block"]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# CA-006: Enforce sign-in frequency of 4 hours for admin roles on mgmt apps
+# ---------------------------------------------------------------------------
+
+resource "azuread_conditional_access_policy" "signin_frequency_admins" {
+  display_name = "CA-006 [${upper(var.org_prefix)}] Sign-in Frequency 4h — Admin Roles on Mgmt Apps"
+  state        = var.ca_policy_state
+
+  conditions {
+    client_app_types = ["browser", "mobileAppsAndDesktopClients"]
+
+    applications {
+      included_applications = local.azure_management_app_ids
+    }
+
+    users {
+      included_roles  = local.admin_role_template_ids
+      excluded_groups = local.bg_group
+    }
+  }
+
+  session_controls {
+    sign_in_frequency        = 4
+    sign_in_frequency_period = "hours"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# CA-007: Block access on high user risk (Entra ID Protection integration)
+# Requires Entra ID P2. In report-only mode, this logs but does not block.
+# ---------------------------------------------------------------------------
+
+resource "azuread_conditional_access_policy" "block_high_user_risk" {
+  display_name = "CA-007 [${upper(var.org_prefix)}] Block — High User Risk"
+  state        = var.ca_policy_state
+
+  conditions {
+    client_app_types = ["all"]
+    user_risk_levels = ["high"]
+
+    applications {
+      included_applications = ["All"]
+    }
+
+    users {
+      included_users  = ["All"]
+      excluded_groups = local.bg_group
+    }
+  }
+
+  grant_controls {
+    operator          = "OR"
+    built_in_controls = ["block"]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# CA-008: Require MFA on medium or high sign-in risk
+# ---------------------------------------------------------------------------
+
+resource "azuread_conditional_access_policy" "mfa_signin_risk" {
+  display_name = "CA-008 [${upper(var.org_prefix)}] Require MFA — Medium/High Sign-in Risk"
+  state        = var.ca_policy_state
+
+  conditions {
+    client_app_types    = ["all"]
+    sign_in_risk_levels = ["medium", "high"]
+
+    applications {
+      included_applications = ["All"]
+    }
+
+    users {
+      included_users  = ["All"]
+      excluded_groups = local.bg_group
+    }
+  }
+
+  grant_controls {
+    operator          = "OR"
+    built_in_controls = ["mfa"]
+  }
+}
