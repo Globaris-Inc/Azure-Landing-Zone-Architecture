@@ -60,6 +60,10 @@ env:
   TF_VAR_sql_aad_admin_login:          ${{ secrets.SQL_AAD_ADMIN_LOGIN }}
   # Section 4 — Private DNS + NSG flow logs
   TF_VAR_platform_law_customer_id:     ${{ secrets.PLATFORM_LAW_CUSTOMER_ID }}
+  # Section 5 — Zero Trust + Conditional Access
+  TF_VAR_break_glass_group_object_id:      ${{ secrets.BREAK_GLASS_GROUP_OBJECT_ID }}
+  TF_VAR_pim_privileged_group_object_id:   ${{ secrets.PIM_PRIVILEGED_GROUP_OBJECT_ID }}
+  TF_VAR_pim_approver_group_object_id:     ${{ secrets.PIM_APPROVER_GROUP_OBJECT_ID }}
 
 jobs:
   plan:
