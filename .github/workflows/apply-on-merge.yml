@@ -74,6 +74,8 @@ env:
   TF_VAR_break_glass_group_object_id:      ${{ secrets.BREAK_GLASS_GROUP_OBJECT_ID }}
   TF_VAR_pim_privileged_group_object_id:   ${{ secrets.PIM_PRIVILEGED_GROUP_OBJECT_ID }}
   TF_VAR_pim_approver_group_object_id:     ${{ secrets.PIM_APPROVER_GROUP_OBJECT_ID }}
+  # Section 6 — Defender for Cloud + Sentinel
+  TF_VAR_sentinel_owner_group_object_id:   ${{ secrets.SENTINEL_OWNER_GROUP_OBJECT_ID }}
 
 jobs:
   # --------------------------------------------------------------------------
@@ -233,7 +235,9 @@ jobs:
             -input=false
 
   # --------------------------------------------------------------------------
-  # 4. Security (Sentinel) — depends on Management (LA workspace must exist)
+  # 4. Security (Sentinel) — Section 6 extends with regulatory compliance
+  #    policy assignments at root MG scope. apply-management transitively
+  #    requires apply-management-groups, so root MG existence is satisfied.
   # --------------------------------------------------------------------------
   apply-security:
     name: Apply — platform/security
