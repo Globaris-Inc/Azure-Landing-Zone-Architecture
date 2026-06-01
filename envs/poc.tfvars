@@ -153,6 +153,36 @@ ca_policy_state = "enabledForReportingButNotEnforced"
 approved_sign_in_countries = ["US", "CA", "GB"]
 
 # ---------------------------------------------------------------------------
+# Defender for Cloud + Sentinel  (Section 6)
+# ---------------------------------------------------------------------------
+
+# Globaris root MG ARM resource ID — scope of the NIST + CIS compliance assignments.
+root_management_group_id = "/providers/Microsoft.Management/managementGroups/globaris"
+
+# Assign the NIST SP 800-53 R5 + CIS Azure Foundations 2.0 built-in policy
+# initiatives at the root MG scope. Disable for the very first apply if the
+# OIDC SP doesn't yet hold Resource Policy Contributor at MG scope.
+enable_regulatory_compliance = true
+
+# Stream MDC alerts / recommendations / assessments to an Event Hub alongside
+# the Security LA workspace, enabling downstream SIEMs (Splunk, Elastic) to
+# consume the same stream without re-querying the workspace.
+enable_mdc_event_hub_export  = true
+event_hub_namespace_capacity = 1 # 1 TU = 1 MB/s ingress (~2.5 GB/day)
+
+# Pipe Entra ID + Security-sub Activity logs into the Security LA workspace.
+enable_aad_diagnostics           = true
+enable_subscription_activity_log = true
+
+# Enable Sentinel UEBA + Entity Analytics. ~7 days of data needed before
+# behaviour baselines stabilise.
+enable_ueba = true
+
+# Default scheduled-rule cadence. Per-rule overrides live in sentinel.tf.
+analytics_rule_lookback_minutes        = 60
+analytics_rule_query_frequency_minutes = 60
+
+# ---------------------------------------------------------------------------
 # Synthetic workload  (Section 13)
 # ---------------------------------------------------------------------------
 
