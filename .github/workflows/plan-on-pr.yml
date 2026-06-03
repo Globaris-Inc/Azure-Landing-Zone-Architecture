@@ -23,6 +23,7 @@ on:
     paths:
       - "platform/**"
       - "landing-zones/**"
+      - "synthetic/**"
       - "modules/**"
       - "envs/**"
 
@@ -83,6 +84,7 @@ jobs:
           - landing-zones/corp-a1
           - landing-zones/corp-a2
           - landing-zones/online-p1
+          - synthetic
 
     steps:
       - name: Checkout

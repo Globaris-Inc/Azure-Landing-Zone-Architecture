@@ -15,6 +15,8 @@
 #   3. platform/identity     — DC VMs or AADDS (depends on connectivity for VNet)
 #   4. platform/security     — Sentinel (depends on management LA workspace)
 #   5. landing-zones         — parallel, all depend on connectivity hub
+#   6. synthetic             — workloads + telemetry, depends on all landing zones
+#                              (Section 13; gated by var.enable_synthetic_workload)
 #
 # Adding modules: add a new job following the pattern below, referencing the
 # appropriate `needs:` dependency to maintain the apply order.
@@ -28,6 +30,7 @@ on:
     paths:
       - "platform/**"
       - "landing-zones/**"
+      - "synthetic/**"
       - "modules/**"
       - "envs/**"
 
@@ -383,5 +386,51 @@ jobs:
         run: |
           terraform apply \
             -var-file="../../envs/poc.tfvars" \
+            -auto-approve \
+            -input=false
+
+  # --------------------------------------------------------------------------
+  # 6. Synthetic — workload targets, telemetry, security signals, cost patterns
+  #    Section 13 (currently §13.1 only). Gated by var.enable_synthetic_workload
+  #    inside the module so the job is safe to run with the flag off — it just
+  #    plans/applies zero resources.
+  #
+  #    The `local-exec` inside the module shells out to `az webapp deploy`, so
+  #    the Azure CLI must be present (pre-installed on ubuntu-latest runners
+  #    and authenticated by the azure/login@v2 step above).
+  # --------------------------------------------------------------------------
+  apply-synthetic:
+    name: Apply — synthetic
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [apply-corp-a1, apply-corp-a2, apply-online-p1]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: synthetic
+        run: |
+          terraform init \
+            -backend-config="../envs/poc.backend.hcl" \
+            -backend-config="key=synthetic/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: synthetic
+        run: |
+          terraform apply \
+            -var-file="../envs/poc.tfvars" \
             -auto-approve \
             -input=false
