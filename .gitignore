@@ -21,6 +21,10 @@ terraform.rc
 # ALZ provider cache — populated by `terraform init` when the alz provider downloads library data
 .alzlib
 
+# Synthetic-layer build artefacts — archive_file output_path target
+synthetic/.build/
+synthetic/apps/**/node_modules/
+
 # tfsec / checkov / tflint
 .tfsec/
 .checkov.yaml
