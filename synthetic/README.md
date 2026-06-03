@@ -32,8 +32,8 @@ PROMPT.md §13.6 acceptance criterion: this completes in <5 minutes.
 
 | Subsection | Scope                                                | Status     |
 | ---------- | ---------------------------------------------------- | ---------- |
-| 13.1       | Workload targets (corp-a1 REST API, online-p1 queue) | 🟢 In this commit |
-| 13.2       | k6 load generator (Container Apps Jobs)              | ⬜ Next session |
+| 13.1       | Workload targets (corp-a1 REST API, online-p1 queue) | 🟢 Done |
+| 13.2       | k6 load generator (Container Apps Jobs)              | 🟢 Done |
 | 13.3       | Red-team simulator ACI (security signals)            | ⬜ Next session |
 | 13.4       | Cost-generating patterns                             | ⬜ Next session |
 | 13.5       | Demo orchestration scripts                           | ⬜ Day 12 |
@@ -89,6 +89,47 @@ Endpoints exposed once deployed:
 > page and its managed Azure Function are application artifacts deployed via a
 > downstream CI step using `landing-zones/online-p1` output
 > `static_web_app_api_key`.
+
+---
+
+## 13.2 — Load Generator
+
+Three k6 scenarios on **Azure Container Apps Jobs** with cron triggers. The
+Container Apps Environment uses the Consumption profile and ships container
+stdout to the Platform LA workspace (`ContainerAppConsoleLogs_CL` table).
+
+| Job           | Cron (UTC)        | Local (ET) target | VUs    | Duration | Replica timeout | CPU / RAM     |
+| ------------- | ----------------- | ----------------- | ------ | -------- | --------------- | ------------- |
+| `caj-k6-baseline-*`  | `0 14 * * 1-5`   | 09:00 weekdays    | ramp → 5    | 8h45m hold | 9h10m           | 0.25 vCPU / 0.5Gi |
+| `caj-k6-spike-*`     | `0 17 * * 2,4`   | 12:00 Tue + Thu   | ramp → 50   | 15m total | 20m             | 1.0 vCPU / 2.0Gi |
+| `caj-k6-anomalous-*` | `0 8 * * 0`      | 03:00 Sun         | ramp → 200  | 5m total  | 10m             | 1.0 vCPU / 2.0Gi |
+
+Scripts live in `synthetic/k6/` and are uploaded as files to the `k6-scripts`
+Azure File share on the existing corp-a1 synthetic storage account. Container
+Apps mounts the share read-only at `/scripts` so each job runs
+`k6 run /scripts/<scenario>.js`.
+
+`TARGET_BASE_URL` env var is set to the corp-a1 App Service hostname (the
+13.1 REST API stub), so the load lands on `/api/products`, `/api/login`,
+`/api/checkout`.
+
+The `anomalous` script biases 60% of requests into failed-login bursts with
+`username=attacker-${VU}` + `x-test-geo: simulated-nonapproved-eu`, seeding
+the §6 brute-force + blocked-country detection rules. Real cross-region
+simulation belongs to §13.3.
+
+> **Pre-req:** `var.platform_law_workspace_id` must be set when
+> `var.enable_synthetic_workload = true`. Without it the §13.2 sub-section
+> plans/applies zero resources (the Container Apps Environment needs the
+> Log Analytics workspace ID to be created).
+
+**Manual demo trigger:**
+
+```bash
+az containerapp job start \
+  --resource-group rg-synthetic-corp-a1-<org>-<env> \
+  --name caj-k6-anomalous-<org>-<env>
+```
 
 ---
 

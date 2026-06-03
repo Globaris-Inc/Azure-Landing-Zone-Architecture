@@ -44,3 +44,22 @@ output "online_p1_synthetic_storage_account_name" {
   description = "Name of the synthetic storage account that hosts the contact-form queue. Empty string when synthetic workload is disabled."
   value       = local.enabled == 1 ? azurerm_storage_account.online_p1_synthetic[0].name : ""
 }
+
+# ---------------------------------------------------------------------------
+# 13.2 — k6 load generator
+# ---------------------------------------------------------------------------
+
+output "k6_container_app_environment_id" {
+  description = "ARM resource ID of the Container Apps Environment hosting the k6 jobs. Empty string when synthetic workload is disabled or when platform_law_workspace_id is unset."
+  value       = local.k6_enabled == 1 ? azurerm_container_app_environment.k6[0].id : ""
+}
+
+output "k6_job_ids" {
+  description = "Map of k6 scenario name (baseline / spike / anomalous) → Container Apps Job ARM resource ID. Empty map when synthetic workload is disabled."
+  value       = local.k6_enabled == 1 ? { for k, v in azurerm_container_app_job.k6 : k => v.id } : {}
+}
+
+output "k6_job_names" {
+  description = "Map of k6 scenario name → Container Apps Job resource name. Use these with `az containerapp job start --name <name>` to fire a scenario manually for demo. Empty map when synthetic workload is disabled."
+  value       = local.k6_enabled == 1 ? { for k, v in azurerm_container_app_job.k6 : k => v.name } : {}
+}
