@@ -79,6 +79,8 @@ env:
   TF_VAR_pim_approver_group_object_id:     ${{ secrets.PIM_APPROVER_GROUP_OBJECT_ID }}
   # Section 6 — Defender for Cloud + Sentinel
   TF_VAR_sentinel_owner_group_object_id:   ${{ secrets.SENTINEL_OWNER_GROUP_OBJECT_ID }}
+  # Section 13.3 — Synthetic red-team simulator (empty disables sign-in scenarios)
+  TF_VAR_honeypot_user_principal_name:     ${{ secrets.HONEYPOT_USER_PRINCIPAL_NAME }}
 
 jobs:
   # --------------------------------------------------------------------------
