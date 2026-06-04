@@ -35,7 +35,7 @@ PROMPT.md §13.6 acceptance criterion: this completes in <5 minutes.
 | 13.1       | Workload targets (corp-a1 REST API, online-p1 queue) | 🟢 Done |
 | 13.2       | k6 load generator (Container Apps Jobs)              | 🟢 Done |
 | 13.3       | Red-team simulator (Container Apps Jobs, 5 scenarios) | 🟢 Done |
-| 13.4       | Cost-generating patterns                             | ⬜ Next session |
+| 13.4       | Cost-generating patterns                             | 🟢 Done |
 | 13.5       | Demo orchestration scripts                           | ⬜ Day 12 |
 | 13.6       | Cost guardrails (sandbox budget, kill switch, weekly cleanup) | ⬜ Day 12 |
 | 13.7       | Acceptance criteria validation                       | ⬜ Day 12 |
@@ -197,6 +197,64 @@ filter with `parse_json(Log_s)` in KQL to extract `scenario`, `run_id`,
 az containerapp job start \
   --resource-group rg-synthetic-red-team-<org>-<env> \
   --name caj-rt-storage-anomaly-<org>-<env>
+```
+
+---
+
+## 13.4 — Cost-generating patterns
+
+Five deliberate FinOps anti-patterns that produce Azure Advisor +
+Cost Management recommendations within 24–48 hours.
+
+| Anti-pattern             | Resource                                                  | Demo signal                                                          |
+| ------------------------ | --------------------------------------------------------- | -------------------------------------------------------------------- |
+| Oversized idle VM        | `vm-oversized-...` (Standard_D4s_v5 default, Ubuntu 24.04, idle) | Azure Advisor "right-size or shutdown" recommendation; `Optimization=Candidate` tag for cost-dashboard pivots |
+| Unattached disk          | `disk-unattached-...` (32 GB Premium SSD)                 | Azure Advisor "delete unattached disk" recommendation                 |
+| Hot-tier stale storage   | `stsynchot...` + 5 sentinel blobs in `stale/` container   | After 7 days of no-access, Storage Insights flags lifecycle-policy missing |
+| Ungoverned RG            | `rg-ungoverned-...` with empty tags                       | §7 Modify policy at MG scope adds default FinOps tags → AzureActivity policy-evaluation entry |
+| Deliberately-low budget  | RG-scope budget at `var.cost_pattern_budget_amount_usd` (default $1) | 50/75/100% threshold notifications trip on day 1                     |
+
+### Cost notes
+
+| Resource                | Monthly cost (rough)            | Notes                                              |
+| ----------------------- | ------------------------------- | -------------------------------------------------- |
+| `Standard_D4s_v5` VM    | ~$140                           | The bulk of the §13.4 cost. Override `var.cost_pattern_vm_size` to `Standard_D2s_v5` (~$70) for cheaper POCs. |
+| 32 GB Premium SSD       | ~$5                             | Trivial.                                           |
+| Hot-tier SA + 5 blobs   | <$0.01                          | Trivial.                                           |
+| Ungoverned + governed RGs | $0                            | RGs are free.                                      |
+| RG-scope budget         | $0                              | Budgets are free.                                  |
+
+Kill switch is the same as the rest of the layer:
+
+```bash
+cd synthetic
+terraform apply -var-file=../envs/poc.tfvars -var='enable_synthetic_workload=false'
+```
+
+PROMPT.md §13.6 acceptance: <5 minutes to destroy the entire stack.
+
+### Required input
+
+Surface the alert recipient list via `var.cost_pattern_budget_alert_emails`
+(or `TF_VAR_cost_pattern_budget_alert_emails` in CI). Empty list silently
+skips the budget resource — the other four anti-patterns still ship.
+
+> **Deviation:** ADR-003 collapsed the sandbox subscription into the
+> Landing Zones sub. The deliberately-low budget therefore sits at the
+> synthetic cost-pattern RG scope (still produces the threshold-breach
+> demo signal) rather than at sandbox-sub scope.
+
+### Break-glass SSH key
+
+The VM's SSH key is generated on-the-fly by the `tls` provider; the public
+key goes onto the VM, the private key surfaces as a sensitive output.
+
+```bash
+cd synthetic
+terraform output -raw oversized_vm_ssh_private_key_pem > /tmp/oversized.pem
+chmod 600 /tmp/oversized.pem
+# VM has no public IP — open `az network bastion ssh` or Azure Serial Console
+# for break-glass access.
 ```
 
 ---

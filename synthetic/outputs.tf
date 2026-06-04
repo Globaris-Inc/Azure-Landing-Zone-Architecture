@@ -97,3 +97,48 @@ output "red_team_job_principal_ids" {
   description = "Map of red-team scenario name → System-Assigned MI principal ID. Surfaces the identity each scenario runs as for RBAC audit purposes."
   value       = local.red_team_enabled == 1 ? { for k, v in azurerm_container_app_job.red_team : k => v.identity[0].principal_id } : {}
 }
+
+# ---------------------------------------------------------------------------
+# 13.4 — Cost-generating patterns
+# ---------------------------------------------------------------------------
+
+output "cost_patterns_rg_name" {
+  description = "Governed resource group holding the cost-pattern anti-patterns (VM, disk, hot SA, budget)."
+  value       = local.cost_patterns_enabled == 1 ? azurerm_resource_group.cost_patterns[0].name : ""
+}
+
+output "ungoverned_rg_name" {
+  description = "Intentionally untagged resource group. The §7 Modify policy at MG scope adds default FinOps tags out-of-band — the policy-evaluation entry in AzureActivity is the demo signal."
+  value       = local.cost_patterns_enabled == 1 ? azurerm_resource_group.ungoverned[0].name : ""
+}
+
+output "oversized_vm_id" {
+  description = "ARM resource ID of the oversized idle VM (Optimization=Candidate tag). Driver for Azure Advisor's right-size recommendation."
+  value       = local.cost_patterns_enabled == 1 ? azurerm_linux_virtual_machine.oversized_idle[0].id : ""
+}
+
+output "oversized_vm_size" {
+  description = "VM SKU actually deployed for the oversized-idle pattern. Echoes var.cost_pattern_vm_size."
+  value       = local.cost_patterns_enabled == 1 ? azurerm_linux_virtual_machine.oversized_idle[0].size : ""
+}
+
+output "oversized_vm_ssh_private_key_pem" {
+  description = "Ephemeral RSA private key for break-glass SSH access to the oversized idle VM. Sensitive — pull from state with `terraform output -raw oversized_vm_ssh_private_key_pem`."
+  value       = local.cost_patterns_enabled == 1 ? tls_private_key.oversized_vm[0].private_key_pem : ""
+  sensitive   = true
+}
+
+output "unattached_disk_id" {
+  description = "ARM resource ID of the unattached 32 GB Premium SSD. Driver for Azure Advisor's delete-unattached-disk recommendation."
+  value       = local.cost_patterns_enabled == 1 ? azurerm_managed_disk.unattached[0].id : ""
+}
+
+output "cost_pattern_hot_storage_account_name" {
+  description = "Name of the Hot-tier storage account hosting the stale-blob anti-pattern. Driver for Azure Advisor's lifecycle-management recommendation once the 7-day no-access window elapses."
+  value       = local.cost_patterns_enabled == 1 ? azurerm_storage_account.cost_pattern_hot[0].name : ""
+}
+
+output "cost_pattern_budget_id" {
+  description = "ARM resource ID of the deliberately-low RG budget. Empty when var.cost_pattern_budget_alert_emails is unset (the budget resource requires at least one notification target)."
+  value       = local.cost_patterns_enabled == 1 && length(var.cost_pattern_budget_alert_emails) > 0 ? azurerm_consumption_budget_resource_group.sandbox_overrun[0].id : ""
+}
