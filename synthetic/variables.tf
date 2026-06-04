@@ -54,6 +54,22 @@ variable "platform_law_workspace_id" {
 }
 
 # ---------------------------------------------------------------------------
+# 13.3 — Red-team simulator
+# ---------------------------------------------------------------------------
+
+variable "red_team_geo_location" {
+  description = "Azure region for the impossible-travel west pole — must be outside the §5 approved_sign_in_countries list (US/CA/GB by default) so the §6 blocked-country detection rule has a valid signal."
+  type        = string
+  default     = "westeurope"
+}
+
+variable "honeypot_user_principal_name" {
+  description = "Tenant-resident UPN of the disabled honeypot user (e.g. svc-honeypot@<tenant>.onmicrosoft.com). Must be created manually as a Disabled account — see synthetic/README.md §13.3 pre-reqs. Empty string disables the sign-in / impossible-travel red-team scenarios; the storage / KV / public-IP scenarios still ship."
+  type        = string
+  default     = ""
+}
+
+# ---------------------------------------------------------------------------
 # Tags
 # ---------------------------------------------------------------------------
 

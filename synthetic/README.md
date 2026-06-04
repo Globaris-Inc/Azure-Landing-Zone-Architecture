@@ -34,7 +34,7 @@ PROMPT.md §13.6 acceptance criterion: this completes in <5 minutes.
 | ---------- | ---------------------------------------------------- | ---------- |
 | 13.1       | Workload targets (corp-a1 REST API, online-p1 queue) | 🟢 Done |
 | 13.2       | k6 load generator (Container Apps Jobs)              | 🟢 Done |
-| 13.3       | Red-team simulator ACI (security signals)            | ⬜ Next session |
+| 13.3       | Red-team simulator (Container Apps Jobs, 5 scenarios) | 🟢 Done |
 | 13.4       | Cost-generating patterns                             | ⬜ Next session |
 | 13.5       | Demo orchestration scripts                           | ⬜ Day 12 |
 | 13.6       | Cost guardrails (sandbox budget, kill switch, weekly cleanup) | ⬜ Day 12 |
@@ -129,6 +129,74 @@ simulation belongs to §13.3.
 az containerapp job start \
   --resource-group rg-synthetic-corp-a1-<org>-<env> \
   --name caj-k6-anomalous-<org>-<env>
+```
+
+---
+
+## 13.3 — Red-team simulator
+
+Five scenarios on Container Apps Jobs (DEVIATION from PROMPT.md's "ACI"
+wording — same compute pattern as §13.2). Every CAJ + decoy resource is
+tagged `Purpose = "SecuritySimulation"` so a single KQL `where Tags has
+"SecuritySimulation"` cleanly separates synthetic from real telemetry.
+
+| Scenario               | Cron (UTC)      | CAE          | MI role assignment                                            | What it generates                              |
+| ---------------------- | --------------- | ------------ | ------------------------------------------------------------- | ---------------------------------------------- |
+| `failed_signin_burst`  | `15 */4 * * *`  | primary      | (none — anonymous ROPC to login.microsoftonline.com)          | 12× failed sign-ins / 4h → SignInLogs          |
+| `impossible_travel_east` | `0 */6 * * *` | primary      | (none)                                                        | 1× sign-in / 6h from eastus2 outbound IP       |
+| `impossible_travel_west` | `5 */6 * * *` | **secondary** (`var.red_team_geo_location`, default westeurope) | (none) | 1× sign-in / 6h from westeurope IP — 5 min after east |
+| `resource_anomaly`     | `30 */6 * * *` | primary      | Network Contributor on `rg-synthetic-red-team-...`            | public IP create+delete → AzureActivity        |
+| `storage_anomaly`      | `45 */6 * * *` | primary      | Storage Blob Data Reader on decoy SA                          | 500 × blob GET in ~2 min → StorageBlobLogs     |
+| `kv_probing`           | `55 */6 * * *` | primary      | Key Vault **Reader only** (no Secrets User)                   | 25 × failed `GetSecret` → KV AuditEvent        |
+
+### Manual pre-req (one-time, manual — not Terraform-managed)
+
+The honeypot Entra user must be created **disabled** and its UPN passed via
+`var.honeypot_user_principal_name` (or `TF_VAR_honeypot_user_principal_name`
+in CI). Without it the two sign-in scenarios + the impossible-travel west
+pole are skipped automatically; the other three still ship.
+
+```bash
+# One-time, run by a tenant admin:
+az ad user create \
+  --display-name "svc-honeypot (synthetic — Section 13.3)" \
+  --user-principal-name svc-honeypot@<tenant>.onmicrosoft.com \
+  --password '<throwaway>' \
+  --force-change-password-next-sign-in false
+az ad user update \
+  --id svc-honeypot@<tenant>.onmicrosoft.com \
+  --account-enabled false
+```
+
+### Decoy resources (created by Terraform)
+
+- **Decoy Storage Account** (`stsynrtdc...`, eastus2, public network on) —
+  the `storage_anomaly` MI reads `decoy/decoy-target.bin` 500× per run.
+  StorageBlobLogs land in Platform LAW via diagnostic settings.
+- **Decoy Key Vault** (`kv-rt-...`, eastus2, RBAC mode, public network on) —
+  the `kv_probing` MI's role is intentionally Reader-only; every secret
+  probe fails 403. AuditEvent diagnostic stream → Platform LAW.
+
+### Logging
+
+Scenarios write structured JSON to stdout. Container Apps' built-in
+log-analytics integration ships container stdout to
+`ContainerAppConsoleLogs_CL`. Combine the `Purpose=SecuritySimulation` tag
+filter with `parse_json(Log_s)` in KQL to extract `scenario`, `run_id`,
+`event`, etc.
+
+> **Deviation:** PROMPT.md asks for a dedicated `synthetic-events` LAW table
+> via Data Collection Rule + Endpoint. Using `ContainerAppConsoleLogs_CL` +
+> tag-based filtering instead — same separation outcome, far simpler. A
+> proper DCR/DCE/custom-table pipeline is a §13.x refinement once strict
+> schema control is needed.
+
+### Manual demo trigger
+
+```bash
+az containerapp job start \
+  --resource-group rg-synthetic-red-team-<org>-<env> \
+  --name caj-rt-storage-anomaly-<org>-<env>
 ```
 
 ---
