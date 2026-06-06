@@ -98,6 +98,22 @@ variable "cost_pattern_budget_alert_emails" {
 }
 
 # ---------------------------------------------------------------------------
+# 13.6 — Cost guardrails
+# ---------------------------------------------------------------------------
+
+variable "cost_guardrails_monthly_cap_usd" {
+  description = "Subscription budget cap (USD/mo) on Layer=Synthetic spend. Default 150 ≈ $5/day × 30 — the §13.6 PROMPT.md daily cap expressed at the monthly granularity Azure consumption budgets support. Forecasted-100% notification routes to the stop-synthetic-compute runbook via action group webhook."
+  type        = number
+  default     = 150
+}
+
+variable "cost_guardrails_alert_emails" {
+  description = "Email recipients for the §13.6 budget Forecasted 50%/100% notifications. Empty list silently skips the action group + budget — the Automation Account + runbooks + weekly schedule still ship for manual operator use."
+  type        = list(string)
+  default     = []
+}
+
+# ---------------------------------------------------------------------------
 # Tags
 # ---------------------------------------------------------------------------
 

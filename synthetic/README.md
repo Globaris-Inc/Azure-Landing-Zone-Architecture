@@ -36,9 +36,9 @@ PROMPT.md §13.6 acceptance criterion: this completes in <5 minutes.
 | 13.2       | k6 load generator (Container Apps Jobs)              | 🟢 Done |
 | 13.3       | Red-team simulator (Container Apps Jobs, 5 scenarios) | 🟢 Done |
 | 13.4       | Cost-generating patterns                             | 🟢 Done |
-| 13.5       | Demo orchestration scripts                           | ⬜ Day 12 |
-| 13.6       | Cost guardrails (sandbox budget, kill switch, weekly cleanup) | ⬜ Day 12 |
-| 13.7       | Acceptance criteria validation                       | ⬜ Day 12 |
+| 13.5       | Demo orchestration scripts                           | 🟢 Done |
+| 13.6       | Cost guardrails (sandbox budget, kill switch, weekly cleanup) | 🟢 Done |
+| 13.7       | Acceptance criteria validation                       | ⬜ Next session |
 
 ---
 
@@ -256,6 +256,72 @@ chmod 600 /tmp/oversized.pem
 # VM has no public IP — open `az network bastion ssh` or Azure Serial Console
 # for break-glass access.
 ```
+
+---
+
+## 13.6 — Cost guardrails
+
+Automation-driven safety net on top of §13.4 — a subscription-scoped budget
+filtered to `Layer=Synthetic` triggers a stop-compute runbook the moment
+forecasted EOM spend exceeds the cap.
+
+### Components
+
+| Resource                              | Purpose                                                                  |
+| ------------------------------------- | ------------------------------------------------------------------------ |
+| `aa-guardrails-...`                   | Automation Account, system-assigned MI, Contributor on every synthetic RG |
+| `stop-synthetic-compute` runbook      | PowerShell 7.2 — stops every in-flight CAJ + deallocates Lifecycle=Ephemeral VMs |
+| `weekly-cleanup-ephemeral` runbook    | PowerShell 7.2 — orphan `pip-rt-anomaly-*` sweep + Lifecycle=Ephemeral inventory |
+| `sched-weekly-cleanup-ephemeral`      | Weekly schedule, Sundays UTC                                             |
+| `wh-stop-synthetic-compute` webhook   | Long-lived webhook on the stop runbook (expires 2030-12-31)              |
+| `ag-guardrails-...` action group      | Email recipients + automation_runbook_receiver pointing at the webhook   |
+| `bdgt-synthetic-guardrails-...` budget | Subscription scope, tag filter `Layer=Synthetic`, Forecasted 50%/100% notifications |
+
+### Trip conditions (Forecasted thresholds on a $150/mo cap)
+
+| % forecasted EOM | Action                                                            |
+| ---------------- | ----------------------------------------------------------------- |
+| 50% (~$75/mo)    | Email recipients only — early warning                             |
+| 100% ($150/mo)   | Email **and** action group webhook → `stop-synthetic-compute` MI fires |
+
+### Required input
+
+`var.cost_guardrails_alert_emails` (or `TF_VAR_cost_guardrails_alert_emails`
+in CI). Empty list silently skips the action group + budget — the Automation
+Account + runbooks + weekly schedule still ship so the operator can run them
+manually.
+
+### Manual emergency stop
+
+```bash
+# Operator-driven trigger (does not wait for the budget alert):
+az automation runbook start \
+  --automation-account-name aa-guardrails-<org>-<env> \
+  --resource-group rg-synthetic-cost-patterns-<org>-<env> \
+  --name stop-synthetic-compute
+```
+
+> **Deviations:**
+> - Azure consumption budgets have no `Daily` time_grain. We use a Monthly
+>   $150 cap with Forecasted 100% notification — trips on day 1–2 when
+>   the synthetic layer is on pace, matching the PROMPT.md "$5/day" intent
+>   on the only granularity Azure supports.
+> - PROMPT.md asks for "ACI restartPolicy=OnFailure, 4-hour max via Logic
+>   App". §13.2/§13.3 use Container Apps Jobs; each CAJ already enforces
+>   `replica_timeout_in_seconds` (≤33000s for long-running k6 baseline,
+>   ≤900s for the rest), achieving the same kill-runaway guarantee without
+>   the Logic App.
+> - Budget is scoped to the Landing Zones sub with a `Layer=Synthetic` tag
+>   filter rather than a dedicated sandbox sub (ADR-003 collapsed sandbox
+>   into LZ).
+
+### Schedule first-run note
+
+`azurerm_automation_schedule.weekly_cleanup` uses
+`start_time = timeadd(timestamp(), "240h")` with `ignore_changes = [start_time]`
+so the resource is stable across re-applies but the first run lands ~10 days
+after the initial apply. The operator can always trigger
+`weekly-cleanup-ephemeral` manually before then.
 
 ---
 

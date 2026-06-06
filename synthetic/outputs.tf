@@ -142,3 +142,41 @@ output "cost_pattern_budget_id" {
   description = "ARM resource ID of the deliberately-low RG budget. Empty when var.cost_pattern_budget_alert_emails is unset (the budget resource requires at least one notification target)."
   value       = local.cost_patterns_enabled == 1 && length(var.cost_pattern_budget_alert_emails) > 0 ? azurerm_consumption_budget_resource_group.sandbox_overrun[0].id : ""
 }
+
+# ---------------------------------------------------------------------------
+# 13.6 — Cost guardrails
+# ---------------------------------------------------------------------------
+
+output "guardrails_automation_account_id" {
+  description = "ARM resource ID of the cost-guardrails Automation Account (hosts the stop-synthetic-compute + weekly-cleanup runbooks)."
+  value       = local.cost_guardrails_enabled == 1 ? azurerm_automation_account.guardrails[0].id : ""
+}
+
+output "guardrails_automation_account_principal_id" {
+  description = "System-Assigned MI principal ID for the cost-guardrails Automation Account. Holds Contributor on every synthetic RG."
+  value       = local.cost_guardrails_enabled == 1 ? azurerm_automation_account.guardrails[0].identity[0].principal_id : ""
+}
+
+output "guardrails_runbook_names" {
+  description = "Names of the cost-guardrails runbooks. Pipe these to `Start-AzAutomationRunbook` for manual demo triggers."
+  value = local.cost_guardrails_enabled == 1 ? {
+    stop_compute   = azurerm_automation_runbook.stop_synthetic_compute[0].name
+    weekly_cleanup = azurerm_automation_runbook.weekly_cleanup_ephemeral[0].name
+  } : {}
+}
+
+output "guardrails_stop_compute_webhook_uri" {
+  description = "Sensitive webhook URI for the stop-synthetic-compute runbook. Wired into the action group's automation_runbook_receiver; surfaced here so operators can curl it for manual emergency stops."
+  value       = local.cost_guardrails_enabled == 1 ? azurerm_automation_webhook.stop_synthetic_compute[0].uri : ""
+  sensitive   = true
+}
+
+output "guardrails_action_group_id" {
+  description = "ARM resource ID of the cost-guardrails Action Group. Empty when var.cost_guardrails_alert_emails is unset."
+  value       = local.cost_guardrails_enabled == 1 && length(var.cost_guardrails_alert_emails) > 0 ? azurerm_monitor_action_group.guardrails[0].id : ""
+}
+
+output "guardrails_subscription_budget_id" {
+  description = "ARM resource ID of the Layer=Synthetic subscription-scope budget. Empty when var.cost_guardrails_alert_emails is unset."
+  value       = local.cost_guardrails_enabled == 1 && length(var.cost_guardrails_alert_emails) > 0 ? azurerm_consumption_budget_subscription.synthetic_guardrails[0].id : ""
+}
