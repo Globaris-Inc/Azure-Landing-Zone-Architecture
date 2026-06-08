@@ -10,6 +10,8 @@ Azure Landing Zone POC. Implements [`PROMPT.md`](../PROMPT.md) §13.5.
 | `03-trigger-incidents.sh` | Manually fire §13.2 k6 + §13.3 red-team CAJs on demand; prints pivot KQL |
 | `04-reset.sh`           | Close open Sentinel incidents, re-disable honeypot, clean orphan PIPs |
 | `05-screen-capture.md`  | OBS storyboard + post-production checklist for the recorded version |
+| `06-acceptance.md`      | §13.7 acceptance criteria mapping (criterion → validation method → pass threshold) |
+| `06-acceptance.sh`      | Runs all 5 acceptance criteria; exits non-zero on any fail (`--verbose` flag) |
 
 ## Prerequisites
 
@@ -45,6 +47,10 @@ Run **once** before the first demo:
 
 # Reset after a demo
 HONEYPOT_UPN=svc-honeypot@<tenant>.onmicrosoft.com ./04-reset.sh
+
+# Acceptance criteria validation (assumes synthetic applied ≥24h ago)
+LANDINGZONES_SUB_ID=<sub-guid> ./06-acceptance.sh
+LANDINGZONES_SUB_ID=<sub-guid> ./06-acceptance.sh --verbose
 ```
 
 ## Environment overrides

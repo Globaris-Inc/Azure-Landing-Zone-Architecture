@@ -38,7 +38,7 @@ PROMPT.md §13.6 acceptance criterion: this completes in <5 minutes.
 | 13.4       | Cost-generating patterns                             | 🟢 Done |
 | 13.5       | Demo orchestration scripts                           | 🟢 Done |
 | 13.6       | Cost guardrails (sandbox budget, kill switch, weekly cleanup) | 🟢 Done |
-| 13.7       | Acceptance criteria validation                       | ⬜ Next session |
+| 13.7       | Acceptance criteria validation                       | 🟢 Done — see [`../demo/06-acceptance.md`](../demo/06-acceptance.md) |
 
 ---
 
