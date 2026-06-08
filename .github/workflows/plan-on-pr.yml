@@ -71,6 +71,8 @@ env:
   TF_VAR_honeypot_user_principal_name:     ${{ secrets.HONEYPOT_USER_PRINCIPAL_NAME }}
   # Section 13.4 — Synthetic cost-pattern budget recipients (empty skips budget resource)
   TF_VAR_cost_pattern_budget_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
+  # Section 13.6 — Synthetic cost-guardrails budget + action group recipients
+  TF_VAR_cost_guardrails_alert_emails:     '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
 
 jobs:
   plan:
