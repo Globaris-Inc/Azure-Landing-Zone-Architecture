@@ -67,6 +67,16 @@ output "sql_private_endpoint_nic_ip" {
   value       = azurerm_private_endpoint.sql.private_service_connection[0].private_ip_address
 }
 
+output "recovery_services_vault_id" {
+  description = "ARM resource ID of the Recovery Services Vault. Used for ASR replication enrollment in Section 13."
+  value       = module.recovery_services_vault.resource_id
+}
+
+output "recovery_services_vault_name" {
+  description = "Name of the Recovery Services Vault."
+  value       = module.recovery_services_vault.resource.name
+}
+
 output "integration_subnet_id" {
   description = "ARM resource ID of the App Service VNet integration subnet."
   value       = module.spoke_vnet.subnets["integration"].resource_id

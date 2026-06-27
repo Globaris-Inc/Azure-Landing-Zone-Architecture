@@ -82,6 +82,21 @@ variable "sql_aad_admin_login" {
 }
 
 # ---------------------------------------------------------------------------
+# Backup / Disaster Recovery (Recovery Services Vault)
+# ---------------------------------------------------------------------------
+
+variable "rsv_storage_mode_type" {
+  description = "Storage redundancy mode for the corp-a1 Recovery Services Vault. corp-a1 is the in-region primary spoke, so the default is ZoneRedundant (cross-region restore is GeoRedundant-only and stays disabled). Valid Azure values: LocallyRedundant, ZoneRedundant, GeoRedundant."
+  type        = string
+  default     = "ZoneRedundant"
+
+  validation {
+    condition     = contains(["LocallyRedundant", "ZoneRedundant", "GeoRedundant"], var.rsv_storage_mode_type)
+    error_message = "rsv_storage_mode_type must be one of: LocallyRedundant, ZoneRedundant, GeoRedundant."
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Private DNS (Section 4)
 # ---------------------------------------------------------------------------
 
