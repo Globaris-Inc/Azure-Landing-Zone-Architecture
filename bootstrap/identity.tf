@@ -65,6 +65,42 @@ resource "azuread_application_federated_identity_credential" "pull_request" {
 }
 
 # ---------------------------------------------------------------------------
+# Environment-scoped federated credentials (ADR-019 — gated deploy/teardown)
+#
+# When a workflow job references a GitHub Environment, the OIDC token's `sub`
+# claim becomes  repo:<org>/<repo>:environment:<env-name>  — NOT the branch ref.
+# The two creds below federate the gated jobs:
+#   - deploy.yml  apply jobs  → environment: production
+#   - teardown.yml destroy job → environment: production-destroy
+#
+# !!! BOOTSTRAP MUST BE RE-APPLIED for these to take effect. Until `bootstrap/`
+# is re-applied (local one-time apply per ADR-005), any gated apply/teardown job
+# will FAIL at `azure/login` because the matching `sub` is not yet federated.
+# The non-gated `action=plan` path on `main`/PR is unaffected (it uses the
+# branch/pull_request subjects above, which are already registered).
+# ---------------------------------------------------------------------------
+
+# Triggered by: deploy.yml apply jobs (environment: production)
+resource "azuread_application_federated_identity_credential" "env_production" {
+  application_id = azuread_application.oidc.id
+  display_name   = "github-env-production"
+  description    = "GitHub Actions OIDC — production Environment (deploy.yml apply gate)"
+  audiences      = ["api://AzureADTokenExchange"]
+  issuer         = "https://token.actions.githubusercontent.com"
+  subject        = "repo:${var.github_org}/${var.github_repo}:environment:production"
+}
+
+# Triggered by: teardown.yml destroy job (environment: production-destroy)
+resource "azuread_application_federated_identity_credential" "env_production_destroy" {
+  application_id = azuread_application.oidc.id
+  display_name   = "github-env-production-destroy"
+  description    = "GitHub Actions OIDC — production-destroy Environment (teardown.yml gate)"
+  audiences      = ["api://AzureADTokenExchange"]
+  issuer         = "https://token.actions.githubusercontent.com"
+  subject        = "repo:${var.github_org}/${var.github_repo}:environment:production-destroy"
+}
+
+# ---------------------------------------------------------------------------
 # RBAC — Owner at Tenant Root MG (ADR-006; scoped down at Section 12 per OQ-008)
 # ---------------------------------------------------------------------------
 

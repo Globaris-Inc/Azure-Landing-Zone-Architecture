@@ -1,0 +1,182 @@
+# .github/workflows/teardown.yml
+# Purpose: Manual, guarded teardown of ONE root or the WHOLE environment (reverse order).
+# Section: 10 — Pipeline & Tooling (ADR-019, OQ-012/OQ-013).
+# Last updated: 2026-06-27
+#
+# Guards (destroy is irreversible):
+#   1. `confirm` must be typed exactly as `destroy` (a cheap pre-check before any login).
+#   2. Every destroy job runs in the `production-destroy` GitHub Environment (required reviewer).
+# Scope (OQ-012): default tears down the 9 workload/platform roots ONLY and KEEPS the
+#   bootstrap state backend + OIDC app, so redeploy is immediate. include_bootstrap=true
+#   surfaces a MANUAL scorched-earth runbook (the SP can't delete its own OIDC app, and the
+#   state-backend RG name is non-deterministic — LESSON 18 gap).
+#
+# Order = reverse of deploy.yml: synthetic -> spokes -> {connectivity,security} -> management
+#   -> management-groups ; identity before management-groups. terraform destroy keeps state
+#   consistent for clean re-apply. (Brute-force `az group delete` for stuck destroys is a
+#   documented refinement — see docs/cicd-deploy-teardown.md §6.)
+name: Teardown (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Root to destroy, or 'all' for the whole environment (reverse order)"
+        type: choice
+        default: all
+        options:
+          - all
+          - platform/management-groups
+          - platform/management
+          - platform/connectivity
+          - platform/identity
+          - platform/security
+          - landing-zones/corp-a1
+          - landing-zones/corp-a2
+          - landing-zones/online-p1
+          - synthetic
+      confirm:
+        description: "Type 'destroy' to confirm. Anything else aborts before any login."
+        type: string
+        default: ""
+      include_bootstrap:
+        description: "Also tear down the state backend + OIDC app (scorched earth). Default false."
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  guard:
+    name: Confirm teardown
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify typed confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "destroy" ]; then
+            echo "::error::'confirm' must be exactly 'destroy' to proceed. Aborting."
+            exit 1
+          fi
+          echo "Confirmed. target=${{ inputs.target }} include_bootstrap=${{ inputs.include_bootstrap }}"
+
+  synthetic:
+    needs: [guard]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'synthetic') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: synthetic
+      action: destroy
+      backend_rel: "../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  corp-a1:
+    needs: [guard, synthetic]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/corp-a1
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  corp-a2:
+    needs: [guard, synthetic]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a2') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/corp-a2
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  online-p1:
+    needs: [guard, synthetic]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/online-p1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/online-p1
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  connectivity:
+    needs: [guard, corp-a1, corp-a2, online-p1]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/connectivity') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/connectivity
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  security:
+    needs: [guard, corp-a1, corp-a2, online-p1]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/security') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/security
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  identity:
+    needs: [guard]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/identity') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/identity
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  management:
+    needs: [guard, connectivity, security]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/management') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/management
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  management-groups:
+    needs: [guard, management, identity]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/management-groups') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/management-groups
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  # Scorched earth (OQ-012 = false by default). The SP cannot delete its own OIDC app
+  # (needs Entra/Graph rights, not ARM Owner) and the state-backend RG name is
+  # non-deterministic (LESSON 18 gap) — so this emits the manual runbook rather than a
+  # blind delete. Only runs for target=all with include_bootstrap=true.
+  teardown-bootstrap:
+    needs: [guard, management-groups]
+    if: ${{ !failure() && !cancelled() && inputs.include_bootstrap && inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    environment: production-destroy
+    steps:
+      - name: Scorched-earth runbook (manual)
+        run: |
+          echo "::warning::include_bootstrap=true: the state backend + OIDC app are NOT auto-deleted by CI."
+          echo "Run these locally, authenticated as a privileged user:"
+          echo "  # 1. Delete the Terraform state backend resource group (find its exact name first):"
+          echo "  az group list --subscription <management_sub_id> --query \"[?starts_with(name,'rg-tfstate')].name\" -o tsv"
+          echo "  az group delete --name <rg-tfstate-mgmt-XXXXXX> --subscription <management_sub_id> --yes"
+          echo "  # 2. Delete the OIDC app registration (SP lacks Graph rights to self-delete):"
+          echo "  az ad app delete --id <oidc_client_id>"
+          echo "See docs/cicd-deploy-teardown.md section 6 and bootstrap/README."

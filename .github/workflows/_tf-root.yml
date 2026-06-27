@@ -1,0 +1,128 @@
+# .github/workflows/_tf-root.yml
+# Purpose: Reusable Terraform workflow for a SINGLE root — plan | apply | destroy.
+# Section: 10 — Pipeline & Tooling (ADR-019). Called by deploy.yml and teardown.yml.
+# Last updated: 2026-06-27
+#
+# Auth: OIDC federated credential — no secrets stored for login. Gated callers
+# pass a GitHub Environment via `gh_environment`; an EMPTY string = ungated
+# (used for plan). The matching federated credential must exist in bootstrap
+# (identity.tf: environment:production / environment:production-destroy) — see
+# the re-apply note there.
+name: _terraform-root
+
+on:
+  workflow_call:
+    inputs:
+      root:
+        description: "Root module path (e.g. platform/connectivity, synthetic)"
+        required: true
+        type: string
+      action:
+        description: "plan | apply | destroy"
+        required: true
+        type: string
+      backend_rel:
+        description: "Relative prefix to envs/ — '../../' for most roots, '../' for synthetic"
+        required: true
+        type: string
+      gh_environment:
+        description: "GitHub Environment to gate on (empty string = ungated, e.g. plan)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    name: ${{ inputs.action }} ${{ inputs.root }}
+    runs-on: ubuntu-latest
+    # Empty gh_environment => no environment gate (plan). 'production' / 'production-destroy' => gated.
+    environment: ${{ inputs.gh_environment }}
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      # Per-resource values (subscription IDs, object IDs, cross-module outputs) — secrets, not login IDs.
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_management_subscription_id: ${{ secrets.MANAGEMENT_SUBSCRIPTION_ID }}
+      TF_VAR_connectivity_subscription_id: ${{ secrets.CONNECTIVITY_SUBSCRIPTION_ID }}
+      TF_VAR_identity_subscription_id: ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
+      TF_VAR_security_subscription_id: ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
+      TF_VAR_landingzones_subscription_id: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
+      TF_VAR_terraform_sp_object_id: ${{ secrets.TERRAFORM_SP_OBJECT_ID }}
+      TF_VAR_security_contact_email: ${{ secrets.SECURITY_CONTACT_EMAIL }}
+      TF_VAR_budget_alert_contact_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
+      TF_VAR_primary_hub_vnet_id: ${{ secrets.PRIMARY_HUB_VNET_ID }}
+      TF_VAR_primary_hub_vnet_name: ${{ secrets.PRIMARY_HUB_VNET_NAME }}
+      TF_VAR_primary_hub_rg_name: ${{ secrets.PRIMARY_HUB_RG_NAME }}
+      TF_VAR_primary_firewall_private_ip: ${{ secrets.PRIMARY_FIREWALL_PRIVATE_IP }}
+      TF_VAR_secondary_hub_vnet_id: ${{ secrets.SECONDARY_HUB_VNET_ID }}
+      TF_VAR_secondary_hub_vnet_name: ${{ secrets.SECONDARY_HUB_VNET_NAME }}
+      TF_VAR_secondary_hub_rg_name: ${{ secrets.SECONDARY_HUB_RG_NAME }}
+      TF_VAR_secondary_firewall_private_ip: ${{ secrets.SECONDARY_FIREWALL_PRIVATE_IP }}
+      TF_VAR_platform_law_workspace_id: ${{ secrets.PLATFORM_LAW_WORKSPACE_ID }}
+      TF_VAR_platform_action_group_id: ${{ secrets.PLATFORM_ACTION_GROUP_ID }}
+      TF_VAR_sql_aad_admin_object_id: ${{ secrets.SQL_AAD_ADMIN_OBJECT_ID }}
+      TF_VAR_sql_aad_admin_login: ${{ secrets.SQL_AAD_ADMIN_LOGIN }}
+      TF_VAR_platform_law_customer_id: ${{ secrets.PLATFORM_LAW_CUSTOMER_ID }}
+      TF_VAR_break_glass_group_object_id: ${{ secrets.BREAK_GLASS_GROUP_OBJECT_ID }}
+      TF_VAR_pim_privileged_group_object_id: ${{ secrets.PIM_PRIVILEGED_GROUP_OBJECT_ID }}
+      TF_VAR_pim_approver_group_object_id: ${{ secrets.PIM_APPROVER_GROUP_OBJECT_ID }}
+      TF_VAR_sentinel_owner_group_object_id: ${{ secrets.SENTINEL_OWNER_GROUP_OBJECT_ID }}
+      TF_VAR_honeypot_user_principal_name: ${{ secrets.HONEYPOT_USER_PRINCIPAL_NAME }}
+      TF_VAR_cost_pattern_budget_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
+      TF_VAR_cost_guardrails_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required repo Variables (LESSON 15 — vars, not secrets)
+        run: |
+          missing=""
+          [ -n "${{ vars.AZURE_CLIENT_ID }}" ]       || missing="$missing AZURE_CLIENT_ID"
+          [ -n "${{ vars.AZURE_TENANT_ID }}" ]       || missing="$missing AZURE_TENANT_ID"
+          [ -n "${{ vars.AZURE_SUBSCRIPTION_ID }}" ] || missing="$missing AZURE_SUBSCRIPTION_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required repository Variables:$missing (Settings -> Variables, NOT Secrets)"
+            exit 1
+          fi
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.6"
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ${{ inputs.root }}
+        run: |
+          terraform init \
+            -backend-config="${{ inputs.backend_rel }}envs/poc.backend.hcl" \
+            -backend-config="key=${{ inputs.root }}/terraform.tfstate" \
+            -input=false
+
+      - name: Terraform Plan
+        if: ${{ inputs.action == 'plan' }}
+        working-directory: ${{ inputs.root }}
+        run: terraform plan -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -no-color
+
+      - name: Terraform Apply
+        if: ${{ inputs.action == 'apply' }}
+        working-directory: ${{ inputs.root }}
+        run: terraform apply -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve
+
+      - name: Terraform Destroy
+        if: ${{ inputs.action == 'destroy' }}
+        working-directory: ${{ inputs.root }}
+        run: terraform destroy -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve
