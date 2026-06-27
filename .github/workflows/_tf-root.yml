@@ -8,6 +8,14 @@
 # (used for plan). The matching federated credential must exist in bootstrap
 # (identity.tf: environment:production / environment:production-destroy) — see
 # the re-apply note there.
+#
+# Firewalled state SA (LESSON 16): the Terraform state account is default_action=Deny
+# with a STATIC ip_rules list (bootstrap/main.tf). Hosted-runner egress IPs are not
+# stable, so `init` can be blocked. DECISION (devsecops): the supported default is to
+# keep the runner CIDR/IP in bootstrap `ip_allow_list` as a documented PREREQUISITE
+# (docs/cicd-deploy-teardown.md §8). For ad-hoc single-root runs from a hosted runner,
+# set the caller input `manage_runner_ip: true` to temporarily allow-list the runner IP
+# around the run (see that input's docs — single-root only; it races on target=all).
 name: _terraform-root
 
 on:
@@ -30,6 +38,22 @@ on:
         required: false
         type: string
         default: ""
+      manage_runner_ip:
+        # LESSON 16 (firewalled state SA). The state account is default_action=Deny
+        # with a static ip_rules list (bootstrap/main.tf). Hosted-runner egress IPs are
+        # NOT stable, so `init` can 403 against the blob data plane. When true, this job
+        # temporarily allow-lists the runner's egress IP around the whole run and removes
+        # it again on exit (if: always()). Default false = the runner IP is assumed to be
+        # covered by bootstrap `ip_allow_list` (the documented prerequisite — see the
+        # workflow header and docs/cicd-deploy-teardown.md §8).
+        #
+        # WARNING (concurrency): on `target=all`, sibling roots run in parallel and would
+        # mutate the SAME state SA firewall concurrently. Only enable this for SINGLE-root
+        # (`target != all`) runs, or it can race (one job's remove cutting another's init).
+        description: "Temporarily allow-list this runner's egress IP on the state SA (single-root runs only)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
@@ -98,6 +122,30 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # LESSON 16 — open the firewalled state SA to this runner's egress IP (opt-in).
+      # Off by default; see the manage_runner_ip input docs. Captures the SA name/RG
+      # from poc.backend.hcl so it needs no extra inputs.
+      - name: Allow runner IP on state SA (LESSON 16, opt-in)
+        if: ${{ inputs.manage_runner_ip }}
+        # Run from the root dir so backend_rel ('../../' | '../') resolves like Init does.
+        working-directory: ${{ inputs.root }}
+        env:
+          BACKEND_HCL: ${{ inputs.backend_rel }}envs/poc.backend.hcl
+        run: |
+          set -euo pipefail
+          RUNNER_IP="$(curl -fsS --max-time 15 https://api.ipify.org)"
+          SA_NAME="$(grep -E '^\s*storage_account_name' "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          RG_NAME="$(grep -E '^\s*resource_group_name'  "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          echo "Allow-listing runner IP $RUNNER_IP on $SA_NAME (rg $RG_NAME)"
+          az storage account network-rule add \
+            --account-name "$SA_NAME" --resource-group "$RG_NAME" \
+            --ip-address "$RUNNER_IP" --output none
+          echo "RUNNER_IP=$RUNNER_IP"   >> "$GITHUB_ENV"
+          echo "STATE_SA_NAME=$SA_NAME" >> "$GITHUB_ENV"
+          echo "STATE_SA_RG=$RG_NAME"   >> "$GITHUB_ENV"
+          # Network-rule propagation is not instant; give it a moment before init.
+          sleep 20
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -126,3 +174,15 @@ jobs:
         if: ${{ inputs.action == 'destroy' }}
         working-directory: ${{ inputs.root }}
         run: terraform destroy -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve
+
+      # Always remove the IP we added — even if a prior step failed — so the firewall
+      # never leaks a stale runner IP. Guarded on env.RUNNER_IP being set by the add step.
+      - name: Remove runner IP from state SA (LESSON 16, opt-in)
+        if: ${{ always() && inputs.manage_runner_ip && env.RUNNER_IP != '' }}
+        run: |
+          set -uo pipefail
+          echo "Removing runner IP $RUNNER_IP from $STATE_SA_NAME"
+          az storage account network-rule remove \
+            --account-name "$STATE_SA_NAME" --resource-group "$STATE_SA_RG" \
+            --ip-address "$RUNNER_IP" --output none || \
+            echo "::warning::Failed to remove runner IP $RUNNER_IP from $STATE_SA_NAME — remove it manually."

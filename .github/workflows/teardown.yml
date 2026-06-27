@@ -54,12 +54,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Verify typed confirmation
+        # Inputs passed via env (not interpolated into the script body) to avoid shell injection.
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          TARGET: ${{ inputs.target }}
+          INCLUDE_BOOTSTRAP: ${{ inputs.include_bootstrap }}
         run: |
-          if [ "${{ inputs.confirm }}" != "destroy" ]; then
+          if [ "$CONFIRM" != "destroy" ]; then
             echo "::error::'confirm' must be exactly 'destroy' to proceed. Aborting."
             exit 1
           fi
-          echo "Confirmed. target=${{ inputs.target }} include_bootstrap=${{ inputs.include_bootstrap }}"
+          echo "Confirmed. target=$TARGET include_bootstrap=$INCLUDE_BOOTSTRAP"
 
   synthetic:
     needs: [guard]
