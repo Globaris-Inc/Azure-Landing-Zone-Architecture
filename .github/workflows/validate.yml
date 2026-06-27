@@ -1,0 +1,107 @@
+# .github/workflows/validate.yml
+# Purpose: Static Terraform gate for every PR to main — `fmt -check` once at repo
+#          root, then `init -backend=false` + `validate` for each of the 10 roots.
+#          No Azure credentials, no backend, no plan, no apply. This is the gate
+#          that makes a 🟢 "Complete" status impossible to outrun an actual
+#          validate (the OQ-011 failure mode).
+# Section: 10a — Pipeline & Tooling (validate gate; ADR-018)
+# Last updated: 2026-06-27
+#
+# Authentication: NONE. Validate-only runs need no OIDC, no secrets, no backend.
+#   `terraform init -backend=false` skips backend config and remote state; the
+#   azurerm/azapi providers are still installed (so schema validation works) but
+#   never contacted. Do not add azure/login or ARM_*/TF_VAR_* secrets here.
+#
+# Terraform version: pinned to the exact toolchain that produced the committed
+#   `.terraform.lock.hcl` files (1.15.6) for deterministic, reproducible
+#   validation. NOTE: the plan/apply workflows use `~> 1.9`; this gate pins
+#   exactly on purpose (ADR-018 — reproducible validate). Bump in lock-step with
+#   the lock files if the toolchain is intentionally uplifted.
+#
+# Roots: all 10 init-able roots, each with its own providers.tf. `bootstrap` is
+#   included here (it is excluded from plan-on-pr.yml because it is a one-time
+#   local apply per ADR-005, but it still validates statically).
+
+name: Terraform Validate (PR)
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "bootstrap/**"
+      - "platform/**"
+      - "landing-zones/**"
+      - "synthetic/**"
+      - "modules/**"
+      - "envs/**"
+      - ".github/workflows/validate.yml"
+
+# Least privilege: validate-only needs nothing but to read the checked-out repo.
+# No id-token (no OIDC), no pull-requests (no comment posting), no secrets.
+permissions:
+  contents: read
+
+env:
+  # Pinned toolchain — see header note.
+  TERRAFORM_VERSION: "1.15.6"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # fmt — one check across the whole tree; fails on any unformatted file.
+  # --------------------------------------------------------------------------
+  fmt:
+    name: terraform fmt -check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt -check -recursive
+        run: terraform fmt -check -recursive -diff
+
+  # --------------------------------------------------------------------------
+  # validate — matrix over the 10 roots; each is an independent pass/fail.
+  # init -backend=false (no remote state, no creds) then validate.
+  # --------------------------------------------------------------------------
+  validate:
+    name: validate — ${{ matrix.root }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # validate every root even if one fails
+      matrix:
+        root:
+          - bootstrap
+          - platform/management-groups
+          - platform/management
+          - platform/connectivity
+          - platform/identity
+          - platform/security
+          - landing-zones/corp-a1
+          - landing-zones/corp-a2
+          - landing-zones/online-p1
+          - synthetic
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init (no backend, no creds)
+        working-directory: ${{ matrix.root }}
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform Validate
+        working-directory: ${{ matrix.root }}
+        run: terraform validate -no-color
