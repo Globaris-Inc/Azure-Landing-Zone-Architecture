@@ -3,6 +3,7 @@
 > **Status:** Design (architect). Implementation owned by `devsecops-engineer`.
 > **Section:** 10 (Pipeline & Tooling) — extends the bootstrap pipeline.
 > **ADR:** [ADR-019](../DECISIONS.md#adr-019-cicd-deploy--teardown--parameterized-deployyml--guarded-teardownyml-two-environments)
+> (teardown mechanics amended by [ADR-020](../DECISIONS.md#adr-020-teardown-mechanics--uniform-terraform-destroy-supersedes-the-adr-019-brute-force-split))
 > **Last updated:** 2026-06-27
 
 This document specifies how CI/CD deploys and tears down the ALZ POC. It is the design the
@@ -66,7 +67,8 @@ else is a strict chain.
 
 **Teardown order = reverse:** `9 → (6,7,8) → (3,4,5) → 2 → 1 → [bootstrap]`. Destroying connectivity
 before the spokes that peer to its hub, or MGs before the policy assignments scoped under them, fails
-or orphans. See §6 for the brute-force alternative.
+or orphans. Teardown uses `terraform destroy` for every root in this reverse order (§6, ADR-020); the
+`az group delete` brute force is a deferred manual fallback, not the default.
 
 ---
 
@@ -162,32 +164,60 @@ call; the ordering contract in §2 is the binding part.)
 
 ---
 
-## 6. Teardown mechanics — `terraform destroy` vs `az group delete`
+## 6. Teardown mechanics — uniform `terraform destroy` (with a brute-force fallback)
 
-Per **LESSON 19**, `terraform destroy` reliably gets stuck on Azure ordering quirks (stopped-VM
-extension deletes, orphaned child objects, policy-assignment/MG races). The kit's proven demo-reset is
-`cleanup-demo.yml`, which uses **`az group delete` brute force**.
+> **Reconciled 2026-06-27 (ADR-020, supersedes the ADR-019 split).** The decision below is **uniform
+> `terraform destroy`** for every root (single-root *and* `target=all`). An earlier draft specified a
+> brute-force / Terraform split as "the key correctness point"; that was reconciled to match the
+> validated implementation (`teardown.yml` → `_tf-root.yml`, which runs `terraform destroy` for all roots
+> in reverse order). The split is now a **deferred refinement** (see "Deferred refinement" below), not the
+> design.
+
+**LESSON 19 context.** In the AVD landing zone, `terraform destroy` reliably got stuck on Azure ordering
+quirks — principally **session-host VM** churn (stopped-VM extension deletes, agent/DSC extension races) —
+so the kit's `cleanup-demo.yml` uses **`az group delete` brute force**. **That risk profile does not
+transfer to this repo.** This CAF POC has **no VMs**; its workload is PaaS and control-plane only
+(App Service, SQL, VNets/peerings, Key Vault, Sentinel/Defender onboarding, policy/role/MG objects), all
+of which `terraform destroy` removes cleanly, and Terraform's dependency graph correctly orders the
+MG/policy teardown that `az group delete` cannot even reach (management groups and MG-scoped policy
+assignments are **not** resource groups).
 
 **Decision for this repo:**
 
-- **Per-root, on-demand teardown** (`target != all`) uses **`terraform destroy`** — it keeps state
-  consistent so the root can be cleanly re-applied, which is the point of a surgical single-root
-  teardown.
-- **Full-environment reset** (`target == all`) uses **`az group delete` brute force** by resource group,
-  in reverse-dependency order, mirroring the AVD `cleanup-demo` model. Reasons:
-  - It sidesteps the `destroy`-ordering failures LESSON 19 documents.
-  - It is a *demo reset*, not a production decommission — losing perfect state fidelity is acceptable and
-    expected (state is recreated on the next `deploy.yml` apply, which is greenfield-safe).
-  - **MG- and tenant-scoped objects are NOT resource groups** — `az group delete` does not remove
-    management groups, MG-scoped policy assignments, Entra/CA objects (identity root), or Defender/Sentinel
-    onboarding at MG scope. The full-reset job must therefore **also** run `terraform destroy` (or targeted
-    `az` calls) for the **non-RG roots**: `platform/management-groups`, `platform/identity`, and the
-    MG-scoped parts of `platform/security`. **Brute force handles the regional RG-bound roots; Terraform
-    handles the control-plane/tenant roots.** This split is the key correctness point for this design.
+- **Both per-root teardown (`target != all`) and full-environment reset (`target == all`) use
+  `terraform destroy`**, in reverse dependency order (§2), via the same reusable `_tf-root.yml` the deploy
+  path uses. Reasons:
+  - It keeps **state consistent** so any root — or the whole environment — re-applies cleanly afterward,
+    which is the point of the destroy-then-recreate demo cadence.
+  - One mechanism for single-root and full-reset means **one code path** (`_tf-root.yml` `action=destroy`),
+    no per-root branching on whether a root is RG-bound or control-plane.
+  - Terraform's graph handles the **non-RG roots** (`platform/management-groups`, `platform/identity`,
+    MG-scoped parts of `platform/security`) natively — these are exactly the objects `az group delete`
+    cannot remove, so a Terraform-driven destroy needs no special-casing for them.
+  - The VM-driven `terraform destroy` failures LESSON 19 documents **do not occur** here (no session hosts).
 
-**State-account reachability after brute force:** because the state SA lives in `rg-tfstate-mgmt-*`
-(its own RG, untouched by the workload RG deletes), state survives a full RG-level reset and the next
-deploy re-applies cleanly. Only `include_bootstrap == true` removes it (next item).
+**State-account reachability:** the state SA lives in `rg-tfstate-mgmt-*` (its own RG, never targeted by a
+`target=all` destroy), so state survives a full reset and the next deploy re-applies cleanly. Only
+`include_bootstrap == true` removes the backend (next item).
+
+### Deferred refinement — `az group delete` brute force (LESSON-19 fallback)
+
+The brute-force split is **demoted to a fallback**, not the default mechanism:
+
+- **When it applies.** If a `target=all` `terraform destroy` ever **wedges** on an Azure ordering quirk
+  (the LESSON-19 failure mode), the operator falls back to a manual brute-force reset: `az group delete`
+  on each regional RG-bound resource group in reverse order, then a re-run of `terraform destroy` (or
+  targeted `az`/Terraform calls) for the **non-RG control-plane roots** (`platform/management-groups`,
+  `platform/identity`, MG-scoped `platform/security`), which `az group delete` cannot remove. This is the
+  same brute-force/Terraform split that was previously the design — it now lives only in the runbook.
+- **Where it lives.** This manual fallback is part of the `include_bootstrap=true` scorched-earth runbook
+  surfaced by the `teardown-bootstrap` job (the same path that also documents the manual `az ad app delete`
+  and `rg-tfstate-mgmt-*` deletion). A stuck *non-bootstrap* `target=all` run uses the same per-RG
+  `az group delete` commands without touching the backend.
+- **Why deferred, not built.** Implementing the split in CI adds per-root branching and loses state
+  fidelity (state must be reconciled or recreated) for a failure mode that the no-VM workload here is not
+  expected to hit. Promoting it to the default would only be warranted if `target=all` `terraform destroy`
+  proves unreliable in practice — at which point this section is re-opened with a new ADR.
 
 ### Does "tear down everything" include the bootstrap state backend? — **USER DECISION (see §10)**
 
@@ -318,6 +348,21 @@ fixed, so backend `init` can be blocked. Options for devsecops (pick one, docume
 This is an existing constraint, not introduced here, but the deploy/teardown workflows must account for it
 or they'll hang at `init`.
 
+**DECISION (devsecops, 2026-06-27).** The supported default is **option 2, as a documented prerequisite**:
+the operator keeps the deployer/runner IP(s) (or, for hosted runners, a stable egress IP via an outbound
+NAT — not the brittle full GitHub IP range) in bootstrap `var.ip_allow_list` so `init` reaches the state
+SA. `_tf-root.yml` does **not** mutate the firewall by default — runner-IP churn is an operator concern,
+and mutating a shared SA firewall from inside the parallel `target=all` graph would race (one job's
+`network-rule remove` can cut another job's `init`).
+
+For ad-hoc **single-root** runs from a hosted runner where the IP is not pre-listed, the reusable workflow
+exposes an **opt-in** `manage_runner_ip` input (default `false`). When `true` it allow-lists the runner's
+egress IP via `az storage account network-rule add` before `init` and removes it on exit
+(`if: always()`), so the firewall never leaks a stale IP. It is **deliberately not wired into `deploy.yml`
+/ `teardown.yml`** (which default it to `false`) and **must not** be enabled for `target=all` because of
+the parallel-mutation race. Long-term fix = a private endpoint + self-hosted/private runner (Section 8),
+which removes the firewall-mutation question entirely.
+
 ---
 
 ## 9. DevSecOps hand-off spec
@@ -338,9 +383,11 @@ Concrete, ordered build list. The architecture decisions above are fixed; these 
    Factor per-root steps into a reusable/composite workflow to avoid 9× duplication.
 4. **Author `teardown.yml`** (`workflow_dispatch`): inputs `target`, `confirm` (typed; must equal
    `destroy`), `include_bootstrap` (boolean, default false). First step = confirmation guard. Reverse
-   ordering. Full reset = `az group delete` for RG-bound roots **plus** `terraform destroy` for the
-   control-plane roots (`management-groups`, `identity`, MG-scoped `security`). Gate on
-   `environment: production-destroy`.
+   ordering. **Full reset = `terraform destroy` for every root** (uniform), via the reusable `_tf-root.yml`
+   `action=destroy`, in reverse dependency order — same mechanism as a single-root teardown, which keeps
+   state consistent for a clean re-apply (§6, ADR-020). Gate on `environment: production-destroy`. The
+   `az group delete` brute-force split is a **deferred refinement / manual fallback** for a stuck
+   `target=all` run — document it in the runbook (§6), do not build it into the workflow.
 5. **Retire merge-to-main auto-apply**: delete `apply-on-merge.yml` (or convert to plan-only). Keep
    `plan-on-pr.yml` as the always-on PR plan. (LESSON 17.)
 6. **Add a preflight var-presence check** (LESSON 15) at the top of `deploy.yml`/`teardown.yml`: fail fast

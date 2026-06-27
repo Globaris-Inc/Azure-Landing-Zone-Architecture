@@ -37,11 +37,73 @@
 
 <!-- Newest at the top. -->
 
+### ADR-020: Teardown mechanics — uniform `terraform destroy` (supersedes the ADR-019 brute-force split)
+
+- **Date:** 2026-06-27
+- **Section:** 10 (Pipeline & Tooling) — amends ADR-019
+- **Status:** Accepted — amends the teardown-mechanics portion of [ADR-019](#adr-019-cicd-deploy--teardown--parameterized-deployyml--guarded-teardownyml-two-environments)
+- **Decision makers:** claude (architect), code-reviewer (raised the finding)
+
+**Context:**
+Code review (finding B1) found that ADR-019 and `docs/cicd-deploy-teardown.md` §6/§9 specify the
+full-environment teardown (`target=all`) as a **split** — `az group delete` brute force for the RG-bound
+regional roots **plus** `terraform destroy` for the non-RG control-plane roots (`platform/management-groups`,
+`platform/identity`, MG-scoped `platform/security`) — and §6 calls that split "the key correctness point
+for this design," justified by LESSON 19 (`terraform destroy` gets stuck on Azure ordering quirks). **But
+the implemented and validated `teardown.yml` does not do the split:** it runs `terraform destroy` for every
+root uniformly, in reverse dependency order, via the reusable `_tf-root.yml`. The docs asserted behavior the
+code does not implement; this had to be reconciled before merge. The reconciliation is a choice between
+implementing the split in CI (Option 1) or accepting uniform `terraform destroy` and amending the docs
+(Option 2).
+
+**Decision:**
+Adopt **uniform `terraform destroy`** for both single-root and `target=all` teardown — i.e. keep the
+already-implemented `teardown.yml` / `_tf-root.yml` behavior — and amend the docs to match. The
+`az group delete` brute-force / Terraform split is **demoted to a deferred refinement / manual fallback**
+for the case where a `target=all` `terraform destroy` wedges; it lives only in the runbook (the
+`include_bootstrap=true` scorched-earth path and a per-RG fallback note), not in the workflow. OQ-012
+(teardown scope, `include_bootstrap=false` default), OQ-013 (two GitHub Environments), the
+typed-`confirm=destroy` guard, and the reverse-order `needs:` graph are **unchanged**.
+
+**LESSON 19 — why it does not force the split here:**
+LESSON 19's stuck-`terraform destroy` failures originated in the AVD landing zone and were
+**session-host VM**-driven (stopped-VM extension deletes, agent/DSC extension races, the resources that
+most reliably wedge an ARM delete). **This CAF POC has no VMs.** Its workload is PaaS and control-plane
+only — App Service, SQL, VNets/peerings, Key Vault, Sentinel/Defender onboarding, policy/role/MG objects —
+all of which `terraform destroy` removes cleanly. Moreover the **non-RG roots** (management groups,
+MG-scoped policy assignments, Entra/CA objects) are precisely what `az group delete` **cannot** touch, so
+the split's "brute force handles RGs, Terraform handles control-plane" framing always needed Terraform for
+the hard part anyway; using Terraform for everything is simpler and keeps state consistent for a clean
+re-apply. The LESSON-19 brute-force path is retained as the documented fallback if a `target=all` run ever
+does wedge in practice.
+
+**Alternatives considered:**
+- **Option 1 — implement the split in `teardown.yml`** (`az group delete` for RG-bound roots + `terraform
+  destroy` for control-plane roots): rejected — it adds per-root branching and loses state fidelity (state
+  must be reconciled or recreated) to solve a VM-driven failure mode this no-VM workload is not expected to
+  hit; the implementation is already validated as uniform `terraform destroy`.
+- **Promote brute force to the default but keep Terraform for control-plane roots only:** rejected for the
+  same reason — same complexity, same state-fidelity loss, no benefit absent the VM failure mode.
+
+**Consequences:**
+- Positive: docs ↔ code are consistent (ADR-019/§6/§9 ↔ `teardown.yml` ↔ `_tf-root.yml`); one destroy
+  mechanism for single-root and full reset; state stays consistent so any scope re-applies cleanly; no new
+  workflow code is required to merge.
+- Negative / trade-offs: if a `target=all` `terraform destroy` ever wedges on an Azure ordering quirk, the
+  operator must fall back to the **manual** brute-force runbook (per-RG `az group delete` in reverse order,
+  then `terraform destroy`/targeted `az` for the non-RG control-plane roots). This is documented but not
+  automated. Should that prove common, re-open with a new ADR that promotes the split.
+- Follow-ups required: none blocking — `teardown.yml` already implements the accepted behavior. Its header
+  comment (lines 14-17) already describes uniform `terraform destroy` with brute force as "a documented
+  refinement," so it is consistent with this ADR; no workflow edit is needed.
+
+---
+
 ### ADR-019: CI/CD deploy + teardown — parameterized `deploy.yml` + guarded `teardown.yml`, two Environments
 
 - **Date:** 2026-06-27
 - **Section:** 10 (Pipeline & Tooling) — extends the bootstrap pipeline
-- **Status:** Accepted
+- **Status:** Accepted — **teardown mechanics amended by [ADR-020](#adr-020-teardown-mechanics--uniform-terraform-destroy-supersedes-the-adr-019-brute-force-split)** (the `az group delete` brute-force / Terraform split below is replaced by uniform `terraform destroy`; the rest of ADR-019 — structure, scope OQ-012, two-Environment model OQ-013, OIDC federation — stands)
 - **Decision makers:** user (decisions), claude (architect/design), devsecops-engineer (execution)
 
 **Context:**
@@ -63,7 +125,9 @@ state backend + OIDC app (OQ-012), and the approval model (OQ-013). Full design 
   (typed; the run hard-fails unless it equals `destroy`) and `include_bootstrap` (boolean, default
   `false`). Destroys in reverse dependency order, using `az group delete` brute force for the RG-bound
   regional roots **and** `terraform destroy` for the control-plane/tenant roots (`management-groups`,
-  `identity`, MG-scoped `security`), which are not resource groups (LESSON 19).
+  `identity`, MG-scoped `security`), which are not resource groups (LESSON 19). **[Amended by ADR-020:
+  the brute-force / Terraform split is replaced by uniform `terraform destroy` for all roots; the
+  split is now a deferred manual fallback.]**
 - **Teardown scope (OQ-012):** workload + platform only by default. `include_bootstrap` **defaults to
   `false`** so the state backend (state SA, CMK KV) and the OIDC app/SP/federation survive a full reset
   and redeploy is immediate. `true` is full scorched-earth (decommission) and additionally needs a
@@ -85,6 +149,8 @@ state backend + OIDC app (OQ-012), and the approval model (OQ-013). Full design 
   (spokes wait for connectivity + security); a `needs:` graph can, and preserves legitimate parallelism.
 - `terraform destroy` for the full reset — rejected: LESSON 19 documents it reliably gets stuck on Azure
   ordering quirks; `az group delete` brute force is the proven demo-reset path for RG-bound roots.
+  **[Reversed by ADR-020: LESSON 19's stuck-destroy failures were VM-driven; this no-VM PaaS/control-plane
+  POC destroys cleanly with uniform `terraform destroy`, so that is now the accepted full-reset path.]**
 - Single Environment for both apply and destroy — rejected: destroy warrants a tighter, separate
   reviewer gate (OQ-013).
 
