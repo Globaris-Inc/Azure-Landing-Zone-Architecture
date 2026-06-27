@@ -114,13 +114,19 @@ resource "azapi_resource" "ueba" {
 resource "azurerm_sentinel_watchlist" "vip_users" {
   count = length(var.vip_user_object_ids) > 0 ? 1 : 0
 
-  name             = "VIPUsers"
-  workspace_id     = azurerm_sentinel_log_analytics_workspace_onboarding.this.workspace_id
-  display_name     = "VIP Users"
-  description      = "Entra ID user object IDs flagged as VIPs. Used by analytics rules to elevate severity on VIP-targeted activity."
-  item_search_key  = "UserObjectId"
-  default_duration = "P1Y"
-  labels           = ["VIP", "Identity"]
+  name = "VIPUsers"
+  # azurerm v4: the argument is log_analytics_workspace_id (full LAW resource ID),
+  # matching the data-connector resources above and the onboarding input.
+  log_analytics_workspace_id = module.security_law.resource_id
+  display_name               = "VIP Users"
+  description                = "Entra ID user object IDs flagged as VIPs. Used by analytics rules to elevate severity on VIP-targeted activity."
+  item_search_key            = "UserObjectId"
+  default_duration           = "P1Y"
+  labels                     = ["VIP", "Identity"]
+
+  # Preserve apply ordering after Sentinel onboarding (previously implied by the
+  # workspace_id attribute reference that was replaced).
+  depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.this]
 }
 
 resource "azurerm_sentinel_watchlist_item" "vip_users" {
@@ -136,13 +142,19 @@ resource "azurerm_sentinel_watchlist_item" "vip_users" {
 resource "azurerm_sentinel_watchlist" "high_value_assets" {
   count = length(var.high_value_asset_resource_ids) > 0 ? 1 : 0
 
-  name             = "HighValueAssets"
-  workspace_id     = azurerm_sentinel_log_analytics_workspace_onboarding.this.workspace_id
-  display_name     = "High-Value Assets"
-  description      = "Azure resource IDs flagged as high-value (production data plane, prod Key Vault, etc.). Used to scope alert severity uplift."
-  item_search_key  = "ResourceId"
-  default_duration = "P1Y"
-  labels           = ["HighValue", "Asset"]
+  name = "HighValueAssets"
+  # azurerm v4: the argument is log_analytics_workspace_id (full LAW resource ID),
+  # matching the data-connector resources above and the onboarding input.
+  log_analytics_workspace_id = module.security_law.resource_id
+  display_name               = "High-Value Assets"
+  description                = "Azure resource IDs flagged as high-value (production data plane, prod Key Vault, etc.). Used to scope alert severity uplift."
+  item_search_key            = "ResourceId"
+  default_duration           = "P1Y"
+  labels                     = ["HighValue", "Asset"]
+
+  # Preserve apply ordering after Sentinel onboarding (previously implied by the
+  # workspace_id attribute reference that was replaced).
+  depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.this]
 }
 
 resource "azurerm_sentinel_watchlist_item" "high_value_assets" {

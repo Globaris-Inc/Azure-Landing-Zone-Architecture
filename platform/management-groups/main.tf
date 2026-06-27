@@ -41,22 +41,30 @@ module "alz_management_groups" {
   parent_resource_id = "/providers/Microsoft.Management/managementGroups/${data.azapi_client_config.current.tenant_id}"
 
   # Map each subscription to its target management group.
-  # Keys are management group IDs from the architecture definition.
+  # v0.19.1 schema: each value is { subscription_id, management_group_name }.
+  # The map key is arbitrary; management_group_name is the MG name, which the
+  # module sets to the architecture definition `id` (management/connectivity/
+  # identity/security/corp).
   subscription_placement = {
     management = {
-      subscription_ids = [var.management_subscription_id]
+      subscription_id       = var.management_subscription_id
+      management_group_name = "management"
     }
     connectivity = {
-      subscription_ids = [var.connectivity_subscription_id]
+      subscription_id       = var.connectivity_subscription_id
+      management_group_name = "connectivity"
     }
     identity = {
-      subscription_ids = [var.identity_subscription_id]
+      subscription_id       = var.identity_subscription_id
+      management_group_name = "identity"
     }
     security = {
-      subscription_ids = [var.security_subscription_id]
+      subscription_id       = var.security_subscription_id
+      management_group_name = "security"
     }
     corp = {
-      subscription_ids = [var.landingzones_subscription_id]
+      subscription_id       = var.landingzones_subscription_id
+      management_group_name = "corp"
     }
   }
 }

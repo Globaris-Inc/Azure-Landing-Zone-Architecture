@@ -39,16 +39,10 @@ resource "azurerm_private_dns_zone_virtual_network_link" "corp_a2_to_sql_zone" {
 
 # ---------------------------------------------------------------------------
 # SQL Private Endpoint — DNS zone group
+# Registered via the private_dns_zone_group nested block on
+# azurerm_private_endpoint.sql in main.tf (azurerm has no standalone
+# azurerm_private_dns_zone_group resource).
 # ---------------------------------------------------------------------------
-
-resource "azurerm_private_dns_zone_group" "sql" {
-  name                = "pdzg-sql-corp-a2"
-  private_endpoint_id = azurerm_private_endpoint.sql.id
-
-  private_dns_zone_ids = [data.azurerm_private_dns_zone.sql.id]
-
-  depends_on = [azurerm_private_dns_zone_virtual_network_link.corp_a2_to_sql_zone]
-}
 
 # ---------------------------------------------------------------------------
 # Storage Account — NSG flow log sink (Standard LRS)
