@@ -144,3 +144,64 @@ graph LR
 | ADR | Title | Date | Status |
 |-----|-------|------|--------|
 | ADR-001 | Repo root is the working directory, not a nested alz-poc/ subfolder | 2026-05-04 | Accepted |
+
+---
+
+## ALZ Reference Architecture Fidelity Map
+
+<!-- Gap analysis: this repo vs the Microsoft "Azure landing zone (ALZ) – Hub & Spoke"
+     reference diagram, version 2026-04-02. Author: architect gap-analysis, 2026-06-25.
+     Legend: ✅ Built · ⚠️ Deviation (by-design, see ADR) · ❌ Gap (not built) · ➖ N/A for POC -->
+
+Compared against the Microsoft **ALZ Hub & Spoke** reference (diagram version **2026-04-02**). This is
+the *platform* landing zone; the diagram's application-workload internals are out of scope by design.
+
+| # | Reference element | Status | Where / note |
+|---|-------------------|--------|--------------|
+| C | MG hierarchy (Platform / Landing Zones / Decommissioned / Sandbox) | ✅ | `platform/management-groups` — `avm-ptn-alz` 0.19.1, custom *Globaris* root (ADR-007) |
+| — | Platform **Security** sub — Sentinel + Defender + security LAW | ✅ | `platform/security/{sentinel,defender,diagnostics}.tf` — 7 Defender plans, 10 analytics rules |
+| D | Platform **Management** sub — platform LAW, dashboards, Automation, Update Manager | ✅ ⚠️ | `platform/management` — dashboard workbook JSON is a **placeholder** (replace before demo) |
+| E | **Connectivity** sub — hub VNet, Firewall Premium (IDPS), VPN GW, DNS Private Resolver | ✅ | `platform/connectivity` — `avm-ptn-alz-connectivity-hub-and-spoke-vnet` 0.17.1 |
+| E | — Azure **DDoS Protection** plan | ❌ | Not deployed (cost ~$3k/mo) — POC deviation; flag if faithful posture required |
+| E | — **ExpressRoute** circuits / gateway | ⚠️ | `express_route = false` — no on-premises in POC |
+| E | — Azure **Bastion** | ⚠️ | `bastion = false` in both hubs |
+| B | IAM — MFA, PIM, Conditional Access | ✅ | `platform/identity` — 8 CA policies (report-only), PIM eligible at MG scope |
+| B | — Approval workflow / access reviews | ⚠️ | PIM activation only; access-review + approval-flow not modelled |
+| — | **Identity** sub — DCs (DC1–3) *or* Entra Domain Services + identity VNet + RSV | ❌ | **`identity_mode = "none"`** (OQ-002) — domain-services infra NOT built |
+| F | Landing-zone spokes — VNet, Key Vault, Storage, LAW, private endpoints | ✅ | `landing-zones/{corp-a1,corp-a2,online-p1}` |
+| F | — Backup / Site Recovery vault | ✅ | corp-a2 RSV (GeoRedundant, AVM module) ✅; corp-a1 RSV (ZoneRedundant, `avm-res-recoveryservices-vault` 1.1.3) ✅ — closed Wave 2 / ADR-012 |
+| F | Separate **Online** LZ subscription (multi-sub A-series) | ⚠️ | Online MG exists; `online-p1` deploys into the **shared** LZ sub (ADR-003) |
+| H | **Sandbox** subscription (separate) | ⚠️ | Sandbox MG exists but empty; collapsed into LZ sub (ADR-003) |
+| G | **Compliant VM template** — gallery, in-guest DSC, backup policy, extensions, tagging | ❌ | No golden-image / guest-configuration construct anywhere in the repo |
+| I | DevOps — Git, pipelines, policy + role definitions | ✅ ⚠️ | `.github/workflows`, `policies/` — Section 10b/c (pre-commit, drift, OPA, PSRule) deferred |
+| A | EA / MCA billing hierarchy | ➖ | Billing construct, not IaC |
+| — | On-premises AD / hybrid bridge | ➖ | No on-premises in POC |
+
+### Gap checklist (decisions made 2026-06-25 — see ADR-010…016 + `docs/gap-closure-plan.md`)
+
+- [ ] **G1 — Identity subscription domain services** — **CLOSE / Wave 3**. Decision: **Microsoft Entra
+  Domain Services** (`identity_mode = "entra-ds"`, Standard, ~$110/mo) + identity VNet (NSG) + RSV, peered
+  to primary hub. ADR-010 (reverses OQ-002 → `entra-ds`). Native `azurerm_active_directory_domain_service`
+  (no AVM module). One-time manual tenant pre-step (DS SP + `AAD DC Administrators` group).
+- [ ] **G2 — Compliant VM template (design area G)** — **CLOSE / Wave 4**. Azure Compute Gallery + image
+  definition (`avm-res-compute-gallery` 0.2.0) + built-in machineConfiguration baseline Guest-Config
+  initiative + backup policy (reuse G4 RSV) + tag enforcement (reuse ADR-008). ADR-011.
+- [ ] **G3 — DDoS Protection plan** — **CONDITIONAL / Wave 5**. Built behind `var.enable_ddos_protection`
+  (`avm-res-network-ddosprotectionplan` 0.3.0), **default false** (~$2,944/mo if enabled). ADR-013; user
+  decides default via **OQ-009**.
+- [x] **G4 — corp-a1 backup vault** — **CLOSED / Wave 2 (2026-06-25)**. RSV in corp-a1
+  (`landing-zones/corp-a1/backup.tf`), same module/pin (1.1.3) as corp-a2, ZoneRedundant. ADR-012.
+- [ ] **G5 — Separate Sandbox / Online subscriptions** — **CONDITIONAL / Wave 5**. Recommend **keep
+  collapsed (deviation)** — it's a subscription-*count* gap, not a capability gap (MG nodes + policy
+  inheritance already present). ADR-014; user may override via **OQ-010**.
+- [ ] **G6 — Azure Bastion** — **CLOSE / Wave 1**. Enable on the primary hub via the existing
+  `avm-ptn-alz-connectivity-hub-and-spoke-vnet` 0.17.1 `bastion` flag (~$140/mo). ADR-015.
+
+### Project backlog (not reference gaps, but open)
+
+- [ ] Section 10b/c — pre-commit, drift detection, OPA/Conftest, PSRule gates
+- [ ] Section 11 — documentation deliverables (`SECURITY.md`, `RUNBOOK.md`, `COST.md` are linked from
+  README but not yet authored)
+- [ ] Section 12 — platform acceptance validation + **OQ-008** (scope OIDC SP down from Owner-at-Tenant-Root)
+- [ ] Replace placeholder workbook JSON (Sentinel, Carbon Optimization) before any live demo
+- [ ] Housekeeping: this ADR quick-ref table lists only ADR-001 — DECISIONS.md has ADR-001…009
