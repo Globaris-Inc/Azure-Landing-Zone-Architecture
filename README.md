@@ -108,3 +108,4 @@ cd bootstrap            && terraform destroy
 - [RUNBOOK.md](RUNBOOK.md) — Failover drill, incident triage, cost spike response
 - [COST.md](COST.md) — Per-component cost breakdown and FinOps levers
 - [DECISIONS.md](DECISIONS.md) — Architectural decision records
+- [landing-zone-kit/](landing-zone-kit/README.md) — reusable LZ build kit: live-apply lessons, decision framework, role process
