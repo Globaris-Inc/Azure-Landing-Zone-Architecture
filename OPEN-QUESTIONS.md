@@ -31,6 +31,60 @@
 
 <!-- Newest at the top. -->
 
+### OQ-013: CI/CD approval model for apply vs teardown
+
+- **Raised:** 2026-06-27 (CI/CD deploy + teardown design session, architect)
+- **Section:** 10 (Pipeline & Tooling)
+- **Blocking:** Yes (until resolved) — gates the structure of `deploy.yml` / `teardown.yml`
+- **Priority:** High
+
+**Question:**
+How should apply and teardown be gated? One shared GitHub Environment for both, or separate
+environments so destroy approval is a distinct, more deliberate gate? And what extra guards on teardown?
+
+**Options being considered:**
+- A: One `production` Environment gates both apply and destroy.
+- B: Two Environments — `production` gates apply (`deploy.yml`), `production-destroy` gates teardown
+  (`teardown.yml`) — each with a required reviewer; teardown also requires a typed `confirm=destroy`
+  input that hard-fails the run before any Azure login.
+
+**RESOLVED 2026-06-27:** Option B. TWO GitHub Environments: `production` (apply gate, referenced via
+`environment:` on apply jobs in `deploy.yml`) and `production-destroy` (teardown gate, referenced on the
+teardown job in `teardown.yml`), each with ≥1 required reviewer. Teardown additionally hard-fails its
+first step unless `confirm == "destroy"`. This requires two new OIDC federated credentials (subjects
+`...:environment:production` and `...:environment:production-destroy`) in `bootstrap/identity.tf` and a
+bootstrap re-apply. Captured in ADR-019.
+
+---
+
+### OQ-012: Does "tear down everything" include the bootstrap state backend + OIDC app?
+
+- **Raised:** 2026-06-27 (CI/CD deploy + teardown design session, architect)
+- **Section:** 10 (Pipeline & Tooling)
+- **Blocking:** Yes (until resolved) — defines the `teardown.yml` `include_bootstrap` default + scope
+- **Priority:** High
+
+**Question:**
+When the operator chooses to "tear down everything," should the teardown also remove the bootstrap layer
+(state Storage Account, CMK Key Vault, OIDC app registration / SP / federated credentials), or only the
+9 workload + platform roots?
+
+**Options being considered:**
+- A: Scorched-earth by default — full reset also deletes the state backend + OIDC app (next deploy needs
+  a manual re-bootstrap and re-setting the three GitHub Variables).
+- B: Workload + platform only by default — keep the bootstrap state backend + OIDC app so redeploy is
+  immediate; expose an `include_bootstrap` input (default `false`) for the rare full-decommission case.
+
+**RESOLVED 2026-06-27:** Option B. Teardown scope is workload + platform only. `teardown.yml` exposes an
+`include_bootstrap` boolean input that **defaults to `false`** — the state SA, CMK KV, and OIDC
+app/SP/federation are kept so the environment can be redeployed immediately from CI with no re-bootstrap
+or GitHub-Variable re-wiring. `include_bootstrap=true` is full decommission only and additionally
+requires a documented manual `az ad app delete` (the SP cannot delete its own Entra app via ARM Owner)
+and — until LESSON 18 deterministic naming lands — a manual `poc.backend.hcl` update. Captured in
+ADR-019.
+
+---
+
 ### OQ-011: Spoke `avm-res-network-virtualnetwork` 0.17.1 schema drift + missing lock files
 
 - **Raised:** 2026-06-25 (Gap-closure Wave 2 / G4 session, cloud-engineer)

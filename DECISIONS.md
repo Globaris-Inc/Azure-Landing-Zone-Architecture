@@ -37,6 +37,73 @@
 
 <!-- Newest at the top. -->
 
+### ADR-019: CI/CD deploy + teardown — parameterized `deploy.yml` + guarded `teardown.yml`, two Environments
+
+- **Date:** 2026-06-27
+- **Section:** 10 (Pipeline & Tooling) — extends the bootstrap pipeline
+- **Status:** Accepted
+- **Decision makers:** user (decisions), claude (architect/design), devsecops-engineer (execution)
+
+**Context:**
+CI/CD must (1) deploy any single platform/landing-zone root individually, (2) deploy the whole
+environment in dependency order, and (3) tear everything down — all via OIDC, no stored secrets,
+appropriately gated. The pre-existing `apply-on-merge.yml` auto-applied on every push to `main`, which
+contradicts LESSON 17 (deploys must be explicit, not merge-triggered) and the destroy-then-recreate demo
+cadence. Two user decisions were outstanding: whether "tear down everything" includes the bootstrap
+state backend + OIDC app (OQ-012), and the approval model (OQ-013). Full design in
+[docs/cicd-deploy-teardown.md](docs/cicd-deploy-teardown.md).
+
+**Decision:**
+- **Deploy:** one parameterized `workflow_dispatch` workflow `deploy.yml` with `target`
+  (choice: the 9 deployable roots + `all`) and `action` (choice: `plan` | `apply`). `target=all` runs
+  the 9 backend-state roots via a `needs:` job graph in dependency order; a single `target` runs just
+  that root. `apply` jobs gate on the `production` GitHub Environment.
+- **Teardown:** a separate guarded workflow `teardown.yml` (`workflow_dispatch`) — not a third `action`
+  on deploy — because destroy needs stronger/different guards and reverse ordering. Inputs: `confirm`
+  (typed; the run hard-fails unless it equals `destroy`) and `include_bootstrap` (boolean, default
+  `false`). Destroys in reverse dependency order, using `az group delete` brute force for the RG-bound
+  regional roots **and** `terraform destroy` for the control-plane/tenant roots (`management-groups`,
+  `identity`, MG-scoped `security`), which are not resource groups (LESSON 19).
+- **Teardown scope (OQ-012):** workload + platform only by default. `include_bootstrap` **defaults to
+  `false`** so the state backend (state SA, CMK KV) and the OIDC app/SP/federation survive a full reset
+  and redeploy is immediate. `true` is full scorched-earth (decommission) and additionally needs a
+  documented manual `az ad app delete` (the SP cannot delete its own Entra app via ARM Owner).
+- **Approval model (OQ-013):** TWO GitHub Environments — `production` gates apply in `deploy.yml`;
+  `production-destroy` gates teardown in `teardown.yml` — each with a required reviewer, plus the typed
+  `confirm=destroy` guard on teardown. This keeps destroy approval a separate, more deliberate gate.
+- **Retire** `apply-on-merge.yml` (deleted; deploys are now explicit — LESSON 17). Keep
+  `plan-on-pr.yml` (always-on PR plan) and `validate.yml` (static gate).
+- **OIDC federation:** two new federated credentials are required for the gated jobs (their OIDC `sub`
+  becomes `repo:<org>/<repo>:environment:<env>`): subjects `...:environment:production` and
+  `...:environment:production-destroy` added to `azuread_application.oidc` in `bootstrap/identity.tf`.
+  **Bootstrap must be re-applied** for the gated jobs to authenticate.
+
+**Alternatives considered:**
+- Third `action=destroy` value on `deploy.yml` — rejected: destroy needs a different gate, reverse
+  ordering, and a typed confirm; a separate file makes the blast radius obvious in the Actions UI.
+- A `matrix` for `target=all` — rejected: a matrix cannot express the partial cross-root order
+  (spokes wait for connectivity + security); a `needs:` graph can, and preserves legitimate parallelism.
+- `terraform destroy` for the full reset — rejected: LESSON 19 documents it reliably gets stuck on Azure
+  ordering quirks; `az group delete` brute force is the proven demo-reset path for RG-bound roots.
+- Single Environment for both apply and destroy — rejected: destroy warrants a tighter, separate
+  reviewer gate (OQ-013).
+
+**Consequences:**
+- Positive: explicit, auditable deploys; one-root and whole-environment paths from one entrypoint;
+  destroy is hard to trigger accidentally (typed confirm + dedicated environment); default teardown
+  keeps the backend so redeploy needs no re-bootstrap or GitHub-Variable re-wiring.
+- Negative / trade-offs: relies on ADR-006's broad SP scope (Owner at Tenant Root MG) for both apply and
+  destroy (tracked under OQ-008); `az group delete` brute force loses state fidelity for the reset roots
+  (acceptable for a demo — state is recreated greenfield-safe on next apply); `include_bootstrap=true`
+  needs a manual `az ad app delete` and (until LESSON 18 deterministic naming lands) a manual
+  `poc.backend.hcl` update.
+- Follow-ups required: re-apply `bootstrap/` to register the two environment federated credentials;
+  create the `production` and `production-destroy` Environments with reviewers; cloud-engineer to migrate
+  bootstrap to deterministic (sub-ID-derived) state-backend naming (LESSON 18) before relying on
+  `include_bootstrap=true`.
+
+---
+
 ### ADR-018: OQ-011 remediation — reconcile module calls to pinned AVM schemas, commit lock files per root, add a CI `terraform validate` gate
 
 - **Date:** 2026-06-27
