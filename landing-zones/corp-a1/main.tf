@@ -119,10 +119,10 @@ module "spoke_vnet" {
   source  = "Azure/avm-res-network-virtualnetwork/azurerm"
   version = "0.17.1"
 
-  name                = "vnet-spoke-corp-a1-${var.org_prefix}-${var.environment}"
-  resource_group_name = azurerm_resource_group.network.name
-  location            = var.primary_location
-  address_space       = [var.spoke_address_space]
+  name          = "vnet-spoke-corp-a1-${var.org_prefix}-${var.environment}"
+  parent_id     = azurerm_resource_group.network.id # v0.17.1: parent_id (RG resource ID) replaces resource_group_name
+  location      = var.primary_location
+  address_space = [var.spoke_address_space]
 
   subnets = {
     integration = {
@@ -329,9 +329,11 @@ resource "azurerm_mssql_database" "app" {
 # ---------------------------------------------------------------------------
 # SQL Private Endpoint
 #
-# DEVIATION: Private DNS zone group omitted — centralised Private DNS zones for
-# privatelink.database.windows.net are deployed in Section 4 (Private Endpoints
-# + Private DNS). The PE NIC IP is allocated here; DNS wiring follows in Section 4.
+# The DNS zone group registers the PE NIC IP into the centralised
+# privatelink.database.windows.net zone (Connectivity subscription, Section 4).
+# azurerm has no standalone azurerm_private_dns_zone_group resource — the zone
+# group is a nested block on the private endpoint. The zone is looked up via
+# data.azurerm_private_dns_zone.sql (see dns_links.tf).
 # ---------------------------------------------------------------------------
 
 resource "azurerm_private_endpoint" "sql" {
@@ -345,6 +347,11 @@ resource "azurerm_private_endpoint" "sql" {
     private_connection_resource_id = azurerm_mssql_server.this.id
     subresource_names              = ["sqlServer"]
     is_manual_connection           = false
+  }
+
+  private_dns_zone_group {
+    name                 = "pdzg-sql-corp-a1"
+    private_dns_zone_ids = [data.azurerm_private_dns_zone.sql.id]
   }
 
   tags = local.common_tags

@@ -31,6 +31,85 @@
 
 <!-- Newest at the top. -->
 
+### OQ-011: Spoke `avm-res-network-virtualnetwork` 0.17.1 schema drift + missing lock files
+
+- **Raised:** 2026-06-25 (Gap-closure Wave 2 / G4 session, cloud-engineer)
+- **Section:** 9 (Landing Zone Spokes) — infra hygiene, not a feature gap
+- **Blocking:** Partially — does **not** block G4 (the new corp-a1 RSV validates clean in isolation), but **does** block a clean root-level `terraform validate`/`plan` for `landing-zones/corp-a1` (and likely `corp-a2`/`online-p1`).
+- **Priority:** Medium
+
+> **RESOLVED — 2026-06-26 (Option A+B remediation, cloud-engineer) → fully closed 2026-06-27.**
+> Option B was taken across the board: reconcile each call to its pinned module/provider schema (no version bumps), and generate `.terraform.lock.hcl` for every init-able root (Option A). On 2026-06-26, **9 of 10 roots** validated clean; only `platform/connectivity` remained blocked on a provider-version conflict. **On 2026-06-27 the architect's ADR-017 azapi pin (`~> 2.5`) was applied, and connectivity now validates — making it 10 of 10.** OQ-011 is fully RESOLVED. Fixes applied:
+> - **All 3 spokes** (corp-a1/corp-a2/online-p1): `spoke_vnet` `resource_group_name = …network.name` → `parent_id = …network.id` (v0.17.1 schema). Subnet sub-schema + consumed outputs (`name`, `resource_id`, `subnets[...].resource_id`) were already correct for 0.17.1 — no other change needed.
+> - **corp-a1 / corp-a2**: removed the non-existent `azurerm_private_dns_zone_group` resource (it is not an azurerm resource type) and moved DNS zone registration into the `private_dns_zone_group {}` nested block on `azurerm_private_endpoint.sql` (behavior-preserving).
+> - **platform/management-groups**: `subscription_placement` reshaped to the v0.19.1 schema (`{ subscription_id, management_group_name }` per entry; MG names = arch-def ids). Same subscription→MG placements.
+> - **platform/security**: `module.security_kv.resource.name/.vault_uri` → `.name`/`.uri` (avm-res-keyvault-vault output names); `azurerm_sentinel_watchlist` `workspace_id` → `log_analytics_workspace_id = module.security_law.resource_id` (azurerm v4 arg), with `depends_on` re-added to preserve onboarding order.
+> - **platform/connectivity**: `private_dns_zones` call reconciled to v0.23.1 (`resource_group_name`→`parent_id`, dropped non-existent `resource_group_creation_enabled`). **CLOSED 2026-06-27 — see below.**
+>
+> **~~STILL OPEN — `platform/connectivity` only~~ → CLOSED 2026-06-27:** On 2026-06-26 init failed on a **provider version-constraint conflict**: the root pinned `azapi = "~> 2.4.0"` (`providers.tf:19` → `>=2.4.0,<2.5.0`), but sub-modules of **both** `avm-ptn-alz-connectivity-hub-and-spoke-vnet` v0.17.1 and `avm-ptn-network-private-link-private-dns-zones` v0.23.1 require `azapi ~> 2.5` (`>=2.5.0,<3.0.0`) — disjoint ranges, so init aborted. **The architect resolved this in ADR-017: pin azapi `~> 2.5`.** On 2026-06-27 the cloud-engineer applied `providers.tf:19` → `azapi = "~> 2.5"`; `terraform init -backend=false` now succeeds (azapi resolves to v2.10.0) and `terraform validate` returns `Success! The configuration is valid.` (no warnings). The dns.tf v0.23.1 reconciliation validated clean with no further drift — the azapi bump alone was sufficient. `.terraform.lock.hcl` generated for connectivity (to be committed). **All 10 roots now validate clean. OQ-011 fully RESOLVED.**
+
+**Question:**
+On a clean `terraform init -backend=false` (no committed `.terraform.lock.hcl`), the `module "spoke_vnet"` block in `landing-zones/corp-a1/main.tf` fails validation: it passes `resource_group_name`/`address_space`, but the `Azure/avm-res-network-virtualnetwork/azurerm` source that init resolves for the `version = "0.17.1"` pin expects **`parent_id`** (a resource-group ID) instead. This aborts init before all modules install, so the whole root cannot validate. Reproduced with the new `backup.tf` removed — it is pre-existing and unrelated to G4. Root cause is most likely that no `.terraform.lock.hcl` is committed for the spokes, so the originally-validated module build is not pinned and the registry now serves a differently-shaped 0.17.1 artifact (or the call was written against a build that differs from the published 0.17.1).
+
+**Options being considered:**
+- A: Commit `.terraform.lock.hcl` for each spoke (and all roots) so module/provider builds are reproducible; re-run init/validate against the locked build.
+- B: Reconcile the `spoke_vnet` call to the published 0.17.1 schema (`parent_id` + current subnet shape) across corp-a1/corp-a2/online-p1, then re-pin.
+- C: Bump the vnet module to a current version and update the call shape (larger change; cross-spoke).
+
+Recommend a dedicated remediation pass (architect + cloud-engineer) — out of scope for the G4 wave per the section-per-session rule.
+
+
+- **Raised:** 2026-06-25 (gap-closure planning)
+- **Section:** 9 / 12 (Wave 5)
+- **Blocking:** Yes — blocks the G5 portion of Wave 5 only (does not block G1/G2/G3/G4/G6)
+- **Priority:** Medium
+
+**Question:**
+ADR-003 collapsed the Sandbox and Online archetypes into the single shared Landing Zones subscription. The
+ALZ reference shows them as **separate subscriptions**. ADR-014 recommends KEEPING the collapse as a
+documented deviation for the POC (it is a subscription-*count* gap, not a capability gap — the MG nodes,
+policy inheritance, and RG segmentation already demonstrate the boundary). The user wants all gaps
+addressed, so confirm the call:
+
+**Options:**
+- A: **Keep collapsed (deviation)** — recommended. No extra cost, no billing-scope dependency. Reviewer
+  accepts ADR-014 explicitly.
+- B: **Provision two real subscriptions** (one Online, one Sandbox) and bind `online-p1` + a sandbox RG-set
+  to them under the existing MG nodes. Requires: (1) two more subscription IDs supplied in `poc.tfvars`,
+  **or** (2) an EA/MCA enrollment-account ID so the engineer can use the `avm-ptn-lz-vending` subscription-
+  vending pattern. Adds provisioning complexity and a small per-sub idle baseline.
+
+**Needed from user:** choose A or B. If B, supply either two sub IDs or an EA/MCA enrollment account ID.
+
+---
+
+### OQ-009: Fund Azure DDoS Network Protection for the POC? (G3)
+
+- **Raised:** 2026-06-25 (gap-closure planning)
+- **Section:** 8 (Wave 5)
+- **Blocking:** No — the construct ships flag-gated (`var.enable_ddos_protection = false`); this only
+  decides the default/active state
+- **Priority:** Medium
+
+**Question:**
+The reference diagram shows an Azure **DDoS Network Protection** plan on the hub. Per ADR-013 the
+cloud-engineer will build the construct (`Azure/avm-res-network-ddosprotectionplan/azurerm` v0.3.0, wired to
+the hub + online-p1 VNets) behind `var.enable_ddos_protection`, **default false**. DDoS Network Protection
+is a **~$2,944/mo flat** plan — roughly 20–35x the entire rest of the platform's idle cost.
+
+**Options:**
+- A: **Keep default false** (recommended) — capability built and one toggle away; zero idle DDoS cost. The
+  ARCHITECTURE.md deviation becomes "pre-staged, disabled."
+- B: **Set default true / fund it** — only if a live demo of DDoS telemetry/metrics is required and the
+  ~$2,944/mo is acceptable for the demo window.
+- C: (noted, not recommended) DDoS **IP Protection** per-public-IP tier (~$199/mo/IP) instead of the
+  network-tier plan — cheaper but does not match the reference's network-tier construct and is billed
+  per IP; out of scope unless the user prefers it.
+
+**Needed from user:** confirm A (default false), or approve B with the monthly spend, or request C.
+
+---
+
 ### OQ-001: Tenant and subscription model for the POC
 
 - **Raised:** Bootstrap
@@ -65,7 +144,15 @@ PROMPT.md Section 8 leaves this as a `var.identity_mode` toggle. For the POC def
 - B: Microsoft Entra Domain Services (~$110/mo, less to manage, less to demo)
 - C: Skip entirely for POC, leave the variable but default to `none`
 
-**RESOLVED 2026-05-14:** Option C — `identity_mode = "none"`. Identity sub not built; `platform/identity/` left as scaffold only. No impact on Section 9 (spokes do not require domain services).
+~~**RESOLVED 2026-05-14:** Option C — `identity_mode = "none"`. Identity sub not built; `platform/identity/` left as scaffold only. No impact on Section 9 (spokes do not require domain services).~~
+
+**SUPERSEDED 2026-06-25 (ADR-010):** Reversed during gap-closure (G1). New resolution: **Option B —
+Microsoft Entra Domain Services** (`identity_mode = "entra-ds"`, Standard SKU, ~$110/mo). Rationale:
+2026 CAF identity guidance favours managed Entra DS over self-managed DCs (AD-minimization, cloud-first);
+less to manage and demo. The `var.identity_mode` toggle is retained so `ad-ds` (two B2s DCs) remains
+selectable, but `entra-ds` is the shipped default. Build path in `docs/gap-closure-plan.md` Wave 3.
+Note: requires a one-time **manual** tenant pre-step (Domain Controller Services SP + `AAD DC
+Administrators` group) and surfaces OQ-003 (POC domain name).
 
 ---
 

@@ -39,12 +39,12 @@ output "security_kv_id" {
 
 output "security_kv_name" {
   description = "Name of the security Key Vault."
-  value       = module.security_kv.resource.name
+  value       = module.security_kv.name # avm-res-keyvault-vault exposes `name`, not `resource.name`
 }
 
 output "security_kv_uri" {
   description = "Vault URI of the security Key Vault. Used to construct Key Vault secret references."
-  value       = module.security_kv.resource.vault_uri
+  value       = module.security_kv.uri # avm-res-keyvault-vault exposes `uri`, not `resource.vault_uri`
 }
 
 # ---------------------------------------------------------------------------

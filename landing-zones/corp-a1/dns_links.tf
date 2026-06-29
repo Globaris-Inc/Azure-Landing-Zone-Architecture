@@ -38,17 +38,11 @@ resource "azurerm_private_dns_zone_virtual_network_link" "corp_a1_to_sql_zone" {
 
 # ---------------------------------------------------------------------------
 # SQL Private Endpoint — DNS zone group
-# Registers the PE NIC IP into the centralized SQL private DNS zone.
+# Registered via the private_dns_zone_group nested block on
+# azurerm_private_endpoint.sql in main.tf (azurerm has no standalone
+# azurerm_private_dns_zone_group resource). The data source and VNet link below
+# provide the zone ID and registration this depends on.
 # ---------------------------------------------------------------------------
-
-resource "azurerm_private_dns_zone_group" "sql" {
-  name                = "pdzg-sql-corp-a1"
-  private_endpoint_id = azurerm_private_endpoint.sql.id
-
-  private_dns_zone_ids = [data.azurerm_private_dns_zone.sql.id]
-
-  depends_on = [azurerm_private_dns_zone_virtual_network_link.corp_a1_to_sql_zone]
-}
 
 # ---------------------------------------------------------------------------
 # Storage Account — NSG flow log sink (Standard LRS, minimal retention)

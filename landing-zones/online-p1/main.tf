@@ -175,10 +175,10 @@ module "spoke_vnet" {
   source  = "Azure/avm-res-network-virtualnetwork/azurerm"
   version = "0.17.1"
 
-  name                = "vnet-spoke-online-p1-${var.org_prefix}-${var.environment}"
-  resource_group_name = azurerm_resource_group.network.name
-  location            = var.primary_location
-  address_space       = [var.spoke_address_space]
+  name          = "vnet-spoke-online-p1-${var.org_prefix}-${var.environment}"
+  parent_id     = azurerm_resource_group.network.id # v0.17.1: parent_id (RG resource ID) replaces resource_group_name
+  location      = var.primary_location
+  address_space = [var.spoke_address_space]
 
   subnets = {
     appgateway = {

@@ -37,6 +37,402 @@
 
 <!-- Newest at the top. -->
 
+### ADR-018: OQ-011 remediation — reconcile module calls to pinned AVM schemas, commit lock files per root, add a CI `terraform validate` gate
+
+- **Date:** 2026-06-27
+- **Section:** Cross-cutting (infra hygiene; touches Sections 8, 9, 10)
+- **Status:** Accepted
+- **Decision makers:** claude (architect), cloud-engineer (execution)
+
+**Context:**
+Every section was marked 🟢 Complete in the WORKLOG, but those statuses **predated any real
+`terraform validate`** — the work log repeatedly recorded "validate NOT RUN" (no remote-state/firewalled
+backend creds during build, and no committed `.terraform.lock.hcl`, so a clean `init` re-resolved modules
+to whatever the registry served). The 2026-06-26 remediation pass ran `terraform init -backend=false` +
+`validate` on all 10 roots and found schema drift: several calls were written against a module build that
+differed from the published pinned tag. Concretely, across the tree the following were stale against the
+**pinned** AVM schemas:
+- `avm-res-network-virtualnetwork` v0.17.1 — VNet sub-module is `parent_id` (RG resource ID), not
+  `resource_group_name` (all 3 spokes + the connectivity hub path).
+- `avm-ptn-network-private-link-private-dns-zones` v0.23.1 — `parent_id`, no `resource_group_creation_enabled`.
+- `avm-ptn-alz` v0.19.1 — `subscription_placement` object shape `{ subscription_id, management_group_name }`.
+- `avm-res-keyvault-vault` — outputs are `name`/`uri`, not a `resource` object.
+- `azurerm_private_dns_zone_group` — **not a provider resource type**; the canonical pattern is the nested
+  `private_dns_zone_group {}` block on `azurerm_private_endpoint`.
+- `azurerm_sentinel_watchlist` — `log_analytics_workspace_id` (azurerm v4), not `workspace_id`.
+
+**Decision:**
+Adopt **Option B** (reconcile each call to its already-pinned module/provider schema — *no version bumps*)
+as the remediation standard, plus **Option A** (generate and **commit** a `.terraform.lock.hcl` for every
+init-able root) so module/provider builds are reproducible and `validate`/`plan` are deterministic going
+forward. Lock files for `platform/*` and `landing-zones/*` are now committed; `bootstrap/.terraform.lock.hcl`
+stays git-ignored (ADR-005 — one-time local apply). The single exception requiring a version action is the
+connectivity azapi pin, handled separately in **ADR-017**. A CI `terraform validate` gate (run
+`init -backend=false` + `validate` per root, `fmt -check -recursive`) is added so a 🟢 status can never
+again outrun an actual validate; the gate is the new definition of "Complete" for any IaC section.
+
+**Alternatives considered:**
+- Bump module versions to match the as-written calls (Option C) — rejected: larger, cross-root change that
+  re-opens verification on every consumed input/output; the pinned versions are fine, only the *calls* drifted.
+- Leave roots unlocked and rely on registry "latest 0.x" — rejected: that is exactly the drift that let
+  "Complete" sections fail a first real validate; non-reproducible by construction.
+
+**Consequences:**
+- Positive: 9/10 roots now `init -backend=false` + `validate` clean with committed locks; drift is frozen;
+  CI gate makes regressions visible at PR time, not demo time. No behavioral change, no apply.
+- Negative / trade-offs: committed lock files must be refreshed deliberately (`terraform init -upgrade`) on
+  any future intentional uplift; the CI gate adds ~1–2 min per root to PR runs.
+- Follow-ups: cloud-engineer applies ADR-017 (azapi pin) to make connectivity the 10th clean root and commit
+  its lock; devsecops-engineer wires the `validate` gate into `.github/workflows/`; reviewer treats a green
+  validate gate as a merge precondition. The pre-existing uncommitted G4 files
+  (`landing-zones/corp-a1/backup.tf` + corp-a1 outputs/variables) validate clean and should be committed with
+  this pass.
+
+---
+
+### ADR-017: Connectivity `azapi` provider pin aligned to `~> 2.5` (module requirement)
+
+- **Date:** 2026-06-27
+- **Section:** 8 — Standard Platform Components (Connectivity sub)
+- **Status:** Accepted
+- **Decision makers:** claude (architect); cloud-engineer applies
+
+**Context:**
+`platform/connectivity/providers.tf:19` pins `azapi = "~> 2.4.0"`. A **three-component** `~>` pin means
+`>= 2.4.0, < 2.5.0`. The connectivity root composes `Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet`
+v0.17.1 and `Azure/avm-ptn-network-private-link-private-dns-zones` v0.23.1. Verified at the pinned tags
+(2026-06-27): both top-level modules pin `azapi ~> 2.4` (two-component → `>= 2.4.0, < 3.0.0`), but their
+nested sub-modules — notably the `subnet` sub-module of `avm-res-network-virtualnetwork` v0.17.1 (consumed
+by the hub-and-spoke module) — pin **`azapi ~> 2.5`** (two-component → `>= 2.5.0, < 3.0.0`). The root's
+`>= 2.4.0, < 2.5.0` and the sub-modules' `>= 2.5.0` are **disjoint on the lower bound**, so no azapi
+version satisfies the whole graph and `terraform init` aborts before producing a lock file. (NOTE: the
+remediation note described the sub-module ceiling as `< 2.6.0`; that was a mis-read — a two-component
+`~> 2.5` has no 2.6 ceiling. The conflict is purely the root's `< 2.5.0` lower-bound ceiling. The fix is
+the same either way.) azapi's latest is 2.10.0 (May 2026), so the 2.5.x line is well-established and stable.
+
+**Decision:**
+Bump the connectivity root pin from `azapi = "~> 2.4.0"` to **`azapi = "~> 2.5"`** (i.e. `>= 2.5.0, < 3.0.0`).
+This aligns the root with the floor its own sub-modules already require and removes the disjoint constraint;
+`init` then selects the highest 2.x azapi satisfying every node (currently 2.10.0) and writes a lock file.
+No upper-bound conflict is introduced: every azapi constraint in the graph (`~> 2.4`, `~> 2.5`) intersects
+`~> 2.5` at `>= 2.5.0`. The other root providers are independent of azapi and unaffected — `azurerm
+~> 4.71.0` (matches modules' `~> 4.0`), `modtm ~> 0.3.0`, `random ~> 3.8.1`. This is the minimal, lowest-risk
+resolution.
+
+**Alternatives considered:**
+- Pin `azapi = "~> 2.5.0"` (three-component, `>= 2.5.0, < 2.6.0`) — rejected: needlessly tight; would pin
+  off 2.6+ while the modules accept the whole 2.x line and the rest of the repo uses two-component azapi
+  pins. `~> 2.5` matches module convention and leaves room for in-band patch/minor uplifts.
+- Bump the hub-and-spoke / private-dns module versions instead — rejected: a far larger change (re-verify
+  every input/output of two pattern modules and their consumed sub-modules) to solve a one-line provider
+  pin; the pinned module versions are correct, only the root's provider floor was stale.
+- Downgrade the modules to a build that needs only `~> 2.4` — rejected: no such v0.17.1/v0.23.1 build; would
+  mean abandoning the pinned, verified versions and is strictly worse.
+
+**Consequences:**
+- Positive: connectivity `init -backend=false` should succeed and produce a committable lock file, making it
+  the 10th clean-validating root and closing the last OQ-011 item. One-line change, no resource/behavior
+  change.
+- Negative / trade-offs: a newer azapi (2.10.x) will be locked; azapi 2.x is API-stable (the 2.0 breaking
+  change is long past), so risk is low. The committed lock fixes the exact version, so the bump is explicit
+  and auditable.
+- Follow-ups: cloud-engineer edits `providers.tf:19`, re-runs `init -backend=false` + `validate`, and commits
+  `platform/connectivity/.terraform.lock.hcl`. If validate surfaces *further* schema drift in `dns.tf` after
+  init finally resolves, treat it under ADR-018 (same reconcile-to-pinned-schema rule) — see task 4 note.
+
+---
+
+### ADR-016: Gap-closure execution sequence (G1–G6) — plan of record
+
+- **Date:** 2026-06-25
+- **Section:** Cross-cutting (slots into Sections 8, 9, 11, 12)
+- **Status:** Accepted
+- **Decision makers:** claude (architect); user to approve cost OQs (OQ-009, OQ-010)
+
+**Context:**
+The 2026-06-25 fidelity analysis (ARCHITECTURE.md "ALZ Reference Architecture Fidelity Map") identified
+six gaps (G1–G6) vs the Microsoft ALZ Hub & Spoke reference (diagram 2026-04-02). The user directed that
+**all gaps be closed**, sequenced by the architect, then handed to the engineering roles under the
+reviewer gate. ADR-010…ADR-015 below record the per-gap close/deviation calls; this ADR records the
+ordering and the hand-off contract.
+
+**Decision:**
+Close G1, G2, G4, G6 outright. Close G3 (DDoS) and G5 (Sandbox/Online subs) **conditionally on user
+cost approval** (OQ-009, OQ-010); if not approved, both remain *documented deviations* with the
+implementation pre-staged behind a disabled feature flag. Execute in five waves with explicit
+dependencies, detailed in `docs/gap-closure-plan.md`:
+
+1. **Wave 1 — G6 Bastion** (connectivity hub; flip existing module flag). No new module.
+2. **Wave 2 — G4 corp-a1 backup vault** (parity with corp-a2). Independent; can run parallel to Wave 1.
+3. **Wave 3 — G1 Identity subscription domain services** (Entra Domain Services — see ADR-010). New
+   `platform/identity/domain-services.tf` + identity VNet + RSV. Depends on connectivity hub (peering)
+   and reverses OQ-002.
+4. **Wave 4 — G2 Compliant VM template** (Compute Gallery + image definition + Guest Configuration +
+   backup policy + tag enforcement). Depends on G4-pattern backup vault precedent; consumes the FinOps
+   tag initiative (ADR-008).
+5. **Wave 5 — G3 DDoS (conditional) + G5 Sandbox/Online subs (conditional)**. Gated on OQ-009/OQ-010.
+
+**Alternatives considered:**
+- Close everything in one mega-session — rejected: violates the one-section-per-session rule and the
+  reviewer gate; G1 and G2 alone are each a full section's worth of IaC.
+- Defer G1 again — rejected: the user explicitly reversed the deferral; G1 is the only platform pillar
+  with zero resources and is the highest-value gap to close.
+
+**Consequences:**
+- Positive: an ordered, dependency-aware backlog the cloud-engineer/devsecops-engineer execute one wave
+  per session; each wave is independently reviewable and revertible.
+- Negative / trade-offs: full closure spans ~5 build sessions plus review; idle cost rises (see per-ADR
+  deltas — roughly +$130–190/mo for G1+G2+G4+G6, before the conditional G3/G5).
+- Follow-ups: OQ-009 (DDoS cost), OQ-010 (real Sandbox/Online subs) must be answered before Wave 5.
+
+---
+
+### ADR-015: G6 — Deploy Azure Bastion in the primary hub (CLOSE)
+
+- **Date:** 2026-06-25
+- **Section:** 8 (connectivity)
+- **Status:** Accepted
+- **Decision makers:** claude
+
+**Context:**
+The reference diagram places Azure Bastion in the connectivity hub for secure management-plane access to
+VMs with no public IP. The repo sets `bastion = false` in both hubs. Closing G1 (Entra DS) and G2 (image
+build VM) introduces VMs that need RDP/SSH without public exposure, so Bastion becomes load-bearing.
+
+**Decision:**
+CLOSE. Enable Bastion in the **primary** hub only via the existing
+`avm-ptn-alz-connectivity-hub-and-spoke-vnet` module's `enabled_resources.bastion = true` plus a
+`bastion` config block (Standard SKU, dedicated `AzureBastionSubnet` /26). Secondary hub stays
+`bastion = false` to control idle cost; DR-region VM access in a drill routes via the primary hub or a
+just-in-time portal Bastion. No new module — this is a config change to a module already in state.
+
+**Alternatives considered:**
+- Bastion in both hubs — rejected: doubles idle cost (~$280/mo) for a POC; secondary-region interactive
+  access is rare and can be served by the primary or temporary deployment.
+- Native `azurerm_bastion_host` outside the module — rejected: the pattern module owns the hub VNet;
+  using its native toggle keeps subnet/IP wiring inside one module and avoids a split-brain VNet.
+- Developer SKU Bastion — rejected: does not support the per-VNet peering reach needed across spokes.
+
+**Consequences:**
+- Positive: secure management access to Entra DS DCs and the image-build VM with no public IPs; closes
+  the reference gap with zero new modules.
+- Negative: ~$140/mo idle for the Standard SKU instance + its public IP.
+- Follow-ups: cloud-engineer adds the `AzureBastionSubnet` prefix to the hub subnet locals; verify the
+  module input shape for `bastion` against v0.17.1 before writing.
+
+---
+
+### ADR-014: G5 — Keep Sandbox + Online collapsed into the shared LZ sub (DEVIATION, conditional close)
+
+- **Date:** 2026-06-25
+- **Section:** 9 / 12
+- **Status:** Accepted (as deviation) — conditional close tracked in OQ-010
+- **Decision makers:** claude (recommends keep-as-deviation); user may override via OQ-010
+
+**Context:**
+ADR-003 collapsed the Sandbox and Online archetypes into the single shared Landing Zones subscription to
+keep the POC within Visual Studio benefit limits (idle ~$80–150/mo). The reference diagram shows Sandbox
+and Online as **separate subscriptions**. The Sandbox and Online **management-group nodes already exist**;
+only the subscription boundary is simulated.
+
+**Decision:**
+Recommend KEEP-AS-DEVIATION for the POC. Provisioning two more subscriptions is a billing/tenant action
+that (a) cannot be done in Terraform without the subscription-vending pattern and EA/MCA billing-account
+privileges the POC does not have, and (b) adds no new *architectural* construct — the MG nodes, policy
+inheritance, and RG segmentation already demonstrate the boundary. This is a **subscription-count**
+fidelity gap, not a capability gap. The user wants all gaps addressed: if faithful multi-sub is required,
+OQ-010 captures the override — moving `online-p1` (and a sandbox placeholder) into real subscriptions via
+`azurerm_subscription` association under the existing MG nodes once two more sub IDs are supplied.
+
+**Alternatives considered:**
+- Provision two real subs now via `azurerm-subscription`/EA vending — rejected for POC: requires billing
+  scope the VS-benefit account lacks; risks cost and provisioning failure mid-build.
+- Use `avm-ptn-lz-vending` to create the subscriptions — valid production path; deferred to OQ-010
+  because it presumes an EA/MCA enrollment account ID the POC does not have.
+
+**Consequences:**
+- Positive: no extra idle cost; MG-level boundary already demonstrable; ADR-003 stays coherent.
+- Negative: subscription count (5) is below the reference's 7+; documented as a known, intentional POC
+  scope limit. Reviewer must accept the deviation explicitly.
+- Follow-ups: if OQ-010 is answered "provision real subs," this ADR is superseded and Wave 5 binds
+  `online-p1` + a sandbox RG-set to two new subscription IDs under the existing Online/Sandbox MG nodes.
+
+---
+
+### ADR-013: G3 — Azure DDoS Network Protection plan (conditional close, cost-gated)
+
+- **Date:** 2026-06-25
+- **Section:** 8 (connectivity)
+- **Status:** Accepted (pre-staged, disabled) — conditional close tracked in OQ-009
+- **Decision makers:** claude (recommends pre-stage disabled); user decides via OQ-009
+
+**Context:**
+The reference diagram shows an Azure DDoS Network Protection plan attached to the hub VNet (protecting
+public-facing workloads, e.g. online-p1's AFD/App Gateway). DDoS Network Protection is **~$2,944/mo flat**
+(plan covers up to 100 public IPs). The POC's whole-platform idle target is ~$80–150/mo (ADR-003); DDoS
+alone is ~20–35x the entire rest of the platform.
+
+**Decision:**
+CLOSE *conditionally*. The cloud-engineer writes the construct now — `Azure/avm-res-network-ddosprotectionplan/azurerm`
+v0.3.0 (verified on registry 2026-06-25) creating the plan, plus wiring `ddos_protection_plan` onto the
+hub VNet and online-p1 spoke VNet — but **behind `var.enable_ddos_protection` defaulting to `false`**.
+With the flag false the plan is not created and the repo carries no idle DDoS cost; the documented
+deviation in ARCHITECTURE.md is replaced by a one-line flag flip. The user answers OQ-009 to decide
+whether to set the flag `true` for any live/faithful-posture demo. This satisfies "all gaps addressed"
+(the capability is built and one toggle away) without forcing ~$3k/mo on a portfolio POC.
+
+**Alternatives considered:**
+- Deploy DDoS unconditionally — rejected: ~$2,944/mo is indefensible for a portfolio POC; the user
+  should make this call, not the architect.
+- Leave as a pure documented deviation with no code — rejected: the user wants gaps *addressed*; a
+  flag-gated, registry-verified construct is "addressed and one toggle away," strictly better than a doc
+  note. (DDoS IP Protection per-IP tier was considered as a cheaper alternative but does not match the
+  reference's network-tier plan and is per-IP billed — out of scope; noted in OQ-009.)
+
+**Consequences:**
+- Positive: faithful construct exists, version-pinned, reviewer-approved, zero idle cost while disabled.
+- Negative: not *active* by default; a live demo of DDoS telemetry requires the flag + the monthly cost.
+- Follow-ups: OQ-009 — user decides default flag state and whether to fund DDoS for any recorded demo.
+
+---
+
+### ADR-012: G4 — Add a corp-a1 backup vault (Recovery Services Vault) for parity (CLOSE)
+
+- **Date:** 2026-06-25
+- **Section:** 9 (landing zones)
+- **Status:** Accepted
+- **Decision makers:** claude
+
+**Context:**
+corp-a2 has a Recovery Services Vault (`avm-res-recoveryservices-vault` v1.1.3, GeoRedundant). corp-a1 —
+the **primary** workload spoke — has none. The reference shows backup in every landing-zone subscription.
+This is an availability/asymmetry gap: the primary workload is currently less protected than its DR pair.
+
+**Decision:**
+CLOSE. Add an RSV to corp-a1's `rg-corp-a1-shared` using the **same module + pinned version already in
+state for corp-a2** (`Azure/avm-res-recoveryservices-vault/azurerm` v1.1.3 — keep the existing pin for
+parity and to avoid a cross-spoke version skew; latest is 1.1.11 and can be a separate uplift later).
+Storage mode `ZoneRedundant` for corp-a1 (primary stays in-region for RPO; corp-a2 keeps GeoRedundant for
+cross-region DR) and a default Azure Backup policy ready for the synthetic-workload VM / future IaaS.
+
+**Alternatives considered:**
+- Bump both spokes to v1.1.11 in the same change — rejected: version uplift is a separate concern from
+  closing the parity gap; bundling risks a corp-a2 regression in a gap-closure change. Track uplift
+  separately.
+- GeoRedundant for corp-a1 too — rejected: corp-a1 is the primary; GRS doubles storage egress cost for a
+  POC with no cross-region restore requirement on the primary. ZoneRedundant is the cost-right default.
+
+**Consequences:**
+- Positive: backup parity across both corp spokes; primary workload now protected; matches reference.
+- Negative: ~$5–10/mo (vault is free; cost is protected-instance + storage once items are enrolled —
+  near-zero until the synthetic VM is backed up).
+- Follow-ups: G2's backup policy and the synthetic §13.4 VM can enrol into this vault later.
+
+---
+
+### ADR-011: G2 — Compliant VM template via Azure Compute Gallery + Guest Configuration (CLOSE)
+
+- **Date:** 2026-06-25
+- **Section:** 8 (new platform component) / 12
+- **Status:** Accepted
+- **Decision makers:** claude
+
+**Context:**
+Design area **G** of the reference calls for a "compliant VM template": a golden image in a shared gallery,
+in-guest configuration (DSC / Guest Configuration), a backup policy, and required-tag enforcement. The repo
+has **no** gallery, image definition, or guest-configuration construct anywhere. This is a genuine
+capability gap, not just a count/cost gap.
+
+**Decision:**
+CLOSE. Compose three layers in a new `platform/management/compute-gallery.tf` (gallery is a shared platform
+asset, lives in the Management subscription alongside the platform LAW/Automation):
+
+1. **Azure Compute Gallery + image definition** — `Azure/avm-res-compute-gallery/azurerm` **v0.2.0**
+   (verified on registry 2026-06-25; the module creates the gallery *and* image definitions via its
+   `shared_image_definitions` map input). Define one Linux (Ubuntu 24.04 gen2) image definition to match
+   the synthetic workload's distro; image **versions** are produced out-of-band by an Azure Image Builder /
+   packer pipeline (documented as the build path; the POC ships the definition + a "bring your own version"
+   note rather than running a full bake, to avoid a long-running build dependency).
+2. **Guest Configuration assignment** — assign the built-in Azure Policy initiative *"\[Preview\]: Windows/
+   Linux machines should meet requirements for the Azure compute security baseline"* (Guest Configuration /
+   machineConfiguration) at the Landing Zones MG so any VM (synthetic §13.4 VM, future IaaS) is audited for
+   baseline compliance. DEVIATION: full DSC authoring is out of POC scope; the built-in machineConfiguration
+   audit initiative is the realistic, maintainable substitute and produces the same "in-guest compliance"
+   signal.
+3. **Backup policy + required-tag enforcement** — reuse the FinOps tag initiative (ADR-008) already at the
+   Globaris root for tag enforcement; the backup policy is provided by the G4 RSV (ADR-012). No new tag
+   policy authored.
+
+**Alternatives considered:**
+- Hand-author a full DSC configuration + Image Builder bake in-repo — rejected for POC: Image Builder runs
+  take 30–60 min and need a build identity + staging RG; the gallery + definition + built-in
+  machineConfiguration initiative demonstrates the design area without a brittle long-running bake.
+- `avm-ptn-*` for image building — none confirmed published on registry (only the resource-level gallery
+  module exists); per CLAUDE.md rule 5 we do not depend on unverified pattern modules.
+
+**Consequences:**
+- Positive: design area G is represented end-to-end (gallery, definition, in-guest baseline audit, backup,
+  tag enforcement) using one verified AVM module + built-in policy; no custom policy JSON.
+- Negative: no actual image *version* is baked by default — the gallery ships empty of versions until a
+  packer/Image Builder run populates it. Documented as a follow-up, not a gap in the construct itself.
+- Follow-ups: optional §13.x — add an Azure Image Builder template that bakes a version into the definition;
+  enrol the baked image's VMs into the G4/corp-a1 RSV.
+
+---
+
+### ADR-010: G1 identity mode — Microsoft Entra Domain Services (reverses OQ-002 "none") (CLOSE)
+
+- **Date:** 2026-06-25
+- **Section:** 8 (Identity subscription)
+- **Status:** Accepted — supersedes the OQ-002 "none" resolution (2026-05-14)
+- **Decision makers:** claude (architect) — user had deferred the DCs-vs-Entra-DS choice to the architect
+
+**Context:**
+G1 is the highest-value gap: the Identity subscription is the only platform pillar with zero resources
+(`identity_mode = "none"`, OQ-002). The reference shows the Identity sub hosting either self-managed AD DS
+domain controllers on IaaS **or** Microsoft Entra Domain Services, plus an identity VNet and a backup vault.
+The user deferred the DCs-vs-Entra-DS decision to the architect and flagged the POC as cost-sensitive
+(~$80–150/mo idle target). Verified 2026-06-25: current 2026 CAF identity guidance favours an
+"AD-minimization", cloud-first posture — managed **Microsoft Entra Domain Services** over self-managed DCs
+when AD DS capability is needed. No AVM module exists for Entra DS (registry 404 for
+`avm-res-aad-domainservice`); the native `azurerm_active_directory_domain_service` resource is current
+(API 2021-05-01, not deprecated; requires a one-time DS service-principal pre-step in the tenant).
+
+**Decision:**
+CLOSE with **Microsoft Entra Domain Services (managed)** as `identity_mode = "entra-ds"`. Reverses the
+OQ-002 "none" resolution. The cloud-engineer builds, in `platform/identity/` (which today holds only the
+CA/PIM policies):
+
+- An **identity VNet** via `Azure/avm-res-network-virtualnetwork/azurerm` (repo pin **0.17.1**, the version
+  already in state across spokes) with a dedicated Entra DS subnet + NSG carrying the
+  Microsoft-mandated inbound rules, peered to the **primary hub** (ADR-009 hub).
+- A native `azurerm_active_directory_domain_service` (no AVM module exists — `# DEVIATION:` documented),
+  **Standard SKU** (single replica set; lowest cost ~$110/mo), `domain_name` from a new
+  `var.identity_domain_name` (POC default `aadds.<orgprefix>.onmicrosoft.com` — ties to OQ-003).
+- A **Recovery Services Vault** for the identity VNet's future DC/management VMs, same module/pin as G4.
+
+**Alternatives considered:**
+- Two B2s DCs on IaaS (`identity_mode = "ad-ds"`, ~$60/mo) — rejected as the default: cheaper, but
+  contradicts 2026 CAF AD-minimization guidance, adds OS-patching/DC-promotion/replication management the
+  POC would have to demo and maintain, and Entra DS better showcases a modern managed-identity posture.
+  Kept as a documented *alternative mode* (the `var.identity_mode` toggle is retained so an operator can
+  select `ad-ds` if a self-managed-DC demo is wanted) — but **not** the shipped default.
+- Keep `none` — rejected: the user reversed the deferral and wants the gap closed.
+
+**Consequences:**
+- Positive: closes the top gap with the CAF-recommended managed option; less to manage/demo than DCs;
+  identity VNet + RSV complete the pillar to match the reference. Cheaper than the assumed Entra DS price
+  in OQ-002 if Standard SKU is used (~$110/mo vs the DCs' ~$60/mo — the delta funds "no DC management").
+- Negative: ~$110/mo idle (Entra DS Standard) — the single biggest line in the gap-closure cost. Requires a
+  one-time **manual** tenant pre-step (create the "Domain Controller Services" service principal +
+  an `AAD DC Administrators` group) that Terraform cannot do — documented as an operator prerequisite.
+  Entra DS only supports User-forest mode (no resource-forest) — acceptable for POC.
+- Follow-ups: OQ-002 resolved to `entra-ds`; OQ-003 (domain name) becomes relevant — needs the POC domain.
+  Confirm the `azurerm_active_directory_domain_service` argument shape against the provider pinned in
+  `platform/identity` before writing; mark `# UNVERIFIED:` if the pin predates the resource's current schema.
+
+---
+
 ### ADR-009: Firewall Policy hierarchy — independent policies per hub (no shared parent for POC)
 
 - **Date:** 2026-05-21

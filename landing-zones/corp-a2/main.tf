@@ -119,10 +119,10 @@ module "spoke_vnet" {
   source  = "Azure/avm-res-network-virtualnetwork/azurerm"
   version = "0.17.1"
 
-  name                = "vnet-spoke-corp-a2-${var.org_prefix}-${var.environment}"
-  resource_group_name = azurerm_resource_group.network.name
-  location            = var.secondary_location
-  address_space       = [var.spoke_address_space]
+  name          = "vnet-spoke-corp-a2-${var.org_prefix}-${var.environment}"
+  parent_id     = azurerm_resource_group.network.id # v0.17.1: parent_id (RG resource ID) replaces resource_group_name
+  location      = var.secondary_location
+  address_space = [var.spoke_address_space]
 
   subnets = {
     integration = {
@@ -326,7 +326,13 @@ resource "azurerm_private_endpoint" "sql" {
     is_manual_connection           = false
   }
 
-  # DEVIATION: DNS zone group omitted — Section 4 adds privatelink.database.windows.net.
+  # azurerm has no standalone azurerm_private_dns_zone_group resource — the zone
+  # group is a nested block on the private endpoint. Zone looked up via
+  # data.azurerm_private_dns_zone.sql (see dns_links.tf).
+  private_dns_zone_group {
+    name                 = "pdzg-sql-corp-a2"
+    private_dns_zone_ids = [data.azurerm_private_dns_zone.sql.id]
+  }
 
   tags = local.common_tags
 
