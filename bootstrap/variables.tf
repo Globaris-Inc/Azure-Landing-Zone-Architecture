@@ -1,6 +1,6 @@
 # Purpose: Input variables for the bootstrap layer.
 # Section: 10a — Pipeline & Tooling (bootstrap subset)
-# Last updated: 2026-05-05
+# Last updated: 2026-06-29
 
 variable "tenant_id" {
   description = "Azure AD tenant ID. Used by the azuread provider and Key Vault access configuration."
@@ -8,7 +8,33 @@ variable "tenant_id" {
 }
 
 variable "management_subscription_id" {
-  description = "Subscription ID of the Management subscription. The state backend RG, Key Vault, and Storage Account are created here."
+  description = "Subscription ID of the Management subscription. The state backend RG, Key Vault, and Storage Account are created here. Also granted to the OIDC SP (Contributor + User Access Administrator) for CI apply/destroy (OQ-008 / ADR-021)."
+  type        = string
+}
+
+# ---------------------------------------------------------------------------
+# CI/CD subscription IDs — grant the OIDC SP Contributor + User Access
+# Administrator on each of the 5 platform subscriptions (OQ-008 / ADR-021).
+# Names match platform/management-groups/variables.tf exactly.
+# ---------------------------------------------------------------------------
+
+variable "connectivity_subscription_id" {
+  description = "Subscription ID of the Connectivity subscription. Used to grant the OIDC SP Contributor + User Access Administrator for CI apply/destroy (OQ-008 / ADR-021)."
+  type        = string
+}
+
+variable "identity_subscription_id" {
+  description = "Subscription ID of the Identity subscription. Used to grant the OIDC SP Contributor + User Access Administrator for CI apply/destroy (OQ-008 / ADR-021)."
+  type        = string
+}
+
+variable "security_subscription_id" {
+  description = "Subscription ID of the Security subscription. Used to grant the OIDC SP Contributor + User Access Administrator for CI apply/destroy (OQ-008 / ADR-021)."
+  type        = string
+}
+
+variable "landingzones_subscription_id" {
+  description = "Subscription ID of the shared Landing Zones subscription (spokes + synthetic). Used to grant the OIDC SP Contributor + User Access Administrator for CI apply/destroy (OQ-008 / ADR-021)."
   type        = string
 }
 
