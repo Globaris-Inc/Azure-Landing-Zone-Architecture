@@ -1,0 +1,147 @@
+# .github/workflows/deploy.yml
+# Purpose: Manual Terraform plan/apply for ONE root or the WHOLE environment (in order).
+# Section: 10 — Pipeline & Tooling (ADR-019). Replaces apply-on-merge.yml (LESSON 17:
+#          deploys are explicit, not merge-triggered).
+# Last updated: 2026-06-27
+#
+# Requirement 1 (per-root): set target=<a single root>.
+# Requirement 2 (full env): set target=all — the needs: graph applies every root in
+#          dependency order (mgmt-groups -> mgmt -> {connectivity,security}+identity ->
+#          spokes (parallel) -> synthetic).
+#
+# Gating: action=apply runs jobs in the `production` GitHub Environment (required
+#          reviewer). action=plan is ungated (dry-run). OIDC only — no secrets for login.
+#
+# Single-target mechanics: upstream `needs:` jobs are skipped when target!=all; the
+# `!failure() && !cancelled()` status check lets the selected job run anyway. For
+# action=apply on a single root, the root's upstream state must already exist.
+name: Deploy (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Root to act on, or 'all' for the whole environment in order"
+        type: choice
+        default: all
+        options:
+          - all
+          - platform/management-groups
+          - platform/management
+          - platform/connectivity
+          - platform/identity
+          - platform/security
+          - landing-zones/corp-a1
+          - landing-zones/corp-a2
+          - landing-zones/online-p1
+          - synthetic
+      action:
+        description: "plan (dry-run, ungated) or apply (gated by the production environment)"
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  management-groups:
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/management-groups') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/management-groups
+      action: ${{ inputs.action }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+    secrets: inherit
+
+  management:
+    needs: [management-groups]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/management') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/management
+      action: ${{ inputs.action }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+    secrets: inherit
+
+  connectivity:
+    needs: [management]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/connectivity') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/connectivity
+      action: ${{ inputs.action }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+    secrets: inherit
+
+  identity:
+    needs: [management-groups]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/identity') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/identity
+      action: ${{ inputs.action }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+    secrets: inherit
+
+  security:
+    needs: [management]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/security') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/security
+      action: ${{ inputs.action }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+    secrets: inherit
+
+  corp-a1:
+    needs: [connectivity, security]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/corp-a1
+      action: ${{ inputs.action }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+    secrets: inherit
+
+  corp-a2:
+    needs: [connectivity, security]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a2') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/corp-a2
+      action: ${{ inputs.action }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+    secrets: inherit
+
+  online-p1:
+    needs: [connectivity, security]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/online-p1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/online-p1
+      action: ${{ inputs.action }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+    secrets: inherit
+
+  synthetic:
+    needs: [corp-a1, corp-a2, online-p1]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'synthetic') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: synthetic
+      action: ${{ inputs.action }}
+      backend_rel: "../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+    secrets: inherit
