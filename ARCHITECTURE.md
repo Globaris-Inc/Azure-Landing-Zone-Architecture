@@ -167,7 +167,7 @@ the *platform* landing zone; the diagram's application-workload internals are ou
 | E | — Azure **Bastion** | ✅ | **On-demand** in the primary hub via `var.enable_bastion` (Standard SKU, **default off** = $0 idle; ~+$140/mo while up). Secondary hub stays `bastion = false`. Closed Wave 1 / ADR-015 (G6) |
 | B | IAM — MFA, PIM, Conditional Access | ✅ | `platform/identity` — 8 CA policies (report-only), PIM eligible at MG scope |
 | B | — Approval workflow / access reviews | ⚠️ | PIM activation only; access-review + approval-flow not modelled |
-| — | **Identity** sub — DCs (DC1–3) *or* Entra Domain Services + identity VNet + RSV | ❌ | **`identity_mode = "none"`** (OQ-002) — domain-services infra NOT built |
+| — | **Identity** sub — DCs (DC1–3) *or* Entra Domain Services + identity VNet + RSV | ✅ | **`identity_mode = "entra-ds"`** (ADR-010, supersedes OQ-002) — `platform/identity/{identity-network,domain-services}.tf`: identity VNet (`avm-res-network-virtualnetwork` 0.17.1) + Entra DS subnet/NSG, native `azurerm_active_directory_domain_service` (Standard), RSV (`avm-res-recoveryservices-vault` 1.1.3), peered to primary hub. Closed Wave 3 (G1) |
 | F | Landing-zone spokes — VNet, Key Vault, Storage, LAW, private endpoints | ✅ | `landing-zones/{corp-a1,corp-a2,online-p1}` |
 | F | — Backup / Site Recovery vault | ✅ | corp-a2 RSV (GeoRedundant, AVM module) ✅; corp-a1 RSV (ZoneRedundant, `avm-res-recoveryservices-vault` 1.1.3) ✅ — closed Wave 2 / ADR-012 |
 | F | Separate **Online** LZ subscription (multi-sub A-series) | ⚠️ | Online MG exists; `online-p1` deploys into the **shared** LZ sub (ADR-003) |
@@ -179,10 +179,11 @@ the *platform* landing zone; the diagram's application-workload internals are ou
 
 ### Gap checklist (decisions made 2026-06-25 — see ADR-010…016 + `docs/gap-closure-plan.md`)
 
-- [ ] **G1 — Identity subscription domain services** — **CLOSE / Wave 3**. Decision: **Microsoft Entra
+- [x] **G1 — Identity subscription domain services** — **CLOSED / Wave 3** (2026-06-28). **Microsoft Entra
   Domain Services** (`identity_mode = "entra-ds"`, Standard, ~$110/mo) + identity VNet (NSG) + RSV, peered
-  to primary hub. ADR-010 (reverses OQ-002 → `entra-ds`). Native `azurerm_active_directory_domain_service`
-  (no AVM module). One-time manual tenant pre-step (DS SP + `AAD DC Administrators` group).
+  to primary hub. ADR-010 (supersedes OQ-002 → `entra-ds`). Native `azurerm_active_directory_domain_service`
+  (no AVM module). One-time manual tenant pre-step (DS SP + `AAD DC Administrators` group) documented in
+  `platform/identity/README.md`. `terraform validate` clean.
 - [ ] **G2 — Compliant VM template (design area G)** — **CLOSE / Wave 4**. Azure Compute Gallery + image
   definition (`avm-res-compute-gallery` 0.2.0) + built-in machineConfiguration baseline Guest-Config
   initiative + backup policy (reuse G4 RSV) + tag enforcement (reuse ADR-008). ADR-011.

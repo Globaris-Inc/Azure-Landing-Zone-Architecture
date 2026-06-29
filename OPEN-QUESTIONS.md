@@ -135,6 +135,8 @@ Recommended for a POC: **C**. Confirm before Section 2.
 - **Section:** 8
 - **Blocking:** No (deferrable until Section 8)
 - **Priority:** Medium
+- **Status:** **SUPERSEDED (2026-06-28, ADR-010)** — resolved to `identity_mode = "entra-ds"` and
+  **built** in Wave 3 (`platform/identity/{identity-network,domain-services}.tf`).
 
 **Question:**
 PROMPT.md Section 8 leaves this as a `var.identity_mode` toggle. For the POC default value, which should we ship?
