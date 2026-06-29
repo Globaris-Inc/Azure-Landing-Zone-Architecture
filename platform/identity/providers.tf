@@ -43,3 +43,24 @@ provider "azurerm" {
   subscription_id = var.management_subscription_id
   features {}
 }
+
+# ---------------------------------------------------------------------------
+# Identity-subscription provider alias (Section 8 — G1, ADR-010 / Wave 3)
+# ---------------------------------------------------------------------------
+# The default azurerm provider is management-anchored (for MG-scope PIM). The G1
+# identity-services build (identity VNet, Entra Domain Services, RSV) must land in
+# the IDENTITY subscription, so it uses this dedicated identity-anchored alias.
+provider "azurerm" {
+  alias           = "identity"
+  subscription_id = var.identity_subscription_id
+  features {}
+}
+
+# Connectivity-subscription alias — used ONLY for the hub-to-identity return VNet
+# peering (mirrors the spoke pattern in landing-zones/corp-a1). The OIDC SP holds
+# Owner at Tenant Root MG (ADR-006), so it can create peering in the Connectivity sub.
+provider "azurerm" {
+  alias           = "connectivity"
+  subscription_id = var.connectivity_subscription_id
+  features {}
+}

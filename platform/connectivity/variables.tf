@@ -1,6 +1,6 @@
 # Purpose: Input variables for the Connectivity platform root module.
 # Section: 8 — Standard Platform Components
-# Last updated: 2026-05-14
+# Last updated: 2026-06-27 (G6: enable_bastion on-demand flag — ADR-015)
 
 variable "tenant_id" {
   description = "Azure Active Directory tenant ID."
@@ -57,6 +57,12 @@ variable "hub_secondary_address_space" {
 
 variable "enable_ddos_standard" {
   description = "Enable Azure DDoS Network Protection (Standard) on hub VNets. Disabled by default — DDoS Standard costs ~$2,944/mo and is not required for the POC."
+  type        = bool
+  default     = false
+}
+
+variable "enable_bastion" {
+  description = "Deploy Azure Bastion (Standard SKU) in the PRIMARY hub on demand. Default false so idle cost is $0; operators set true + apply (deploy.yml) to bring Bastion up for no-public-IP management access, false + apply to remove it (~+$140/mo while enabled). Secondary hub never gets Bastion. See ADR-015 / gap-closure G6."
   type        = bool
   default     = false
 }

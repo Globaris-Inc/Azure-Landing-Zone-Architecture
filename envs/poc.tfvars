@@ -63,10 +63,27 @@ export_end_date = "2030-12-01T00:00:00Z"
 enable_ddos_standard = false # DDoS Standard ~$2,944/mo — disabled for POC cost
 
 # ---------------------------------------------------------------------------
-# Identity  (Section 8)
+# Identity  (Section 8 — G1 / Gap-Closure Wave 3 / ADR-010)
 # ---------------------------------------------------------------------------
 
-identity_mode = "none" # Options: "dc_vms" | "aadds" | "none"
+# Domain-services mode for the Identity subscription.
+#   "entra-ds" — Microsoft Entra Domain Services (managed) — shipped default (ADR-010).
+#   "ad-ds"    — documented-only branch (VNet + RSV, no Entra DS / DC VMs this wave).
+#   "none"     — Identity sub left empty.
+identity_mode = "entra-ds"
+
+# Managed-domain FQDN (required when identity_mode = "entra-ds"). Placeholder —
+# replace with the real POC domain (ties to OQ-003), e.g. aadds.globaris.onmicrosoft.com.
+identity_domain_name = "<ENTRA_DS_DOMAIN>"
+
+# Identity VNet CIDR — non-overlapping with hubs (10.0/16, 10.1/16) and spokes
+# (10.10/16, 10.11/16, 10.20/16). Entra DS subnet is carved from this.
+identity_vnet_address_space = "10.2.0.0/24"
+
+# Hub peering targets for the identity VNet. Populate from platform/connectivity
+# outputs after that module is applied (same values the corp-a1 spoke consumes).
+# Set in poc.secret.tfvars locally / TF_VAR_* in CI:
+#   primary_hub_vnet_id, primary_hub_vnet_name, primary_hub_rg_name
 
 # ---------------------------------------------------------------------------
 # DR / Networking  (Section 3)

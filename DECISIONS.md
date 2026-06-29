@@ -206,6 +206,11 @@ CLOSE. Enable Bastion in the **primary** hub only via the existing
 `bastion = false` to control idle cost; DR-region VM access in a drill routes via the primary hub or a
 just-in-time portal Bastion. No new module — this is a config change to a module already in state.
 
+**[Amended 2026-06-27 — on-demand cost posture]:** per the gap-closure cost decision (Entra DS +
+on-demand Bastion), Bastion is gated behind **`var.enable_bastion` (default `false`)**, not always-on.
+Idle cost is therefore **$0**; operators set `enable_bastion = true` + apply (via `deploy.yml`) to bring
+it up on demand, and `false` + apply to remove it. The "Negative" consequence below is superseded.
+
 **Alternatives considered:**
 - Bastion in both hubs — rejected: doubles idle cost (~$280/mo) for a POC; secondary-region interactive
   access is rare and can be served by the primary or temporary deployment.

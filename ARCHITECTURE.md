@@ -164,10 +164,10 @@ the *platform* landing zone; the diagram's application-workload internals are ou
 | E | **Connectivity** sub — hub VNet, Firewall Premium (IDPS), VPN GW, DNS Private Resolver | ✅ | `platform/connectivity` — `avm-ptn-alz-connectivity-hub-and-spoke-vnet` 0.17.1 |
 | E | — Azure **DDoS Protection** plan | ❌ | Not deployed (cost ~$3k/mo) — POC deviation; flag if faithful posture required |
 | E | — **ExpressRoute** circuits / gateway | ⚠️ | `express_route = false` — no on-premises in POC |
-| E | — Azure **Bastion** | ⚠️ | `bastion = false` in both hubs |
+| E | — Azure **Bastion** | ✅ | **On-demand** in the primary hub via `var.enable_bastion` (Standard SKU, **default off** = $0 idle; ~+$140/mo while up). Secondary hub stays `bastion = false`. Closed Wave 1 / ADR-015 (G6) |
 | B | IAM — MFA, PIM, Conditional Access | ✅ | `platform/identity` — 8 CA policies (report-only), PIM eligible at MG scope |
 | B | — Approval workflow / access reviews | ⚠️ | PIM activation only; access-review + approval-flow not modelled |
-| — | **Identity** sub — DCs (DC1–3) *or* Entra Domain Services + identity VNet + RSV | ❌ | **`identity_mode = "none"`** (OQ-002) — domain-services infra NOT built |
+| — | **Identity** sub — DCs (DC1–3) *or* Entra Domain Services + identity VNet + RSV | ✅ | **`identity_mode = "entra-ds"`** (ADR-010, supersedes OQ-002) — `platform/identity/{identity-network,domain-services}.tf`: identity VNet (`avm-res-network-virtualnetwork` 0.17.1) + Entra DS subnet/NSG, native `azurerm_active_directory_domain_service` (Standard), RSV (`avm-res-recoveryservices-vault` 1.1.3), peered to primary hub. Closed Wave 3 (G1) |
 | F | Landing-zone spokes — VNet, Key Vault, Storage, LAW, private endpoints | ✅ | `landing-zones/{corp-a1,corp-a2,online-p1}` |
 | F | — Backup / Site Recovery vault | ✅ | corp-a2 RSV (GeoRedundant, AVM module) ✅; corp-a1 RSV (ZoneRedundant, `avm-res-recoveryservices-vault` 1.1.3) ✅ — closed Wave 2 / ADR-012 |
 | F | Separate **Online** LZ subscription (multi-sub A-series) | ⚠️ | Online MG exists; `online-p1` deploys into the **shared** LZ sub (ADR-003) |
@@ -179,10 +179,11 @@ the *platform* landing zone; the diagram's application-workload internals are ou
 
 ### Gap checklist (decisions made 2026-06-25 — see ADR-010…016 + `docs/gap-closure-plan.md`)
 
-- [ ] **G1 — Identity subscription domain services** — **CLOSE / Wave 3**. Decision: **Microsoft Entra
+- [x] **G1 — Identity subscription domain services** — **CLOSED / Wave 3** (2026-06-28). **Microsoft Entra
   Domain Services** (`identity_mode = "entra-ds"`, Standard, ~$110/mo) + identity VNet (NSG) + RSV, peered
-  to primary hub. ADR-010 (reverses OQ-002 → `entra-ds`). Native `azurerm_active_directory_domain_service`
-  (no AVM module). One-time manual tenant pre-step (DS SP + `AAD DC Administrators` group).
+  to primary hub. ADR-010 (supersedes OQ-002 → `entra-ds`). Native `azurerm_active_directory_domain_service`
+  (no AVM module). One-time manual tenant pre-step (DS SP + `AAD DC Administrators` group) documented in
+  `platform/identity/README.md`. `terraform validate` clean.
 - [ ] **G2 — Compliant VM template (design area G)** — **CLOSE / Wave 4**. Azure Compute Gallery + image
   definition (`avm-res-compute-gallery` 0.2.0) + built-in machineConfiguration baseline Guest-Config
   initiative + backup policy (reuse G4 RSV) + tag enforcement (reuse ADR-008). ADR-011.
@@ -194,8 +195,10 @@ the *platform* landing zone; the diagram's application-workload internals are ou
 - [ ] **G5 — Separate Sandbox / Online subscriptions** — **CONDITIONAL / Wave 5**. Recommend **keep
   collapsed (deviation)** — it's a subscription-*count* gap, not a capability gap (MG nodes + policy
   inheritance already present). ADR-014; user may override via **OQ-010**.
-- [ ] **G6 — Azure Bastion** — **CLOSE / Wave 1**. Enable on the primary hub via the existing
-  `avm-ptn-alz-connectivity-hub-and-spoke-vnet` 0.17.1 `bastion` flag (~$140/mo). ADR-015.
+- [x] **G6 — Azure Bastion** — **CLOSED / Wave 1 (2026-06-27)**. Enabled on the **primary** hub via the
+  existing `avm-ptn-alz-connectivity-hub-and-spoke-vnet` 0.17.1 `bastion` flag, deploy-**on-demand** behind
+  `var.enable_bastion` (Standard SKU, **default false** = $0 idle; ~+$140/mo while up). Module auto-creates
+  the Standard public IP; `AzureBastionSubnet` /26 at `10.0.0.64/26`. Secondary hub unchanged. ADR-015.
 
 ### Project backlog (not reference gaps, but open)
 
