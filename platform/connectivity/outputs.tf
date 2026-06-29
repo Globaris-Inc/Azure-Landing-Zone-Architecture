@@ -1,6 +1,6 @@
 # Purpose: Outputs for the Connectivity platform root module.
 # Section: 8 — Standard Platform Components
-# Last updated: 2026-05-14
+# Last updated: 2026-06-27 (G6: gated primary_bastion_id/dns_name outputs — ADR-015)
 
 output "connectivity_primary_rg_name" {
   description = "Name of the primary connectivity resource group."
@@ -67,6 +67,18 @@ output "primary_vpn_gateway_id" {
   # UNVERIFIED: exact nested key path within virtual_network_gateway_resource_ids["primary"].
   # Verify by running: terraform output -json primary_vpn_gateway_id after first apply.
   value = try(module.hub_and_spoke.virtual_network_gateway_resource_ids["primary"]["vpn"], null)
+}
+
+output "primary_bastion_id" {
+  description = "ARM resource ID of the primary hub Azure Bastion when deployed on demand (var.enable_bastion = true); null when Bastion is off. See ADR-015 / G6."
+  # The module's bastion_host_resource_ids map only contains the 'primary' key while
+  # enabled_resources.bastion is true, so try(...) yields null when the flag is off.
+  value = try(module.hub_and_spoke.bastion_host_resource_ids["primary"], null)
+}
+
+output "primary_bastion_dns_name" {
+  description = "DNS name of the primary hub Azure Bastion when deployed on demand (var.enable_bastion = true); null when Bastion is off."
+  value       = try(module.hub_and_spoke.bastion_host_dns_names["primary"], null)
 }
 
 output "primary_dns_resolver_inbound_ips" {

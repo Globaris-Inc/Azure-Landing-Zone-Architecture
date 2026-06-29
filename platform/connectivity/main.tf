@@ -1,7 +1,7 @@
 # Purpose: Connectivity platform root module — dual-hub hub-and-spoke VNets with
 #          Azure Firewall Premium (IDPS), VPN Gateway, and DNS Private Resolver.
 # Section: 8 — Standard Platform Components
-# Last updated: 2026-05-14
+# Last updated: 2026-06-27 (G6: on-demand Azure Bastion in primary hub — ADR-015)
 #
 # Apply order: Independent of platform/management; run before platform/security
 #              (Firewall private IPs are consumed by spoke UDRs in Section 8 Batch 3+).
@@ -30,6 +30,7 @@ locals {
   # Subnet prefixes carved from hub_primary_address_space.
   # Concrete CIDRs shown for the default 10.0.0.0/16 base.
   hub_primary_firewall_prefix     = cidrsubnet(var.hub_primary_address_space, 10, 0)  # 10.0.0.0/26
+  hub_primary_bastion_prefix      = cidrsubnet(var.hub_primary_address_space, 10, 1)  # 10.0.0.64/26 (AzureBastionSubnet, /26 min)
   hub_primary_gateway_prefix      = cidrsubnet(var.hub_primary_address_space, 11, 8)  # 10.0.1.0/27
   hub_primary_dns_inbound_prefix  = cidrsubnet(var.hub_primary_address_space, 12, 32) # 10.0.2.0/28
   hub_primary_dns_outbound_prefix = cidrsubnet(var.hub_primary_address_space, 12, 33) # 10.0.2.16/28
@@ -83,7 +84,7 @@ module "hub_and_spoke" {
       enabled_resources = {
         firewall                              = true
         firewall_policy                       = true
-        bastion                               = false
+        bastion                               = var.enable_bastion # On-demand (ADR-015 / G6); default off = $0 idle. Module auto-creates the Standard public IP.
         virtual_network_gateway_express_route = false
         virtual_network_gateway_vpn           = true
         private_dns_zones                     = false # Managed in Section 4 (Private Endpoints + DNS)
@@ -117,6 +118,16 @@ module "hub_and_spoke" {
         intrusion_detection = {
           mode = "Alert"
         }
+      }
+
+      # On-demand Azure Bastion (ADR-015 / gap-closure G6). Honoured only when
+      # enabled_resources.bastion (= var.enable_bastion) is true; the config below is
+      # otherwise inert. /26 AzureBastionSubnet (module names the subnet automatically)
+      # carved from the primary hub space; the module auto-provisions the Standard
+      # public IP (no public_ip block required). Secondary hub stays bastion = false.
+      bastion = {
+        sku                   = "Standard"
+        subnet_address_prefix = local.hub_primary_bastion_prefix
       }
 
       virtual_network_gateways = {
