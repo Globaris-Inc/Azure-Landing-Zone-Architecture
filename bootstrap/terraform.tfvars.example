@@ -8,7 +8,14 @@
 
 tenant_id = "00000000-0000-0000-0000-000000000000"  # az account show --query tenantId -o tsv
 
-management_subscription_id = "00000000-0000-0000-0000-000000000001"  # Management sub
+# The 5 platform subscription IDs. The OIDC SP is granted Contributor +
+# User Access Administrator on each (OQ-008 / ADR-021). Must match the IDs
+# passed to platform/management-groups.
+management_subscription_id   = "<MANAGEMENT_SUBSCRIPTION_ID>"    # Management sub (also hosts the state backend)
+connectivity_subscription_id = "<CONNECTIVITY_SUBSCRIPTION_ID>"  # Connectivity sub (hub/firewall/DNS)
+identity_subscription_id     = "<IDENTITY_SUBSCRIPTION_ID>"      # Identity sub (Entra DS, PIM)
+security_subscription_id     = "<SECURITY_SUBSCRIPTION_ID>"      # Security sub (Sentinel/Defender/KV)
+landingzones_subscription_id = "<LANDINGZONES_SUBSCRIPTION_ID>"  # Shared Landing Zones sub (spokes + synthetic)
 
 github_org  = "your-github-username-or-org"
 github_repo = "alz-poc"

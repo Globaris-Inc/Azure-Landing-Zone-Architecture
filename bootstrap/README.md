@@ -18,7 +18,7 @@ All subsequent root modules (`platform/`, `landing-zones/`, etc.) use the remote
 | Azure CLI ≥ 2.x | `az --version` |
 | Terraform ≥ 1.9 | `terraform --version` |
 | Owner on Management subscription | Required to create RGs and role assignments |
-| Global Administrator or Privileged Role Administrator on Entra ID | Required to create app registrations and assign Owner at Tenant Root MG |
+| Global Administrator or Privileged Role Administrator on Entra ID | Required to create app registrations and assign roles at Tenant Root MG / MG / subscription scope (ADR-021) |
 
 ---
 
@@ -125,8 +125,63 @@ Dedicated to the state backend CMK (ADR-004). RBAC-authorised (no access policie
 ### OIDC Service Principal `sp-alz-poc-cicd`
 
 - **No client secret** — workload identity federation only
-- Two federated credentials: `main` branch pushes and `pull_request` events
-- **Owner at Tenant Root MG** (ADR-006) — scoped down at Section 12 per OQ-008
+- Federated credentials: `main` branch pushes, `pull_request` events, and the
+  `production` / `production-destroy` Environment subjects (ADR-019)
+- **Least-privilege scoped RBAC (ADR-021 — resolves OQ-008).** Tenant-root Owner is
+  REMOVED. The SP holds:
+  - **Management Group Contributor** @ Tenant Root Group (MG create/delete + subscription move)
+  - **Resource Policy Contributor** + **User Access Administrator** @ Globaris MG
+  - **User Access Administrator** @ Landing Zones MG (explicit; inherited from Globaris)
+  - **Contributor** + **User Access Administrator** @ each of the 5 subscriptions (`for_each`)
+  - **Storage Blob Data Contributor** @ state Storage Account (unchanged)
+
+> **Sufficiency is proven only by a live run.** `terraform validate`/`plan` cannot prove
+> the grants are enough — RBAC gaps surface as `AuthorizationFailed` (HTTP 403) at
+> `apply`/`destroy`. The only real test is a CI `deploy.yml target=all` apply followed by
+> `teardown.yml target=all` destroy with the SP holding exactly this set. If any step 403s,
+> add the **precise** missing role/scope and re-run — **never revert to Owner** (that re-opens OQ-008).
+
+---
+
+## Bootstrap ordering — MG-scoped grants (ADR-021)
+
+The scoped RBAC set in [ADR-021](../DECISIONS.md#adr-021-oidc-sp-least-privilege-scope-down--replace-tenant-root-owner-with-a-scoped-role-set-refinessupersedes-adr-006)
+includes role assignments scoped at the **Globaris** and **Landing Zones** management
+groups. Those MGs do **not** exist at the first bootstrap apply — `platform/management-groups`
+creates them later. A role assignment whose `scope` is an MG resource ID still requires
+the MG to exist at apply time, so the MG-scoped grants (Resource Policy Contributor +
+User Access Administrator) will **403 on a fresh tenant**.
+
+**Apply sequence on a fresh tenant:**
+
+1. **First bootstrap apply** — apply everything EXCEPT the three MG-scoped grants (rows 2/3/4),
+   whose target MGs don't exist yet. This `-target` pass creates the state backend, the SP +
+   federated creds, and the grants that bind immediately (Tenant-Root MG Contributor + the
+   per-sub Contributor/UAA), which is all step 2 needs:
+
+   ```bash
+   terraform apply \
+     -target=azuread_service_principal.oidc \
+     -target=azuread_application_federated_identity_credential.main_branch \
+     -target=azuread_application_federated_identity_credential.pull_request \
+     -target=azuread_application_federated_identity_credential.env_production \
+     -target=azuread_application_federated_identity_credential.env_production_destroy \
+     -target=azurerm_role_assignment.oidc_mg_contributor_tenant_root \
+     -target=azurerm_role_assignment.oidc_contributor_subs \
+     -target=azurerm_role_assignment.oidc_uaa_subs \
+     -target=azurerm_role_assignment.oidc_storage_blob_contributor \
+     -target=azurerm_role_assignment.deployer_storage_blob_contributor
+   ```
+   (The state RG/SA/KV are pulled in automatically as dependencies.) Alternatively, run a plain
+   `terraform apply` and accept that rows 2/3/4 error with a scope-not-found — everything else is
+   created — then proceed; or let a human Owner perform step 2.
+2. **Create the MG tree** — run `platform/management-groups` under a principal that can
+   create MGs at the Tenant Root Group. The SP's row-1 grant (Management Group Contributor)
+   covers this once it is bound; otherwise use a human Owner for the one-time creation.
+3. **Re-apply bootstrap** — `terraform apply` again. Now that `globaris` and `landingzones`
+   exist, rows 2/3/4 bind cleanly. This is the steady-state set.
+
+Bootstrap is a re-applyable one-time layer (ADR-005) — re-running is expected and idempotent.
 
 ---
 

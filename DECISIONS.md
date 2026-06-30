@@ -37,6 +37,128 @@
 
 <!-- Newest at the top. -->
 
+### ADR-021: OIDC SP least-privilege scope-down — replace Tenant Root Owner with a scoped role set (refines/supersedes ADR-006)
+
+- **Date:** 2026-06-29
+- **Section:** 12 (Hardening) — resolves OQ-008; refines [ADR-006](#adr-006-initial-oidc-sp-rbac-scope--owner-at-tenant-root-mg)
+- **Status:** Accepted — **supersedes the RBAC-scope decision of ADR-006** (Owner at Tenant Root MG). ADR-006
+  remains the historical record of the deliberate build-phase compromise; this ADR is the steady-state grant.
+- **Decision makers:** claude (architect); user to ratify; devsecops to implement in `bootstrap/identity.tf`;
+  a real CI `apply`+`destroy` of all roots is the only true validation (see Consequences).
+
+**Context:**
+ADR-006 granted the CI OIDC SP `sp-alz-poc-cicd` **Owner at the Tenant Root Management Group** (the MG named
+after the tenant ID) plus **Storage Blob Data Contributor** on the state Storage Account. Owner-at-tenant-root
+is the single most over-privileged grant in the platform: it lets the SP do anything in any subscription the
+tenant ever contains, including `elevateAccess`-adjacent control. OQ-008 has tracked the scope-down since
+build. The platform now has 10 Terraform roots driven by `deploy.yml` (apply) and `teardown.yml` (destroy,
+ADR-019/ADR-020); the exact privileged operations the SP must perform are finally enumerable, so the scope-down
+can be computed precisely. **Under-scoping breaks CI** (a missing grant fails `apply` or, worse, fails
+`destroy` and orphans resources), so the matrix was derived by auditing every privileged operation in the repo,
+not by guessing a "minimal" set.
+
+Audit of privileged operations (grep of `azurerm_role_assignment`, `azurerm_management_group_policy_assignment`,
+`azurerm_pim_eligible_role_assignment`, `azurerm_role_management_policy`, and the `avm-ptn-alz` MG call,
+excluding `.terraform/`):
+
+| Operation in IaC | Root(s) | Scope | ARM permission family |
+|---|---|---|---|
+| Create/move/delete the Globaris MG tree + place 5 subs (`avm-ptn-alz` `subscription_placement`) | `platform/management-groups` | Tenant Root Group → Globaris | `Microsoft.Management/managementGroups/*` (incl. `/subscriptions/write` to move subs) |
+| MG-scoped **policy assignments** w/ system identities (FinOps tag initiative @ globaris; MCSB/NIST/CIS @ root MG; deny-public-net @ landingzones) | `platform/management`, `platform/security` | globaris MG, landingzones MG | `Microsoft.Authorization/policyAssignments/write,delete` |
+| **Role assignments** for those policy remediation identities (`Contributor` @ globaris MG) + PIM eligible assignments + `azurerm_role_management_policy` @ globaris/landingzones MG | `platform/security`, `platform/management`, `platform/identity` (pim.tf) | globaris MG, landingzones MG | `Microsoft.Authorization/roleAssignments/write,delete`, `roleManagementPolicies/*`, `roleEligibilityScheduleRequests/*` |
+| Resource create/destroy across all 5 subs (hub/firewall/DNS, LAW/automation/budgets, Entra DS/RSV, Sentinel/Defender/KV, spokes, synthetic RGs) | `platform/*`, `landing-zones/*`, `synthetic` | each of the 5 subscriptions | `*` minus `Microsoft.Authorization/*/Write,Delete` |
+| **Role assignments** inside subs (guardrails MI → Contributor on synthetic RGs; red-team MI → Network Contributor / Storage Blob Data Reader / Key Vault Reader; KV/Storage data-plane roles in spokes) | `synthetic`, `landing-zones/*`, `platform/*` | RGs/resources within the 5 subs | `Microsoft.Authorization/roleAssignments/write,delete` at sub scope |
+| State backend data plane (blob read/write/lease for `terraform.tfstate`) | every root (backend) | state Storage Account | `Microsoft.Storage/.../blobServices/...` data actions |
+
+The decisive finding: **`Contributor` is insufficient** for this platform because the IaC itself creates
+role assignments and policy assignments at MG and sub scope, and Contributor explicitly excludes
+`Microsoft.Authorization/*/Write` and `*/Delete`. So the SP needs an authorization-management role (UAA) and a
+policy-management role (Resource Policy Contributor) **in addition to** Contributor — at the scopes where those
+operations occur.
+
+**Decision:**
+Delete the single `oidc_owner_tenant_root` Owner assignment and replace it with the following **scoped role
+matrix**. Keep the Storage Blob Data Contributor assignment unchanged. All role names/GUIDs verified against
+the Microsoft Learn built-in-roles reference (2026-06-20 revision).
+
+| # | Built-in role (GUID) | Scope | Why it is needed | Root(s) that require it |
+|---|---|---|---|---|
+| 1 | **Management Group Contributor** `5d58bcaf-24a5-4b20-bdb6-eed9f69fbe4c` | Tenant Root Group (`/providers/Microsoft.Management/managementGroups/<tenantId>`) | Create/update/**delete** management groups and **move subscriptions** under them — `apply` builds the Globaris tree and places 5 subs; `destroy` deletes the tree. Contributor cannot touch `Microsoft.Management`. | `platform/management-groups` |
+| 2 | **Resource Policy Contributor** `36243c78-bf99-498c-9df9-86d9f8d28608` | Globaris root MG (`/providers/Microsoft.Management/managementGroups/globaris`) | Create/**delete** MG-scoped policy & policy-set assignments (FinOps tag initiative @ globaris; MCSB/NIST/CIS @ root MG via `var.root_management_group_id`). `apply` writes them, `destroy` deletes them. | `platform/management`, `platform/security` |
+| 3 | **User Access Administrator** `18d7d88d-d35e-4fb5-a5c3-7773c20a72d9` | Globaris root MG | Create/**delete** role assignments at MG scope (Contributor for policy remediation identities; PIM eligible assignments + role-management policies @ globaris). `Microsoft.Authorization/*` is exactly UAA's grant; Contributor and Resource Policy Contributor both lack `roleAssignments/write`. | `platform/security`, `platform/management`, `platform/identity` |
+| 4 | **User Access Administrator** `18d7d88d-…` | Landing Zones MG (`/providers/Microsoft.Management/managementGroups/landingzones`) | PIM eligible Contributor assignment + role-management policy are written at the **landingzones** MG (pim.tf); deny-public-net policy remediation identity also lands here. Separate row because UAA at globaris does **not** auto-cover a child MG for *all* operations cleanly in a destroy graph, and keeping it explicit documents the second scope. (Inheritance does flow down, so row 4 is technically redundant given row 3 inherits to children; it is retained for clarity and to survive any future re-parenting — see residual-risk note.) | `platform/identity` (pim.tf), `platform/management` |
+| 5 | **Contributor** `b24988ac-6180-42a0-ab88-20f7382dd24c` | each of the **5 subscriptions** (management, connectivity, identity, security, landingzones) — via `for_each` over a static map | Create/**destroy** all resources in every sub: hub/firewall/DNS, LAW/automation/budgets, Entra DS/RSV, Sentinel/Defender/KV, spokes, synthetic RGs. Subscription-level Defender plan onboarding also runs at sub scope. | all `platform/*`, `landing-zones/*`, `synthetic` |
+| 6 | **User Access Administrator** `18d7d88d-…` | each of the **5 subscriptions** — via the same `for_each` map | The IaC creates role assignments **inside** the subs (guardrails MI → Contributor on synthetic RGs; red-team MI → Network Contributor / Storage Blob Data Reader / Key Vault Reader; KV & Storage data-plane roles in spokes). Contributor cannot create these; UAA at sub scope can, and `destroy` needs `roleAssignments/delete` too. | `synthetic`, `landing-zones/*`, `platform/security`, `platform/identity` |
+| 7 | **Storage Blob Data Contributor** `ba92f5b4-2d11-453d-a403-e96b0029c9fe` | state Storage Account (`azurerm_storage_account.tfstate.id`) | **Unchanged from today.** Entra-ID-only state SA (`shared_access_key_enabled = false`) requires a data-plane role for blob read/write/lease on `terraform.tfstate`. | every root (backend) |
+
+Rows 1–6 replace Owner; row 7 is the existing assignment kept as-is. Rows 3 and 4 could be collapsed to a
+single UAA at globaris (inherits to landingzones); they are kept distinct in the spec for auditability, and the
+spec marks row 4 `OPTIONAL (inherited)` so devsecops may drop it without loss of function.
+
+**Why not just Owner-at-each-sub + something for MGs?** Owner at sub scope re-introduces unrestricted
+`Microsoft.Authorization/*` per sub — strictly broader than Contributor+UAA and with no functional gain, since
+UAA already supplies the only Authorization actions the IaC needs. Contributor+UAA is the tighter pair.
+
+**Alternatives considered:**
+- **Keep Owner at Tenant Root MG (status quo / ADR-006)** — rejected: the entire purpose of OQ-008; tenant-root
+  Owner is unbounded across all current and future subscriptions and is unacceptable steady-state.
+- **Single Owner at Globaris MG (one level down from tenant root)** — rejected: still Owner (unrestricted
+  `Microsoft.Authorization/*` + every resource action) across the whole hierarchy; only marginally narrower than
+  tenant-root Owner and does not demonstrate least-privilege. Also the MG-create/sub-move operations and the
+  tenant-root-scoped Globaris-creation need a grant **at** the Tenant Root Group, which a Globaris-scoped
+  assignment does not provide.
+- **Per-sub Contributor only (no UAA, no Resource Policy Contributor)** — rejected: **breaks apply** — the IaC
+  creates role assignments and MG/sub policy assignments that Contributor's `NotActions`
+  (`Microsoft.Authorization/*/Write`, `*/Delete`) explicitly forbid. This is the classic under-scope trap.
+- **Custom role definition** carved to the exact action set — rejected for the POC: meaningfully tighter
+  (e.g. UAA without `*/read` on the whole tenant), but adds a `azurerm_role_definition` to maintain and re-test
+  on every new resource type. Logged as a future hardening option (G-series) rather than POC scope.
+- **RBAC Administrator instead of UAA** — rejected: `Role Based Access Control Administrator`
+  (`f58310d9-…`) grants only `roleAssignments/write,delete` + `*/read`, which **would** cover the role-assignment
+  operations and is narrower than UAA — but it does **not** cover `roleManagementPolicies/*` /
+  `roleEligibilityScheduleRequests/*` used by PIM (pim.tf), so it under-scopes the identity root. UAA is required
+  for the PIM operations. (Noted as a partial-tightening option for the non-PIM scopes in a future custom-role pass.)
+
+**Consequences:**
+- Positive: removes tenant-root Owner — the SP can no longer act outside the Globaris hierarchy + the 5 named
+  subs, cannot grant itself access at tenant scope (`elevateAccess` is Owner-only and now gone), and cannot
+  touch subscriptions added to the tenant later unless they are explicitly placed and granted.
+- Positive: every grant is now justified by a specific resource in the repo; the matrix is auditable row-by-row.
+- Negative / **honest residual broad grants** (this is **not** "fully minimal"):
+  - **Management Group Contributor at Tenant Root Group** is inherently powerful — it can create/delete **any**
+    management group in the tenant and move subscriptions between them. It is the minimum that still lets CI
+    build/destroy the MG tree, but it is a tenant-wide control-plane grant. Cannot be reduced further without a
+    custom role, because MG-create must be authorized at the parent (Tenant Root Group).
+  - **User Access Administrator at Globaris MG** can create **any** role assignment (including Owner) anywhere in
+    the Globaris hierarchy. A compromised CI SP could self-escalate to Owner within Globaris. This is intrinsic to
+    any self-deploying platform SP that manages RBAC as code; mitigated by OIDC (no stored secret), environment
+    gates (ADR-019), and branch/PR-scoped federation — not by the role itself.
+  - **Contributor at each of the 5 subs** is broad *within* a sub (all resource actions). It is the standard
+    deploy grant and the floor for an IaC SP that owns the whole sub's resources.
+  - Net reduction is **Owner-at-tenant-root → {MG Contributor @ root, scoped UAA/Policy @ 2 MGs, Contributor+UAA
+    @ 5 subs}**: the blast radius drops from "the entire tenant, forever" to "the Globaris hierarchy + 5 named
+    subs," and the SP loses unrestricted Owner (no `elevateAccess`, no implicit future-sub access). Real but not
+    total.
+- **Validation caveat:** `terraform validate`/`plan` will **not** prove sufficiency — RBAC gaps only surface as
+  `AuthorizationFailed` at `apply`/`destroy` time. The only true test is a CI `target=all` **apply** followed by a
+  **teardown** against a tenant where the SP holds exactly this set. Until that runs green, treat the matrix as
+  *resolved-by-design, pending live validation*. If a specific operation 403s, the fix is to add the precise
+  missing scope/role — do **not** fall back to Owner.
+- **Graph (azuread) app permissions are out of scope and unchanged.** The Conditional Access work uses
+  Microsoft Graph application permissions (`Policy.ReadWrite.ConditionalAccess`, etc.), which are **directory**
+  permissions on the app registration, not ARM RBAC. OQ-008 concerns only ARM RBAC; the Graph grants stay exactly
+  as they are. (Note: the current `bootstrap/identity.tf` header says "No API permissions needed" — if CA policies
+  are applied by this same SP elsewhere, those Graph grants live outside bootstrap and are untouched here.)
+- Follow-ups required:
+  1. devsecops implements the spec in `docs/oq-008-rbac.md` into `bootstrap/identity.tf` (rows 1–6 replace
+     `oidc_owner_tenant_root`; row 7 unchanged) and adds 4 new subscription-ID variables to `bootstrap/variables.tf`.
+  2. code-reviewer gates: no Owner remains; `for_each` over a static map; every assignment has a justifying comment.
+  3. a real `apply`+`destroy` of all 10 roots validates sufficiency; any 403 → add the precise scope, never Owner.
+  4. (future, optional) custom role definitions to tighten UAA → RBAC Administrator where PIM is not used, and to
+     drop tenant-wide `*/read`.
+
+---
+
 ### ADR-020: Teardown mechanics — uniform `terraform destroy` (supersedes the ADR-019 brute-force split)
 
 - **Date:** 2026-06-27

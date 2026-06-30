@@ -312,4 +312,27 @@ Per ADR-006 (this session), the OIDC SP receives Owner at Tenant Root MG to enab
 
 This stays open through every session's start-of-session read until resolved at Section 12.
 
+**RESOLVED-BY-DESIGN 2026-06-29 (architect, ADR-021) — pending devsecops impl + a real apply to validate:**
+The least-privilege role matrix is designed and recorded in [ADR-021](DECISIONS.md) and the devsecops
+implementation spec [`docs/oq-008-rbac.md`](docs/oq-008-rbac.md). Tenant Root **Owner** is replaced by:
+**Management Group Contributor** @ Tenant Root Group (MG tree create/delete + subscription move);
+**Resource Policy Contributor** + **User Access Administrator** @ Globaris root MG (MG-scoped policy +
+role assignments, incl. PIM); **Contributor** + **User Access Administrator** on **each of the 5
+subscriptions** (resource + in-sub role-assignment create/destroy, via `for_each` over a static map); and
+the existing **Storage Blob Data Contributor** on the state SA (unchanged). The audit confirmed plain
+Contributor is **insufficient** (the IaC creates role + policy assignments that Contributor's NotActions
+forbid), so UAA + Resource Policy Contributor are required alongside it.
+
+Honest residual broad grants (not "fully minimal"): MG Contributor @ Tenant Root Group is a tenant-wide
+control-plane grant; UAA @ Globaris can create any role assignment (incl. Owner) within the hierarchy
+(self-escalation risk intrinsic to a self-deploying platform SP); per-sub Contributor is broad within each
+sub. The real reduction is **Owner-at-tenant-root (whole tenant, forever) → Globaris hierarchy + 5 named
+subs**, losing unrestricted Owner / `elevateAccess` / implicit future-sub access.
+
+**NOT closed yet — two follow-ups remain:** (1) devsecops implements the spec in `bootstrap/identity.tf` +
+adds the 4 new subscription-ID variables; (2) `terraform validate`/`plan` cannot prove sufficiency — only a
+real CI `target=all` **apply** then **teardown** with the SP holding exactly this set validates it. Any 403 →
+add the precise missing scope, never revert to Owner. The **azuread Graph app permissions are separate ARM-vs-
+directory and unchanged** by OQ-008. Stays referenced until the live apply/destroy passes green.
+
 ---
