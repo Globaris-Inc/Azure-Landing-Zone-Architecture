@@ -54,7 +54,7 @@ export_end_date = "2030-12-01T00:00:00Z"
 
 # Email addresses for budget threshold breach and cost anomaly alert notifications.
 # Supplied via TF_VAR_budget_alert_contact_emails in CI; set locally in poc.secret.tfvars.
-# budget_alert_contact_emails = ["<email-redacted>"]
+# budget_alert_contact_emails = ["ops@example.com"]
 
 # ---------------------------------------------------------------------------
 # Platform components  (Section 8)
