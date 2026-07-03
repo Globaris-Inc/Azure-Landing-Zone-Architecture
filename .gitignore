@@ -37,8 +37,12 @@ synthetic/apps/**/node_modules/
 *.swo
 .DS_Store
 
-# Claude Code — memory and session state; not part of project source
-.claude/
+# Claude Code — ignore memory and session state, but track the shared workflow
+# artifacts (role agents, review-gate hooks, settings) per landing-zone-kit/templates.md.
+.claude/*
+!.claude/agents/
+!.claude/hooks/
+!.claude/settings.json
 
 # Secrets — never commit
 *.pem
