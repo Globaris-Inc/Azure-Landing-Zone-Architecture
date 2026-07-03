@@ -1,0 +1,4 @@
+# Force LF on shell scripts and git hooks so the shebang and the review gate work on
+# checkout regardless of core.autocrlf (CRLF in a #! line breaks execution on POSIX).
+*.sh            text eol=lf
+.githooks/*     text eol=lf

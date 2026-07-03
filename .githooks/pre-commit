@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit - hard-fail a commit on terraform fmt/validate errors (for the
+# roots touched by staged .tf) and actionlint errors (for staged workflow files).
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# Conscious bypass:        git commit --no-verify
+set -uo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)" || exit 1
+cd "$repo_root" || exit 1
+
+staged="$(git diff --cached --name-only --diff-filter=ACM)"
+[ -z "$staged" ] && exit 0
+
+fail=0
+
+# --- terraform: fmt on staged .tf, init+validate on their roots ---
+tf_files="$(echo "$staged" | grep -E '\.tf$' || true)"
+if [ -n "$tf_files" ]; then
+  if ! echo "$tf_files" | xargs terraform fmt -check >/dev/null 2>&1; then
+    echo "pre-commit: terraform fmt would reformat staged files:"
+    echo "$tf_files" | xargs terraform fmt -check 2>&1 | sed 's/^/  /'
+    fail=1
+  fi
+  roots="$(echo "$tf_files" | sed 's#/[^/]*$##' | sort -u)"
+  for r in $roots; do
+    [ -f "$r/providers.tf" ] || continue
+    printf 'pre-commit: validate %-34s ' "$r"
+    if ( cd "$r" && terraform init -backend=false -input=false >/tmp/pc_init.log 2>&1 && terraform validate -no-color >/tmp/pc_val.log 2>&1 ); then
+      echo "PASS"
+    else
+      echo "FAIL"; tail -15 /tmp/pc_init.log /tmp/pc_val.log 2>/dev/null | sed 's/^/  /'; fail=1
+    fi
+  done
+fi
+
+# --- workflows: actionlint (best-effort) ---
+wf="$(echo "$staged" | grep -E '^\.github/workflows/.*\.ya?ml$' || true)"
+if [ -n "$wf" ]; then
+  if command -v actionlint >/dev/null 2>&1; then
+    if ! actionlint $wf; then echo "pre-commit: actionlint failed"; fail=1; fi
+  else
+    echo "pre-commit: actionlint not installed - skipping workflow lint (CI will lint)"
+  fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "pre-commit: BLOCKED. Fix the above, or 'git commit --no-verify' to bypass consciously."
+  exit 1
+fi
+exit 0
