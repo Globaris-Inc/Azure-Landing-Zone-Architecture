@@ -38,6 +38,11 @@ locals {
   # be a bare IPv4, and CIDR ranges must be /0-/30. Strip a trailing /32 so an
   # operator can write the natural "1.2.3.4/32" form in ip_allow_list.
   storage_ip_rules = [for ip in var.ip_allow_list : trimsuffix(ip, "/32")]
+
+  # Instance/sequence for the globally-unique names (state Storage Account, Key
+  # Vault). Deterministic org-prefix + sequence, no random suffix. Bump if a name
+  # is ever globally taken.
+  instance = "01"
 }
 
 # ---------------------------------------------------------------------------
@@ -45,17 +50,6 @@ locals {
 # ---------------------------------------------------------------------------
 
 data "azurerm_client_config" "current" {}
-
-# ---------------------------------------------------------------------------
-# Unique suffix — stable across applies, changes only if the random_string
-# resource is tainted or destroyed.
-# ---------------------------------------------------------------------------
-
-resource "random_string" "suffix" {
-  length  = 6
-  upper   = false
-  special = false
-}
 
 # ---------------------------------------------------------------------------
 # Resource Group
@@ -83,7 +77,7 @@ resource "azurerm_user_assigned_identity" "tfstate" {
 # ---------------------------------------------------------------------------
 
 resource "azurerm_key_vault" "tfstate" {
-  name                = "kv-tfstate-${random_string.suffix.result}-001"
+  name                = "kv-${var.org_prefix}-tfstate-${local.instance}"
   resource_group_name = azurerm_resource_group.tfstate.name
   location            = azurerm_resource_group.tfstate.location
   tenant_id           = var.tenant_id
@@ -156,7 +150,7 @@ resource "azurerm_key_vault_key" "tfstate" {
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_account" "tfstate" {
-  name                     = "sttfstate${random_string.suffix.result}001"
+  name                     = "st${var.org_prefix}tfstate${local.instance}"
   resource_group_name      = azurerm_resource_group.tfstate.name
   location                 = azurerm_resource_group.tfstate.location
   account_tier             = "Standard"

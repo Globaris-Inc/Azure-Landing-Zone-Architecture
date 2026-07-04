@@ -21,9 +21,14 @@
 
 # --- Replace TODO values after bootstrap apply ---
 
-resource_group_name  = "TODO: paste bootstrap output 'resource_group_name' here"
-storage_account_name = "TODO: paste bootstrap output 'storage_account_name' here"
+resource_group_name  = "rg-tfstate-mgmt-eus2-001"
+storage_account_name = "stglobaristfstate01"
 container_name       = "tfstate"
+
+# The state SA has shared keys disabled (shared_access_key_enabled = false), so the
+# backend must authenticate to blob storage via Entra ID, not an account key. The CI
+# OIDC SP (and the local deployer) hold Storage Blob Data Contributor on the account.
+use_azuread_auth = true
 
 # key is NOT set here — it is set per-root-module at init time, e.g.:
 #   -backend-config="key=platform/connectivity/terraform.tfstate"

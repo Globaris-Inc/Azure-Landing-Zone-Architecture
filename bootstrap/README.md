@@ -115,11 +115,13 @@ In **Settings → Environments**, create TWO environments, each with at least on
 
 Hosts all bootstrap resources in the Management subscription (`eastus2`).
 
-### Key Vault `kv-tfstate-<suffix>-001`
+### Key Vault `kv-globaris-tfstate-01`
 
 Dedicated to the state backend CMK (ADR-004). RBAC-authorised (no access policies). Soft-delete (90 days) and purge protection enabled — this KV cannot be accidentally destroyed.
 
-### Storage Account `sttfstate<suffix>001`
+### Storage Account `stglobaristfstate01`
+
+Deterministic name: `st<org_prefix>tfstate<instance>` (no random suffix). Global uniqueness relies on the distinctive org prefix; bump `local.instance` if a name is ever taken.
 
 - **GZRS** replication — geo-redundant, zone-redundant within primary region
 - **CMK encryption** via the bootstrap Key Vault key
@@ -210,9 +212,8 @@ If the local `terraform.tfstate` is lost:
 ```bash
 # Example imports — adjust resource IDs to match your deployment
 terraform import azurerm_resource_group.tfstate /subscriptions/<mgmt-sub>/resourceGroups/rg-tfstate-mgmt-eus2-001
-terraform import azurerm_storage_account.tfstate /subscriptions/<mgmt-sub>/resourceGroups/rg-tfstate-mgmt-eus2-001/providers/Microsoft.Storage/storageAccounts/sttfstate<suffix>001
-terraform import azurerm_key_vault.tfstate /subscriptions/<mgmt-sub>/resourceGroups/rg-tfstate-mgmt-eus2-001/providers/Microsoft.KeyVault/vaults/kv-tfstate-<suffix>-001
-terraform import random_string.suffix <suffix>
+terraform import azurerm_storage_account.tfstate /subscriptions/<mgmt-sub>/resourceGroups/rg-tfstate-mgmt-eus2-001/providers/Microsoft.Storage/storageAccounts/stglobaristfstate01
+terraform import azurerm_key_vault.tfstate /subscriptions/<mgmt-sub>/resourceGroups/rg-tfstate-mgmt-eus2-001/providers/Microsoft.KeyVault/vaults/kv-globaris-tfstate-01
 # ... import remaining resources (identity, role assignments, etc.)
 terraform import azuread_application.oidc <application-object-id>
 terraform import azuread_service_principal.oidc <sp-object-id>

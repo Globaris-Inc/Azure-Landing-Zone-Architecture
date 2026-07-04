@@ -18,10 +18,6 @@ terraform {
       source  = "hashicorp/azuread"
       version = "~> 3.8.0"
     }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.8.1"
-    }
     time = {
       source  = "hashicorp/time"
       version = "~> 0.13.1"
@@ -31,6 +27,13 @@ terraform {
 
 provider "azurerm" {
   subscription_id = var.management_subscription_id
+
+  # The state Storage Account disables shared keys (shared_access_key_enabled =
+  # false). Without this, the provider polls the blob data plane with key-based
+  # auth and fails with 403 KeyBasedAuthenticationNotPermitted. Use Entra (AAD)
+  # auth for storage data-plane operations instead. The deployer holds Storage
+  # Blob Data Contributor on the account (see identity.tf).
+  storage_use_azuread = true
 
   features {
     key_vault {
