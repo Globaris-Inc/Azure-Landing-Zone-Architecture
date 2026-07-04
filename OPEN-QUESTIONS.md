@@ -58,7 +58,50 @@ are **not available for PRIVATE repos on the Free plan**. Both environments now 
 `environment:production-destroy` federated subjects resolve and the pipeline is functional. The reviewer gate
 is the only missing piece.
 
-**Needed from user:** choose A / B / C.
+**User direction (2026-07-04):** keep the repo **PRIVATE** until all deployments are validated end-to-end;
+find a private-compatible governance setup. Rules out Option A (public flip) for now.
+
+**Finding (2026-07-04, retry with correct reviewer id `175745508`):** the required-reviewer PUT still returns
+**HTTP 422 billing** — so the *account* backing `teeeke/Azure-Architecture` is not on a plan that supports
+private-repo environment protection. (The CLI token lacks `read:user`, so `.plan` can't be confirmed via API.)
+User believes they have "GitHub Pro"; likely the **Copilot Pro ≠ GitHub Pro** mix-up — needs manual verify at
+github.com/settings/billing. Native reviewer wiring is a 1-command API call the moment GitHub **Pro** is
+confirmed/active.
+
+**Private-compatible path forward:**
+- If GitHub **Pro** is actually active → wire required reviewers on both environments now (restores ADR-019),
+  repo stays private.
+- If not → either upgrade to Pro ($4/mo, private), OR add the **free typed `confirm=apply` guard** to
+  `deploy.yml` apply jobs (documented deviation; hard-fails before azure/login; real reviewer gate layered on
+  later). User leaned "no extra gate for now" believing Pro covered it — revisit once billing is verified.
+
+**Update 2026-07-04 — repo moved to org `Globaris-Inc/Azure-Architecture` (PRIVATE).** Remote re-pointed;
+Variables (3) + Secrets (7) + both Environments **survived the transfer** (no re-set needed). Org reads
+`plan: team` (which includes private-repo environment protection), `teeeke` is an **active org admin member**.
+**Yet required-reviewer AND wait-timer PUTs both still 422** ("billing plan does not support ... protection
+rule") — ruled out: reviewer id, JSON payload shape, stale env metadata (deleted+recreated `production`
+fresh under the org — still 422). Conclusion: GitHub-side **billing entitlement not active/propagated** for
+the org's Team plan (post-transfer lag, or an unconfirmed/pending Team billing state). Not fixable from the
+CLI.
+
+**Needed from user:** at github.com/organizations/Globaris-Inc/settings/billing confirm **Team is active with
+a valid payment method** (not trial/pending). Then either (a) tell me to **retry** the reviewer wiring (1
+command — it will just work once entitlement is live), and/or (b) approve the **free typed `confirm=apply`
+guard** on `deploy.yml` apply jobs as interim/defence-in-depth. Both environments currently exist **ungated**
+so the pipeline is functional meanwhile.
+
+**Decision 2026-07-04 (user):** set up **branch protection on `main`** (code-merge governance) instead of
+chasing the environment reviewer gate now. **DONE** — a repository ruleset was imported to
+`Globaris-Inc/Azure-Architecture` (no import errors) and the config is version-controlled at
+`.github/rulesets/main-branch-protection.json` (+ `.github/rulesets/README.md`; documented in
+`docs/cicd-deploy-teardown.md` §7). It enforces: PR required + ≥1 approval + dismiss-stale, no force-push /
+no deletion, required checks (`terraform fmt -check` + the 10 `validate — <root>` jobs); repo admins bypass
+(solo-owner safety). **Caveat recorded:** branch protection gates *merges to `main`*, NOT the deploy apply
+run — deploys are `workflow_dispatch`-triggered (LESSON 17), so a merge never auto-applies.
+
+**OQ-015 stays OPEN on the apply-run gate only:** the environment reviewer gate (blocked on Team billing
+entitlement — retry when live) OR the free typed `confirm=apply` guard. Environments remain ungated until one
+is in place.
 
 ---
 

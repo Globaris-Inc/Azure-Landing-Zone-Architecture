@@ -259,6 +259,36 @@ per-resource TF_VAR values); the new workflows follow the same split.
 Two distinct Environments so destroy approval is a **separate, more deliberate** gate than apply, and so
 the `production-destroy` environment can carry a tighter reviewer list and a wait timer if desired.
 
+> **Reviewer status (2026-07-04, OQ-015):** the "Required reviewer" column above is the *target*. GitHub
+> environment protection rules (required reviewers / wait timers) are a **paid, private-repo** feature. The
+> repo now lives in the `Globaris-Inc` org (GitHub **Team**), but the protection-rule API still returns a
+> billing 422 (entitlement not yet active/propagated). Both environments exist **ungated** in the interim,
+> so the pipeline is functional; the reviewer gate is a one-command wiring once entitlement is live. See
+> **OQ-015** for the resolution path and the free `confirm=apply` fallback guard.
+
+### Branch protection (`main`) — repo ruleset
+
+The default branch is protected by a **repository ruleset**, version-controlled at
+[`.github/rulesets/main-branch-protection.json`](../.github/rulesets/main-branch-protection.json) so the
+configuration is reproducible and reviewable like the rest of the platform. It enforces on `main`:
+
+- **Pull request required** (no direct pushes), **≥1 approval**, stale approvals **dismissed on push**.
+- **No force-pushes** (`non_fast_forward`) and **no branch deletion**.
+- **Required status checks:** `terraform fmt -check` + all ten `validate — <root>` jobs from
+  `validate.yml` (ADR-018). Contexts must match the job names **exactly** — note the em dash (`—`) in
+  `validate — <root>`; if those jobs are ever renamed, update this ruleset in lock-step.
+- **Repository admins can bypass** (`bypass_actors`) so a solo owner is not locked out (GitHub forbids
+  approving your own PR).
+
+**How it is applied:** GitHub does **not** auto-apply a repo-stored ruleset JSON — the file is the source
+of record. Apply/update it via **Settings → Rules → Rulesets → New ruleset → Import a ruleset** (or
+`gh api --method POST repos/<org>/<repo>/rulesets --input .github/rulesets/main-branch-protection.json`).
+Applied to `Globaris-Inc/Azure-Architecture` on 2026-07-04.
+
+**Scope (important):** this ruleset gates **code merges into `main`**, not the **deploy apply run** —
+deploys are `workflow_dispatch`-triggered (LESSON 17), so a merge never auto-applies. The apply-run gate is
+the environment reviewer / typed-confirm guard tracked separately in **OQ-015**.
+
 ### Load-bearing gap — federated-credential subjects must be added (FLAG)
 
 **The current bootstrap only federates two subjects** (`identity.tf`):
