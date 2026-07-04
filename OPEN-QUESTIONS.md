@@ -31,6 +31,66 @@
 
 <!-- Newest at the top. -->
 
+### OQ-015: Environment required-reviewer gate unavailable on the current GitHub plan
+
+- **Raised:** 2026-07-04 (Section 10 CI wiring, devsecops)
+- **Section:** 10 (Pipeline & Tooling)
+- **Blocking:** No - the deploy/teardown pipeline runs without it; this is a governance gap vs ADR-019
+- **Priority:** Medium
+
+**Question:**
+ADR-019 / OQ-013 (RESOLVED B) require >=1 **required reviewer** on the `production` (apply) and
+`production-destroy` (teardown) GitHub Environments. On wiring them, GitHub returned **HTTP 422 "Please
+ensure the billing plan supports the required reviewers protection rule."** - environment protection rules
+are **not available for PRIVATE repos on the Free plan**. Both environments now exist but are **ungated**
+(0 protection rules). How do we restore the human-approval gate?
+
+**Options being considered:**
+- A: **Flip the repo public** (recommended) - environment protection rules (incl. required reviewers) are
+  free on public repos. Aligns with the 2026-07-03 public-readiness prep (secret-swept, MIT LICENSE, history
+  rewritten). Adds required-reviewer + branch-policy gates at zero cost. Then re-run the reviewer wiring.
+- B: **Accept ungated environments as a documented POC deviation.** The teardown `confirm == "destroy"`
+  typed guard (hard-fails before any Azure login) and the deliberate `workflow_dispatch`-only trigger remain
+  as the guardrails; no automated human approval step. Cheapest; weakens ADR-019.
+- C: **Upgrade to GitHub Pro/Team** to get environment protection on the private repo (recurring cost).
+
+**Interim state:** both environments created ungated so the OIDC `environment:production` /
+`environment:production-destroy` federated subjects resolve and the pipeline is functional. The reviewer gate
+is the only missing piece.
+
+**Needed from user:** choose A / B / C.
+
+---
+
+### OQ-014: Brownfield adoption unknowns - importing an existing environment into the ALZ
+
+- **Raised:** 2026-07-03 (Section 11 planning, architect)
+- **Section:** 11 (design captured now) / future build
+- **Blocking:** No - greenfield docs proceed now; this gates the future brownfield build only
+- **Priority:** Medium
+
+**Question:**
+What is the supported approach for adopting an existing (brown-field) tenant/subscriptions into this ALZ,
+and which unknowns must be resolved before we build that capability?
+
+**Open sub-questions (resolve before a brownfield build):**
+- **State:** `terraform import` of pre-existing RGs/VNets/policy assignments, vs. greenfield-only with
+  parallel coexistence and a later cutover?
+- **MG grafting:** moving existing subscriptions under the Globaris MG tree - what is the blast radius of
+  inherited policy on already-running workloads?
+- **Policy rollout:** audit / DeployIfNotExists in non-enforcing mode first, then enforce - what soak period
+  and exception process?
+- **Networking coexistence:** existing hub/VNet/DNS vs. this platform's hub - peering, address-space
+  overlap, DNS forwarder cutover.
+- **RBAC:** existing assignments vs. the scoped OIDC SP (ADR-021) - does adoption need broader temporary
+  grants during import?
+- **Ownership boundary:** which existing resources IaC takes over vs. leaves un-managed.
+
+**Approach captured now (ADR-022):** document the adoption approach in `docs/brownfield-adoption.md` as
+roadmap; build + validate the capability in a later section/wave.
+
+---
+
 ### OQ-013: CI/CD approval model for apply vs teardown
 
 - **Raised:** 2026-06-27 (CI/CD deploy + teardown design session, architect)

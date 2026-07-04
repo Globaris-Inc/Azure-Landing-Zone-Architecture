@@ -37,6 +37,56 @@
 
 <!-- Newest at the top. -->
 
+### ADR-022: Section 11 documentation set - greenfield DEPLOYMENT.md runbook; brownfield designed now, built later
+
+- **Date:** 2026-07-03
+- **Section:** 11 (Documentation Deliverables)
+- **Status:** Accepted
+- **Decision makers:** user, claude (architect)
+
+**Context:**
+The platform is a green-field build, validate-clean across all 10 roots, but undocumented for an operator to
+deploy or hand off. PROMPT.md §11 names six deliverables (README, ARCHITECTURE, RUNBOOK, SECURITY, COST,
+per-module terraform-docs). Two needs surfaced that §11 does not name explicitly: (1) a step-by-step,
+per-landing-zone greenfield deployment runbook - the pipeline already supports per-root deploys via
+`deploy.yml target=<root>`, but the ordered operator procedure is undocumented; (2) a forward path for using
+this platform against a brown-field tenant (adopting existing subscriptions/resources into the ALZ
+hierarchy).
+
+**Decision:**
+1. Author a dedicated **`DEPLOYMENT.md`** greenfield runbook, ordered to the `deploy.yml` `needs:` graph
+   (bootstrap -> management-groups -> management -> {connectivity, security, identity} -> spokes ->
+   synthetic). Each step is self-contained: what it creates, the exact `deploy.yml` inputs, its
+   dependencies, the `terraform output` values carried forward, and a post-apply validation. README
+   quickstart links to it; `docs/cicd-deploy-teardown.md` stays the pipeline reference (mechanics),
+   DEPLOYMENT.md is the operator procedure (how to run).
+2. **Brownfield is designed now, built later.** This pass produces a "Brownfield adoption approach" design
+   deliverable (`docs/brownfield-adoption.md`) plus this ADR and OQ-014. It does not document brownfield
+   capability as if it exists. The actual capability (state `import`, grafting existing subscriptions into
+   the MG hierarchy, audit-first non-enforcing policy rollout, DNS/peering coexistence) is a future build.
+
+**Alternatives considered:**
+- Fold the deployment steps into README quickstart - rejected: makes README long, mixes overview with
+  operational detail.
+- Extend `docs/cicd-deploy-teardown.md` into the operator runbook - rejected: blurs pipeline-reference vs
+  operator-guide.
+- Write a full brownfield runbook now - rejected: risks documenting untested capability; brownfield is a
+  distinct design problem deserving its own build + validation.
+- Defer brownfield entirely - rejected: the user wants a credible adoption story; capturing the approach now
+  is low-cost and portfolio-valuable.
+
+**Consequences:**
+- Positive: an operator can deploy the whole platform or any single LZ from a followable guide; the
+  greenfield runbook doubles as the §12 acceptance path; the brownfield direction is on record without
+  over-committing.
+- Negative / trade-offs: DEPLOYMENT.md must stay in sync with the `deploy.yml` target list and root order;
+  the brownfield design section names capability that does not yet exist and must be clearly labelled
+  roadmap.
+- Follow-ups: OQ-014 (brownfield unknowns); a future section/wave to build + validate brownfield adoption;
+  per-module `terraform-docs` generation is its own step in the §11 sequence.
+
+---
+
 ### ADR-021: OIDC SP least-privilege scope-down — replace Tenant Root Owner with a scoped role set (refines/supersedes ADR-006)
 
 - **Date:** 2026-06-29
