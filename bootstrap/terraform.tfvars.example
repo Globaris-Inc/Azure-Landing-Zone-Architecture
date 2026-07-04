@@ -20,20 +20,19 @@ landingzones_subscription_id = "<LANDINGZONES_SUBSCRIPTION_ID>"  # Shared Landin
 github_org  = "your-github-username-or-org"
 github_repo = "alz-poc"
 
-# IP allow list — GitHub Actions runners + your home/work IP.
+# IP allow list for the state Storage Account: ONLY your deployer public IP.
 #
-# Get current GitHub Actions IP ranges:
-#   curl -s https://api.github.com/meta | jq '.actions[]'
+# Format rules (Azure Storage ip_rules): a single host must be a BARE IPv4 (a /32
+# suffix is rejected); CIDR ranges must be /0-/30 (no /31 or /32). The code strips
+# a trailing /32 for you, but bare is the canonical form.
 #
-# As of early 2025, the main Azure-hosted runner ranges include (NOT exhaustive — verify!):
-#   4.148.0.0/16, 20.1.0.0/16, 20.14.0.0/16, etc.
-#   Always fetch fresh from the GitHub meta API before committing.
+# Do NOT add GitHub Actions runner ranges here: they are thousands of rotating
+# CIDRs and Azure Storage caps ip_rules at 200. CI runners are allow-listed
+# just-in-time by the deploy workflow (manage_runner_ip) instead.
 #
-# Add your home/office public IP:
-#   curl -s https://api.ipify.org
+# Get your public IP:  curl -s https://api.ipify.org
 ip_allow_list = [
-  "YOUR.HOME.IP.HERE/32",    # Replace with: curl -s https://api.ipify.org
-  # Add GitHub Actions runner ranges from: curl -s https://api.github.com/meta | jq '.actions[]'
+  "203.0.113.10",   # your public IP, bare (no /32)
 ]
 
 # ---------------------------------------------------------------------------

@@ -41,7 +41,8 @@ az account show --query "{sub:id, tenant:tenantId}" -o table
 
 ```bash
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars — fill in tenant_id, management_subscription_id,
+# Edit terraform.tfvars: fill in tenant_id; ALL FIVE subscription IDs
+# (management, connectivity, identity, security, landingzones per OQ-008 / ADR-021);
 # github_org, github_repo, and ip_allow_list.
 ```
 
@@ -99,7 +100,12 @@ In your GitHub repository → **Settings → Secrets and variables → Actions �
 | `AZURE_TENANT_ID` | `oidc_tenant_id` output |
 | `AZURE_SUBSCRIPTION_ID` | `management_subscription_id` output |
 
-In **Settings → Environments**, create an environment named **`production`** and add a required reviewer. The `apply-on-merge.yml` workflow references this environment gate.
+In **Settings → Environments**, create TWO environments, each with at least one required reviewer:
+
+- **`production`** gates the apply jobs in `deploy.yml` (ADR-019 / OQ-013).
+- **`production-destroy`** gates the destroy job in `teardown.yml`.
+
+(The old `apply-on-merge.yml` was removed; deploys are explicit via `deploy.yml`, LESSON 17.)
 
 ---
 

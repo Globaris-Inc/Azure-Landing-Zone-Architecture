@@ -33,6 +33,11 @@ locals {
     },
     var.tags
   )
+
+  # Azure Storage account ip_rules reject a /31 or /32 suffix: a single host must
+  # be a bare IPv4, and CIDR ranges must be /0-/30. Strip a trailing /32 so an
+  # operator can write the natural "1.2.3.4/32" form in ip_allow_list.
+  storage_ip_rules = [for ip in var.ip_allow_list : trimsuffix(ip, "/32")]
 }
 
 # ---------------------------------------------------------------------------
@@ -188,7 +193,7 @@ resource "azurerm_storage_account" "tfstate" {
   network_rules {
     default_action = "Deny"
     bypass         = ["AzureServices"]
-    ip_rules       = var.ip_allow_list
+    ip_rules       = local.storage_ip_rules
   }
 
   tags = local.common_tags
