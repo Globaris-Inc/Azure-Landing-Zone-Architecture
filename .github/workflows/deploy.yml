@@ -56,6 +56,9 @@ jobs:
       action: ${{ inputs.action }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
 
   management:
@@ -67,6 +70,9 @@ jobs:
       action: ${{ inputs.action }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
 
   connectivity:
@@ -78,6 +84,9 @@ jobs:
       action: ${{ inputs.action }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
 
   identity:
@@ -89,6 +98,9 @@ jobs:
       action: ${{ inputs.action }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
 
   security:
@@ -100,6 +112,9 @@ jobs:
       action: ${{ inputs.action }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
 
   corp-a1:
@@ -111,6 +126,9 @@ jobs:
       action: ${{ inputs.action }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
 
   corp-a2:
@@ -122,6 +140,9 @@ jobs:
       action: ${{ inputs.action }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
 
   online-p1:
@@ -133,6 +154,9 @@ jobs:
       action: ${{ inputs.action }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
 
   synthetic:
@@ -144,4 +168,7 @@ jobs:
       action: ${{ inputs.action }}
       backend_rel: "../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
