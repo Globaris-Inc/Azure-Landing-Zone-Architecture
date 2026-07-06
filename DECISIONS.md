@@ -37,6 +37,52 @@
 
 <!-- Newest at the top. -->
 
+### ADR-024: Remove the state-container WORM immutability policy (incompatible with the Terraform azurerm backend)
+
+- **Date:** 2026-07-06
+- **Section:** 10a (bootstrap / state backend)
+- **Status:** Accepted (removes the immutability-policy portion of the ADR-004 bootstrap design)
+- **Decision makers:** user, claude
+
+**Context:**
+Bootstrap created an `azurerm_storage_container_immutability_policy` (container-level, time-based, 7-day) on
+the `tfstate` container, `locked = false`. The original intent was a WORM audit trail; the header even noted a
+*locked* policy would break state, so it was left unlocked on the assumption that unlocked + blob versioning
+was safe for active state. It is not. The first state operation on a **new** root after the policy existed
+(`platform/connectivity` init) failed:
+`Error loading state: failed to lock azure state: 409 This operation is not permitted as the blob is immutable
+due to a policy (BlobImmutableDueToPolicy)`. The azurerm backend takes a **blob lease (lock)** and rewrites the
+state blob on every run; a container time-based retention policy rejects that path with 409 **regardless of
+versioning** (versioning only protects overwrite history, not the lease/lock). `management-groups` had worked
+only because its state blob was written *before* the bootstrap re-apply added the policy; every future apply
+on it would have failed too. Discovered during the first CI plan of connectivity, 2026-07-06.
+
+**Decision:**
+Remove the immutability policy entirely (it was `locked = false`, so removable — a *locked* policy would have
+been unrecoverable without deleting the SA). State protection is provided by the Storage Account's existing,
+backend-compatible controls: **blob versioning + 14-day blob/container soft-delete + Entra-ID-only (no
+shared-key) access + CMK-at-rest**. WORM is not an appropriate protection model for a live Terraform state
+container.
+
+**Alternatives considered:**
+- Keep the policy, disable Terraform state locking — rejected: removes concurrency safety on shared state; far
+  more dangerous than losing WORM.
+- Version-level immutability instead of container-level — rejected: still intercepts the lease/lock path and
+  adds operational complexity for no real benefit on a state blob.
+- A separate immutable audit copy of state (lifecycle-management export to a WORM container) — deferred: valid
+  future enhancement, but out of scope and not on the live backend.
+
+**Consequences:**
+- Positive: unblocks all CI state operations (connectivity and every subsequent root); removes a latent bomb
+  that would have broken existing roots' next applies.
+- Negative / trade-offs: no WORM/immutability on state history — accepted; versioning + soft-delete + CMK +
+  Entra-only auth remain. Lesson: never put a container-level immutability policy on a Terraform azurerm
+  backend, locked or unlocked.
+- Follow-ups required: none blocking. If an immutable state-audit trail is later required, do it as an
+  out-of-band lifecycle export to a dedicated WORM container, not on the active backend.
+
+---
+
 ### ADR-023: Pin ALZ library to platform/alz 2026.04.2 (bump the ref, not the module) to clear the Enforce-EncryptTransit apply break
 
 - **Date:** 2026-07-05

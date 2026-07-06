@@ -1,6 +1,6 @@
 # Purpose: State backend infrastructure — RG, Key Vault (CMK), Storage Account.
 # Section: 10a — Pipeline & Tooling (bootstrap subset)
-# Last updated: 2026-05-05
+# Last updated: 2026-07-06
 #
 # Resources created:
 #   - Resource Group (Management sub, eastus2)
@@ -8,17 +8,18 @@
 #   - Key Vault with RBAC auth, soft-delete, purge protection (ADR-004)
 #   - Key Vault RSA-2048 key (CMK for Storage)
 #   - Storage Account (Standard GZRS, CMK, versioning, Entra-ID-only auth)
-#   - Storage Container 'tfstate' with time-based immutability policy
+#   - Storage Container 'tfstate' (protected by versioning + 14-day soft-delete)
 #   - Role assignments: deployer → KV Crypto Officer; UAMI → KV Crypto Encryption User
 #
 # DEVIATION: Storage Account network rules allow public access from var.ip_allow_list
 # (GitHub Actions IPs + deployer IP). Section 8 will add a Private Endpoint and disable
 # public access entirely. See WORKLOG.md 2026-05-05 for rationale.
 #
-# DEVIATION: Immutability policy is set with locked = false. A locked policy prevents
-# blob overwrites, which would break active Terraform state operations. The policy
-# demonstrates WORM capability; flip locked = true only on a decommissioned/archived
-# state container.
+# NOTE (ADR-024, 2026-07-06): a container WORM immutability policy was removed. Even
+# UNLOCKED it broke Terraform state operations — the azurerm backend takes a blob
+# lease (lock) on every run, which a container time-based retention policy rejects
+# with 409 BlobImmutableDueToPolicy, versioning notwithstanding. State protection is
+# provided by blob versioning + 14-day blob/container soft-delete + Entra-only access.
 
 locals {
   common_tags = merge(
@@ -213,12 +214,17 @@ resource "azurerm_storage_container" "tfstate" {
   container_access_type = "private"
 }
 
-# DEVIATION: locked = false — see file header comment.
-resource "azurerm_storage_container_immutability_policy" "tfstate" {
-  storage_container_resource_manager_id = azurerm_storage_container.tfstate.resource_manager_id
-  immutability_period_in_days           = 7
-  locked                                = false
-}
+# REMOVED 2026-07-06 (ADR-024): a container-level WORM immutability policy is
+# incompatible with the Terraform azurerm backend. Every state operation takes a
+# blob lease (lock) and rewrites the state blob; a container time-based retention
+# policy rejects the lease/write with HTTP 409 BlobImmutableDueToPolicy — even
+# with versioning enabled (versioning protects overwrites, not the lock path).
+# It broke the first post-policy state init (platform/connectivity) and would
+# have broken every future apply on existing roots too. State immutability is not
+# the right protection model here; the SA already provides blob versioning +
+# 14-day blob/container soft-delete + Entra-only (no shared-key) access, which is
+# the correct, backend-compatible protection. The policy was `locked = false`, so
+# it was removable.
 
 # ---------------------------------------------------------------------------
 # Storage Blob Data Contributor — OIDC SP (defined in identity.tf)

@@ -143,8 +143,27 @@ jobs:
           echo "RUNNER_IP=$RUNNER_IP"   >> "$GITHUB_ENV"
           echo "STATE_SA_NAME=$SA_NAME" >> "$GITHUB_ENV"
           echo "STATE_SA_RG=$RG_NAME"   >> "$GITHUB_ENV"
-          # Network-rule propagation is not instant; give it a moment before init.
-          sleep 20
+          # Storage IP-network-rule propagation to the data plane is NOT instant
+          # (Azure: up to a few minutes) and a fixed short sleep is a coin-flip —
+          # a 20s wait let some roots' `init` 403 on "listing blobs". Poll the exact
+          # access path init uses (a blob list on the state container via the
+          # logged-in SP) until the firewall admits this runner, then proceed.
+          CONTAINER="$(grep -E '^\s*container_name' "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          echo "Waiting for the state-SA firewall to admit $RUNNER_IP (probing blob list)..."
+          ready=0
+          for i in $(seq 1 24); do
+            if az storage blob list \
+                 --account-name "$SA_NAME" --container-name "$CONTAINER" \
+                 --auth-mode login --num-results 1 --only-show-errors -o none 2>/dev/null; then
+              echo "State SA reachable after ~$(( (i-1) * 8 ))s."
+              ready=1; break
+            fi
+            sleep 8
+          done
+          if [ "$ready" != "1" ]; then
+            echo "::error::State SA firewall did not admit runner IP $RUNNER_IP within ~192s."
+            exit 1
+          fi
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
