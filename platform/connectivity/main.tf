@@ -1,7 +1,7 @@
 # Purpose: Connectivity platform root module — dual-hub hub-and-spoke VNets with
 #          Azure Firewall Premium (IDPS), VPN Gateway, and DNS Private Resolver.
 # Section: 8 — Standard Platform Components
-# Last updated: 2026-06-27 (G6: on-demand Azure Bastion in primary hub — ADR-015)
+# Last updated: 2026-07-06 (gate DDoS Network Protection Plan on var.enable_ddos_standard — cost/correctness fix)
 #
 # Apply order: Independent of platform/management; run before platform/security
 #              (Firewall private IPs are consumed by spoke UDRs in Section 8 Batch 3+).
@@ -75,6 +75,17 @@ resource "azurerm_resource_group" "connectivity_secondary" {
 module "hub_and_spoke" {
   source  = "Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet/azurerm"
   version = "0.17.1"
+
+  # Shared (cross-hub) settings. The module defaults enabled_resources.ddos_protection_plan
+  # to true, which creates a standalone Azure DDoS Network Protection Plan (~$2,944/mo) and
+  # wires its id into BOTH hub VNets. Gate creation on var.enable_ddos_standard: when false,
+  # module.ddos_protection_plan count = 0 (no plan), local.ddos_protection_plan_id = null,
+  # and both hubs' ddos_protection_plan_id fall back to null (DDoS disabled). Default off for POC.
+  hub_and_spoke_networks_settings = {
+    enabled_resources = {
+      ddos_protection_plan = var.enable_ddos_standard
+    }
+  }
 
   hub_virtual_networks = {
     primary = {
