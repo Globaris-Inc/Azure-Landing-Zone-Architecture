@@ -31,6 +31,59 @@
 
 <!-- Newest at the top. -->
 
+### OQ-017: AVM module + provider version drift roll-up (staleness maintenance pass)
+
+- **Raised:** 2026-07-05 (drift audit, code-reviewer)
+- **Section:** cross-cutting (2, 5, 6, 8, 9)
+- **Blocking:** No — staleness, not a known break. Do as a deliberate, verified maintenance pass, not ad hoc.
+- **Priority:** Medium
+
+**Question:**
+Post-incident drift audit (see ADR-023 / WORKLOG 2026-07-05) found several exact-pinned AVM modules and one
+provider constraint lagging upstream. None is a confirmed apply-breaker, but the same neglect produced the
+`Enforce-EncryptTransit` failure. Bump deliberately (verify each changelog, re-plan the affected scope), not
+in one blind sweep. Candidates (verified latest via registry API 2026-07-05):
+- `avm-ptn-alz` **0.19.1 → 0.21.0** (`platform/management-groups/main.tf:32-33`) — the MG/policy engine; ADR-023
+  follow-up (3). Compat cleared (root `alz ~> 0.21.0`, `azapi ~> 2.9.0` satisfy 0.21.0's floors). Re-plan MG scope.
+- `avm-res-network-virtualnetwork` **0.17.1 → 0.19.0** (4 roots, lockstep: `landing-zones/corp-a1`, `corp-a2`,
+  `online-p1` `main.tf`, `platform/identity/identity-network.tf`).
+- `avm-res-recoveryservices-vault` **1.1.3 → 1.1.11** (3 roots: `corp-a1/backup.tf`, `corp-a2/main.tf`,
+  `platform/identity/domain-services.tf`; upstream skips 1.1.8).
+- LOW patch lag: `avm-res-web-serverfarm` 2.0.4→2.0.7; `avm-ptn-alz-connectivity-hub-and-spoke-vnet`
+  0.17.1→0.17.3; `avm-ptn-network-private-link-private-dns-zones` 0.23.1→0.23.2.
+- Provider drift: `azapi` pinned 3 ways — security `~> 2.4.0` (only root using `azapi_resource` directly, yet
+  most stale), connectivity `~> 2.5`, management-groups `~> 2.9.0`. Standardize on one floor (`~> 2.9`).
+
+**Options being considered:**
+- A: Batch by module family across their lockstep roots, each with a re-plan of the affected scope, as each
+  section comes up for deploy (recommended — ties the bump to a real plan review).
+- B: One dedicated "dependency refresh" session bumping everything + full `validate`/plan sweep before resuming deploys.
+- C: Defer all until each root's own deploy session forces the question.
+
+### OQ-016: Built-in policies referenced without explicit `parameter_values` — PUT-time risk (management + security)
+
+- **Raised:** 2026-07-05 (drift audit, code-reviewer)
+- **Section:** 5 (management/policy) and 6 (Defender/Sentinel)
+- **Blocking:** Yes — for the `platform/management` and `platform/security` apply runs (same class as ADR-023;
+  invisible to `terraform validate`/`plan`, only ARM's policy-parameterization check at PUT rejects it).
+- **Priority:** High
+
+**Question:**
+The drift audit flagged two spots that repeat the `Enforce-EncryptTransit` failure shape — a built-in policy
+referenced with only a `reference_id`, inheriting the built-in's current default parameters (incl. `effect`),
+which a newer built-in version can make ARM-invalid or newly-required:
+1. `platform/management/main.tf:520-542` — `azurerm_policy_set_definition.deny_public_network_access` refs
+   built-ins `1b8ca024-…`, `405c5871-…`, `34c877ad-…` with no `parameter_values`.
+2. `platform/security/defender.tf:46-55` + `:201-215` — NIST 800-53 R5 `179d1daa-…` and CIS Azure Foundations
+   v2.0.0 `06f19060-…` assigned with no params; code already carries `UNVERIFIED 2026-05-29` on the CIS
+   GUID/benchmark version (1.4.0 vs 2.0.0 vs 2.1.0). Wrong/retired policySetDefinition GUID = hard PUT 404/400.
+   Gated by `var.enable_regulatory_compliance`.
+
+**Pre-apply mitigation (before those roots deploy):** for each built-in, `az policy definition show --name
+<guid>` / `az policy set-definition show --name <guid>` to confirm it resolves and dump current param
+defaults; where an `effect` param exists, pass it explicitly (`Audit|Deny|Disabled`) via `parameter_values`
+rather than trusting the built-in default. Confirm the CIS GUID against the intended benchmark version.
+
 ### OQ-015: Environment required-reviewer gate unavailable on the current GitHub plan
 
 - **Raised:** 2026-07-04 (Section 10 CI wiring, devsecops)
