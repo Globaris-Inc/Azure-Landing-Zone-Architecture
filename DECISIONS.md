@@ -37,6 +37,50 @@
 
 <!-- Newest at the top. -->
 
+### ADR-023: Pin ALZ library to platform/alz 2026.04.2 (bump the ref, not the module) to clear the Enforce-EncryptTransit apply break
+
+- **Date:** 2026-07-05
+- **Section:** 2 (Management Group Hierarchy) / 10 (first CI apply)
+- **Status:** Accepted
+- **Decision makers:** user, claude
+
+**Context:**
+The first CI `apply` of `platform/management-groups` (run 28725677856) created the MG hierarchy and all 5
+subscription placements, then failed hard on one policy set definition: `Enforce-EncryptTransit`. Azure
+returned `400 InvalidPolicyParameters` — the initiative's `effect` parameter default of lowercase `deny` is
+rejected by referenced built-in policy `1a5b4dca-0b6f-4cf5-907c-56316bc1bf3d` v9.0.0, whose allowed values
+are the capitalized `Audit | Deny | Disabled`. This is version skew between the pinned ALZ library
+(`platform/alz@2026.01.3`) and a built-in policy that bumped major version; `Enforce-EncryptTransit` is itself
+deprecated upstream. The `alz` provider config carries the library reference (`providers.tf`), and the
+provider is already at `~> 0.21.0`.
+
+**Decision:**
+Bump the ALZ **library** reference `platform/alz` from `2026.01.3` to **`2026.04.2`** and leave everything
+else unchanged. `platform/alz/2026.04.0` explicitly "remov[ed] a number of deprecated and superseded policies
+to avoid breaking changes like seen with `Enforce-EncryptTransit`" (Azure-Landing-Zones issues #4128 / #411);
+`2026.04.2` is the latest patch of that line. avm-ptn-alz stays pinned at 0.19.1; no provider versions change.
+
+**Alternatives considered:**
+- Bump avm-ptn-alz 0.19.1 → 0.21.0 — rejected (for now): heavier change that also moves the `alz`/`azapi`
+  provider floors and would need re-validation across every root; the library ref alone resolves the break.
+- Local `lib` override patching only the `Enforce-EncryptTransit` effect default `deny`→`Deny` — rejected:
+  keeps a deprecated initiative alive and forks us from the canonical library for a problem upstream already
+  fixed by removal.
+- Exclude the initiative from the Globaris architecture — rejected: silently drops an encryption-in-transit
+  guardrail and masks the version-skew root cause.
+
+**Consequences:**
+- Positive: canonical, upstream-blessed fix; stays on the maintained library; unblocks the apply with a
+  one-line, reviewable change.
+- Negative / trade-offs: 2026.01→2026.04 is ~3 months of library drift — the re-plan will show more than the
+  single initiative (deprecated policies removed, other definitions refreshed). Mitigated by re-running a CI
+  **plan** to review the diff before the next apply.
+- Follow-ups required: (1) CI plan review then re-apply management-groups; (2) any other root that pins
+  `platform/alz` should move to 2026.04.2 in lock-step for library consistency; (3) reconsider the full
+  avm-ptn-alz 0.21.0 bump as a separate, deliberate change later.
+
+---
+
 ### ADR-022: Section 11 documentation set - greenfield DEPLOYMENT.md runbook; brownfield designed now, built later
 
 - **Date:** 2026-07-03
