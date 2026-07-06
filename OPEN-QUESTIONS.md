@@ -31,6 +31,33 @@
 
 <!-- Newest at the top. -->
 
+### OQ-019: DDoS governance spans two root modules — introduce one shared toggle so they can't diverge?
+
+- **Raised:** 2026-07-06 (DDoS LinkedAuthorizationFailed root-cause, architect)
+- **Section:** 2 — Management Group Hierarchy (policy) / 4 — Connectivity (plan)
+- **Blocking:** No — ADR-026 (DoNotEnforce `Enable-DDoS-VNET` at the connectivity MG) unblocks apply now.
+- **Priority:** Medium
+
+**Question:**
+DDoS is now governed in two separate root modules that were never linked: the **plan resource** in
+`platform/connectivity` (gated by `var.enable_ddos_standard`, ADR/commit e2733db) and the
+**`Enable-DDoS-VNET` Modify policy** assigned by `platform/management-groups` via `avm-ptn-alz`
+(neutralised by ADR-026). This split is exactly what caused the outage: turning the plan off in
+connectivity did nothing to the enforced policy that injected the placeholder plan id, so every VNet
+create still failed. Should we introduce a single shared variable that drives both stacks — the plan
+resource in connectivity AND the policy assignment enforcement/parameter in management-groups — so the
+two cannot drift into an inconsistent state again?
+
+**Options being considered:**
+- A: One shared `enable_ddos_standard` (recommended default) consumed by both roots — when false, no plan
+  and the `Enable-DDoS-VNET` assignment is DoNotEnforce; when true, create the plan and re-enforce the
+  policy with the real plan id via `policy_default_values`. Single source of truth, no split-brain.
+- B: Leave the two independent and rely on documentation (ADR-026 coupling note) to keep them consistent —
+  simpler now, but re-opens the drift risk that caused this failure.
+
+**Recommendation:** A — a single `enable_ddos_standard` wired into both the connectivity plan and the
+management-groups policy assignment.
+
 ### OQ-018: Production-grade state-SA access — Private Endpoint + VNet/self-hosted runner egress (ADR-025 Option B follow-up)
 
 - **Raised:** 2026-07-06 (CI state-backend 403 diagnosis, architect)

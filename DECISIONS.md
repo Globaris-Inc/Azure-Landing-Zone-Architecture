@@ -37,6 +37,55 @@
 
 <!-- Newest at the top. -->
 
+### ADR-026: Neutralise the ALZ `Enable-DDoS-VNET` Modify policy at the Connectivity MG for the POC
+
+- **Date:** 2026-07-06
+- **Section:** 2 — Management Group Hierarchy (policy) / 4 — Connectivity (impact)
+- **Status:** Accepted (user-approved 2026-07-06)
+- **Decision makers:** user, claude
+
+**Context:**
+Both hub VNet creates in the connectivity subscription failed at apply with
+`403 LinkedAuthorizationFailed`: ARM ran a `Microsoft.Network/ddosProtectionPlans/join/action`
+linked-auth check against the non-existent subscription `00000000-0000-0000-0000-000000000000`.
+Root-caused (after a two-PUT test refuted the earlier azapi null-key theory): `avm-ptn-alz`
+0.19.1 applies the ALZ default assignment **`Enable-DDoS-VNET`** (Modify, built-in def
+`94de2ad3-e0c1-4caf-ad78-5d47bbc83d3d`, "Virtual networks should be protected by Azure DDoS
+Protection") at the **Connectivity management group**, enforced, with its `ddosPlan` parameter set
+to the placeholder `/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/placeholder/
+providers/Microsoft.Network/ddosProtectionPlans/placeholder`. The Modify rule does
+`addOrReplace` on `Microsoft.Network/virtualNetworks/ddosProtectionPlan.id` (and
+`enableDdosProtection = true`) at admission time, so **every** VNet PUT in the connectivity
+subscription is rewritten to reference a DDoS plan in the zero-GUID subscription, which fails the
+linked-auth check. This is body-independent (Modify injects regardless of request body — PUT with
+`ddosProtectionPlan: null` and PUT with the key omitted both failed identically) and
+subscription-specific (the Management MG has no such assignment, so the identical body succeeds
+there). Confirmed placement of the connectivity sub under the Connectivity MG via
+`management-group show --expand`; corroborated upstream by Enterprise-Scale #1053/#983 and
+ALZ-Bicep #181/#596 (the known "enforced DDoS Modify policy with placeholder plan id breaks all
+VNet creates" trap). The failure originates in the `platform/management-groups` root module
+(policy), not in `platform/connectivity`, azapi, or the AVM VNet leaf module.
+
+**Decision:**
+Set `enforcement_mode = "DoNotEnforce"` on the `Enable-DDoS-VNET` assignment at the `connectivity`
+management group via the `policy_assignments_to_modify` input of `Azure/avm-ptn-alz/azurerm` 0.19.1
+in `platform/management-groups/main.tf`. This stops the Modify effect from mutating VNet requests,
+unblocking all hub/identity/spoke VNet creates at zero cost, consistent with the existing POC
+decision to run without DDoS Standard. When DDoS is later enabled, supply a real plan id via
+`policy_default_values` (the assignment binds `ddosPlan` to a library default) and restore
+enforcement.
+
+**Alternatives considered:**
+- Disable via the assignment `effect` parameter (`Disabled`) or `overrides = [{ kind = "policyEffect", value = "Disabled" }]`, or drop it with `creation_enabled = false` — equivalent outcomes; `DoNotEnforce` chosen as the simplest reversible form that keeps the assignment visible.
+- Supply a real DDoS Standard plan id via `policy_default_values` — rejected for the POC: DDoS Standard is a flat ~$2,944/mo and DDoS governance is out of scope.
+- Manual `az policy assignment update` — rejected: would drift and be reverted on the next `management-groups` apply. The fix must be version-controlled in the root module.
+- Fixing it in `platform/connectivity` (the `enable_ddos_standard` plan gate) — rejected: that gate governs the plan resource, not the Modify policy; it cannot affect an admission-time policy in a different root module (this is the coupling caveat below).
+
+**Consequences:**
+- Positive: unblocks every VNet create in the connectivity subscription at zero cost; reversible; keeps the assignment present for a future real-plan re-enforcement.
+- Negative / trade-offs: no DDoS auto-enable enforcement during the POC (accepted). Introduces a documented coupling — the DDoS decision now spans two root modules (`management-groups` policy + `connectivity` plan) that must be flipped together.
+- Follow-ups required: OQ-019 (single shared `enable_ddos_standard` variable driving both stacks so they cannot diverge). Supersedes commit `e2733db` as the **fix location** for this failure; `e2733db` remains valid as the cost gate for the DDoS plan resource itself.
+
 ### ADR-025: CI state-SA firewall — JIT default_action Allow/Deny flip, not single-IP allow-list (fixes LESSON 16 race)
 
 - **Date:** 2026-07-06

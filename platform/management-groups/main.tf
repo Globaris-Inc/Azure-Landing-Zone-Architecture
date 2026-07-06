@@ -1,7 +1,7 @@
 # Purpose: Management Group hierarchy — calls avm-ptn-alz to create the Globaris MG tree
 #          and places all 5 POC subscriptions under their respective management groups.
 # Section: 2 — Management Group Hierarchy
-# Last updated: 2026-07-04
+# Last updated: 2026-07-06
 #
 # Architecture (defined in lib/globaris.alz_architecture_definition.json):
 #
@@ -69,6 +69,30 @@ module "alz_management_groups" {
     corp = {
       subscription_id       = var.landingzones_subscription_id
       management_group_name = "corp"
+    }
+  }
+
+  # Stop enforcing the ALZ Enable-DDoS-VNET Modify assignment at the Connectivity MG.
+  # The ALZ default ddosPlan parameter is a PLACEHOLDER
+  # (/subscriptions/0000...0000/.../ddosProtectionPlans/placeholder). Being enforced
+  # (Modify effect, addOrReplace), it rewrites every VNet PUT in the connectivity
+  # subscription to reference that non-existent plan in subscription 0000..., causing
+  # 403 LinkedAuthorizationFailed on all VNet creates. This POC runs WITHOUT DDoS
+  # Standard (~$2,944/mo), so we set enforcement to DoNotEnforce.
+  #
+  # COUPLED-IN-INTENT to platform/connectivity `var.enable_ddos_standard = false`.
+  # If DDoS Standard is ever enabled, BOTH must change together (re-enforce this
+  # assignment AND supply a real ddosPlan id). Tracked in OQ / ADR-026.
+  # Schema: Azure/avm-ptn-alz 0.19.1 variables.tf L392-455 (map(MG-id) ->
+  # policy_assignments -> assignment-name -> { enforcement_mode }). enforcement_mode
+  # allowed values: "Default" | "DoNotEnforce".
+  policy_assignments_to_modify = {
+    connectivity = {
+      policy_assignments = {
+        "Enable-DDoS-VNET" = {
+          enforcement_mode = "DoNotEnforce"
+        }
+      }
     }
   }
 }
