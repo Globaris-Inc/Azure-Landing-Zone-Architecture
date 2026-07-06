@@ -37,6 +37,64 @@
 
 <!-- Newest at the top. -->
 
+### ADR-025: CI state-SA firewall — JIT default_action Allow/Deny flip, not single-IP allow-list (fixes LESSON 16 race)
+
+- **Date:** 2026-07-06
+- **Section:** 10 — Pipeline & Tooling (state backend access)
+- **Status:** Accepted (Option A; user-approved 2026-07-06)
+- **Decision makers:** user, claude
+
+**Context:**
+The state SA is default_action=Deny with a static ip_rules list. The manage_runner_ip step
+(LESSON 16) JIT-adds the runner's api.ipify.org egress IP, polls a blob-list until admitted,
+then runs init. connectivity init failed on 4 attempts; management-groups succeeded on 3 —
+misread as a deterministic per-root split. Log analysis refutes that: connectivity itself
+REACHED the blob (409 BlobImmutableDueToPolicy, then a blob-lock error) in 2 of 4 runs and
+only got 403 AuthorizationFailure in the other 2 — a flipping, non-deterministic outcome.
+Every run drew a different random hosted-runner egress IP. In run 28798776899 the az poll was
+admitted (14:24:48) yet Terraform's own read 403'd 19s later (14:25:07) from the same job.
+403 AuthorizationFailure (not AuthorizationPermissionMismatch) with a network-deny SA is a
+NETWORK block, not RBAC; the SP's Blob Data role is proven intact. Root cause: pinning ONE IP
+is unreliable from hosted runners because (a) outbound SNATs across a dynamic IP pool so the
+ipify IP is not necessarily Terraform's egress IP, and (b) Storage IP-rule propagation is
+eventually consistent per front-end node, so single-IP admittance is non-monotonic within the
+window. The provider subscription_id and the 0-byte connectivity state blob were both excluded
+as causes by evidence.
+
+**Decision:**
+Replace the JIT single-IP allow-list with a JIT flip of the account default_action to Allow
+before init and back to Deny on exit (if: always()). Allow-all is monotonic once propagated, so
+the readiness poll is meaningful and the egress-IP roulette is eliminated. Retain the single-root
+guard (target != 'all') to avoid concurrent default_action flips racing. Data stays protected by
+Entra-only auth (shared keys disabled) + Storage Blob Data Contributor RBAC + TLS1.2 + CMK.
+
+**Alternatives considered:**
+- Keep single-IP allow-list, poll longer / retry init on 403 — rejected: cannot certify
+  Terraform's specific connection path; still racy and non-monotonic.
+- Private Endpoint + VNet/self-hosted runner — deferred to production (Option B, OQ-018): correct
+  ALZ pattern, but needs runner VNet, private DNS, runner infra; out of scope for the POC turn.
+- GitHub larger runners with static outbound IP range in permanent ip_rules — deferred (Option C):
+  clean and deterministic but requires the larger-runners plan.
+
+**Consequences:**
+- Positive: unblocks connectivity and every subsequent root; removes a latent flaky gate on all
+  CI state access.
+- Negative / trade-offs: during the ~2-3 min job window the blob endpoint is reachable from any
+  IP, defended by Entra token + RBAC + TLS + CMK (network layer dropped, time-boxed). Single-root
+  only; target=all still relies on the documented permanent ip_allow_list prerequisite.
+- Negative / residual-leak edge case: if the runner is cancelled or crashes between the Allow flip
+  and job end, the `if: always()` restore cannot run, so the SA stays default_action=Allow until the
+  next single-root run's restore step or a manual fix (a target=all run does NOT restore it —
+  manage_runner_ip=false there). Inherent to any JIT-open design; exposure stays Entra-only + RBAC +
+  TLS + CMK-defended, just no longer strictly time-boxed. Mitigation: on abnormal termination, run
+  `az storage account update --default-action Deny` on the state SA, or dispatch any single-root plan
+  (restores it on exit).
+- Follow-ups: (1) implement the flip in _tf-root.yml (Cloud Engineer / DevSecOps — workflow lane).
+  (2) OQ-018: adopt Private Endpoint + VNet runner as the production state-access model.
+  (3) overwrite the leftover 0-byte connectivity state blob on next successful init (no apply ran).
+
+---
+
 ### ADR-024: Remove the state-container WORM immutability policy (incompatible with the Terraform azurerm backend)
 
 - **Date:** 2026-07-06

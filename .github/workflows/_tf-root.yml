@@ -1,7 +1,7 @@
 # .github/workflows/_tf-root.yml
 # Purpose: Reusable Terraform workflow for a SINGLE root — plan | apply | destroy.
 # Section: 10 — Pipeline & Tooling (ADR-019). Called by deploy.yml and teardown.yml.
-# Last updated: 2026-06-27
+# Last updated: 2026-07-06
 #
 # Auth: OIDC federated credential — no secrets stored for login. Gated callers
 # pass a GitHub Environment via `gh_environment`; an EMPTY string = ungated
@@ -9,13 +9,18 @@
 # (identity.tf: environment:production / environment:production-destroy) — see
 # the re-apply note there.
 #
-# Firewalled state SA (LESSON 16): the Terraform state account is default_action=Deny
+# Firewalled state SA (ADR-025): the Terraform state account is default_action=Deny
 # with a STATIC ip_rules list (bootstrap/main.tf). Hosted-runner egress IPs are not
-# stable, so `init` can be blocked. DECISION (devsecops): the supported default is to
-# keep the runner CIDR/IP in bootstrap `ip_allow_list` as a documented PREREQUISITE
-# (docs/cicd-deploy-teardown.md §8). For ad-hoc single-root runs from a hosted runner,
-# set the caller input `manage_runner_ip: true` to temporarily allow-list the runner IP
-# around the run (see that input's docs — single-root only; it races on target=all).
+# stable AND are drawn from a dynamic SNAT pool, so pinning ONE runner IP is racy
+# (readiness probe and Terraform's own read can leave via different front-end IPs).
+# DECISION (devsecops, ADR-025): for ad-hoc single-root runs from a hosted runner set
+# the caller input `manage_runner_ip: true` to flip the SA `default_action` to Allow for
+# the job window and restore it to Deny on exit. Allow-all is monotonic once propagated,
+# so the race disappears; data stays protected by Entra-only auth (shared keys disabled)
+# + Storage Blob Data RBAC + TLS 1.2 + CMK. The static ip_rules stay untouched. The
+# supported default (manage_runner_ip: false) is to keep the runner CIDR/IP in bootstrap
+# `ip_allow_list` as a documented PREREQUISITE (docs/cicd-deploy-teardown.md §8). See that
+# input's docs — single-root only; the default_action flip races on target=all.
 name: _terraform-root
 
 on:
@@ -39,18 +44,21 @@ on:
         type: string
         default: ""
       manage_runner_ip:
-        # LESSON 16 (firewalled state SA). The state account is default_action=Deny
-        # with a static ip_rules list (bootstrap/main.tf). Hosted-runner egress IPs are
-        # NOT stable, so `init` can 403 against the blob data plane. When true, this job
-        # temporarily allow-lists the runner's egress IP around the whole run and removes
-        # it again on exit (if: always()). Default false = the runner IP is assumed to be
-        # covered by bootstrap `ip_allow_list` (the documented prerequisite — see the
-        # workflow header and docs/cicd-deploy-teardown.md §8).
+        # ADR-025 (firewalled state SA). The state account is default_action=Deny with a
+        # static ip_rules list (bootstrap/main.tf). Hosted-runner egress IPs are NOT stable
+        # and SNAT across a dynamic pool, so pinning one IP is racy and `init` can 403 on
+        # the blob data plane. When true, this job flips the SA `default_action` to Allow
+        # for the whole run and restores it to Deny on exit (if: always()). Only
+        # default_action changes; the static ip_rules and AzureServices bypass are
+        # preserved. Default false = the runner IP is assumed to be covered by bootstrap
+        # `ip_allow_list` (the documented prerequisite — see the workflow header and
+        # docs/cicd-deploy-teardown.md §8).
         #
         # WARNING (concurrency): on `target=all`, sibling roots run in parallel and would
-        # mutate the SAME state SA firewall concurrently. Only enable this for SINGLE-root
-        # (`target != all`) runs, or it can race (one job's remove cutting another's init).
-        description: "Temporarily allow-list this runner's egress IP on the state SA (single-root runs only)"
+        # flip the SAME state SA `default_action` against each other — one job's restore-Deny
+        # can cut another mid-init. Only enable this for SINGLE-root (`target != all`) runs.
+        # deploy.yml already gates manage_runner_ip on target != 'all'.
+        description: "Flip the state SA default_action to Allow for this run, restored to Deny on exit (single-root runs only)"
         required: false
         type: boolean
         default: false
@@ -122,10 +130,10 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # LESSON 16 — open the firewalled state SA to this runner's egress IP (opt-in).
-      # Off by default; see the manage_runner_ip input docs. Captures the SA name/RG
-      # from poc.backend.hcl so it needs no extra inputs.
-      - name: Allow runner IP on state SA (LESSON 16, opt-in)
+      # ADR-025 — open the firewalled state SA for this run by flipping default_action
+      # to Allow (opt-in). Off by default; see the manage_runner_ip input docs. Captures
+      # the SA name/RG/container from poc.backend.hcl so it needs no extra inputs.
+      - name: Open state SA firewall for this run (ADR-025, opt-in)
         if: ${{ inputs.manage_runner_ip }}
         # Run from the root dir so backend_rel ('../../' | '../') resolves like Init does.
         working-directory: ${{ inputs.root }}
@@ -133,23 +141,26 @@ jobs:
           BACKEND_HCL: ${{ inputs.backend_rel }}envs/poc.backend.hcl
         run: |
           set -euo pipefail
-          RUNNER_IP="$(curl -fsS --max-time 15 https://api.ipify.org)"
           SA_NAME="$(grep -E '^\s*storage_account_name' "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
           RG_NAME="$(grep -E '^\s*resource_group_name'  "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
-          echo "Allow-listing runner IP $RUNNER_IP on $SA_NAME (rg $RG_NAME)"
-          az storage account network-rule add \
-            --account-name "$SA_NAME" --resource-group "$RG_NAME" \
-            --ip-address "$RUNNER_IP" --output none
-          echo "RUNNER_IP=$RUNNER_IP"   >> "$GITHUB_ENV"
+          CONTAINER="$(grep -E '^\s*container_name'     "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          echo "Flipping default_action=Allow on $SA_NAME (rg $RG_NAME) for this run"
+          # ONLY default_action changes here. `az storage account update --default-action`
+          # does not touch --ip-address rules or --bypass, so the static ip_rules and the
+          # AzureServices bypass set in bootstrap are preserved. Restored to Deny on exit.
+          az storage account update \
+            --name "$SA_NAME" --resource-group "$RG_NAME" \
+            --default-action Allow --output none
           echo "STATE_SA_NAME=$SA_NAME" >> "$GITHUB_ENV"
           echo "STATE_SA_RG=$RG_NAME"   >> "$GITHUB_ENV"
-          # Storage IP-network-rule propagation to the data plane is NOT instant
-          # (Azure: up to a few minutes) and a fixed short sleep is a coin-flip —
-          # a 20s wait let some roots' `init` 403 on "listing blobs". Poll the exact
-          # access path init uses (a blob list on the state container via the
-          # logged-in SP) until the firewall admits this runner, then proceed.
-          CONTAINER="$(grep -E '^\s*container_name' "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
-          echo "Waiting for the state-SA firewall to admit $RUNNER_IP (probing blob list)..."
+          echo "SA_OPENED=1"            >> "$GITHUB_ENV"
+          # default_action=Allow is monotonic once propagated (unlike a single pinned IP,
+          # which can be admitted for the probe yet rejected seconds later because the
+          # runner SNATs across a dynamic pool and IP-rule propagation is per front-end
+          # node). Propagation to the data plane is still NOT instant (Azure: up to a few
+          # minutes), so poll the exact access path init uses (a blob list on the state
+          # container via the logged-in SP) until the firewall admits us, then proceed.
+          echo "Waiting for the state-SA firewall to open (probing blob list)..."
           ready=0
           for i in $(seq 1 24); do
             if az storage blob list \
@@ -161,7 +172,7 @@ jobs:
             sleep 8
           done
           if [ "$ready" != "1" ]; then
-            echo "::error::State SA firewall did not admit runner IP $RUNNER_IP within ~192s."
+            echo "::error::State SA firewall did not open (default_action=Allow) within ~192s."
             exit 1
           fi
 
@@ -194,14 +205,15 @@ jobs:
         working-directory: ${{ inputs.root }}
         run: terraform destroy -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve
 
-      # Always remove the IP we added — even if a prior step failed — so the firewall
-      # never leaks a stale runner IP. Guarded on env.RUNNER_IP being set by the add step.
-      - name: Remove runner IP from state SA (LESSON 16, opt-in)
-        if: ${{ always() && inputs.manage_runner_ip && env.RUNNER_IP != '' }}
+      # Always restore default_action=Deny — even if a prior step failed — so the state SA
+      # never stays publicly reachable past the run. Guarded on env.SA_OPENED being set by
+      # the open step, so we only flip back what we flipped open.
+      - name: Restore state SA firewall to Deny (ADR-025, opt-in)
+        if: ${{ always() && inputs.manage_runner_ip && env.SA_OPENED == '1' }}
         run: |
           set -uo pipefail
-          echo "Removing runner IP $RUNNER_IP from $STATE_SA_NAME"
-          az storage account network-rule remove \
-            --account-name "$STATE_SA_NAME" --resource-group "$STATE_SA_RG" \
-            --ip-address "$RUNNER_IP" --output none || \
-            echo "::warning::Failed to remove runner IP $RUNNER_IP from $STATE_SA_NAME — remove it manually."
+          echo "Restoring default_action=Deny on $STATE_SA_NAME"
+          az storage account update \
+            --name "$STATE_SA_NAME" --resource-group "$STATE_SA_RG" \
+            --default-action Deny --output none || \
+            echo "::warning::Failed to restore Deny on $STATE_SA_NAME — set default_action=Deny manually."

@@ -31,6 +31,40 @@
 
 <!-- Newest at the top. -->
 
+### OQ-018: Production-grade state-SA access — Private Endpoint + VNet/self-hosted runner egress (ADR-025 Option B follow-up)
+
+- **Raised:** 2026-07-06 (CI state-backend 403 diagnosis, architect)
+- **Section:** 10 — Pipeline & Tooling (state backend access)
+- **Blocking:** No — ADR-025 Option A (JIT default_action Allow/Deny flip) unblocks CI now. This is the
+  production-grade replacement for that time-boxed public-window trade-off.
+- **Priority:** Medium
+
+**Question:**
+ADR-025 (Option A, accepted) unblocks CI by flipping the state SA `default_action` to Allow for the job
+window and restoring Deny on exit. The trade-off is a ~2-3 min window in which the blob endpoint is publicly
+reachable (still defended by Entra-only auth + RBAC + TLS + CMK), and it is single-root only (target=all
+still relies on the permanent `ip_allow_list` prerequisite). The production-grade fix removes public exposure
+entirely: put a **Private Endpoint** on the state SA (`privatelink.blob.core.windows.net` + private DNS zone),
+set `public_network_access = Disabled`, keep `default_action = Deny`, and run CI on a **self-hosted or
+VNet-injected runner** that egresses through that VNet. No firewall flip, no egress-IP roulette, no race.
+When do we adopt this, and on what runner model?
+
+**Options being considered:**
+- A: Self-hosted runner in a CI/management VNet (container/VM scale set) + Private Endpoint on the state SA;
+  `public_network_access = Disabled`. Most secure, most infra to own (runner lifecycle, VNet, private DNS).
+- B: GitHub larger runners with a static outbound IP range, allow-listed permanently in bootstrap `ip_rules`
+  (no Private Endpoint). Simpler than A, deterministic, but keeps public endpoint + requires the larger-runners
+  plan (ADR-025 Option C).
+- C: Stay on Option A for the POC lifetime; adopt A only when the environment graduates beyond POC (recommended
+  default — the public window is time-boxed and RBAC/Entra/CMK-protected, acceptable for a portfolio POC).
+
+**Note (leftover state cleanup):** the failed connectivity inits left `platform/connectivity/terraform.tfstate`
+as a **0-byte blob with a broken (unlocked) lease**. No apply ever ran against it, so it holds no real state
+and is **safe to overwrite on the next successful init** — Terraform will treat the empty blob as fresh state.
+No manual cleanup required beyond confirming the lease is not held (verified unlocked/broken 2026-07-06).
+
+---
+
 ### OQ-017: AVM module + provider version drift roll-up (staleness maintenance pass)
 
 - **Raised:** 2026-07-05 (drift audit, code-reviewer)
