@@ -184,11 +184,35 @@ jobs:
 
       - name: Terraform Init
         working-directory: ${{ inputs.root }}
+        # Bounded retry backstop for the state-SA firewall race (ADR-025 follow-up).
+        # The "Open state SA firewall" step flips default_action=Allow and polls a blob
+        # list until ONE front-end node admits us. But an Allow flip is eventually
+        # consistent ACROSS front-end nodes, so Terraform's own backend connection can
+        # still land on a node that has not yet received the update and 403 on
+        # "listing blobs". Since default_action=Allow only ever propagates TOWARD open
+        # (monotonic per node, and stays open for the whole job window), retrying init
+        # over ~75-90s succeeds once propagation completes. Harmless when
+        # manage_runner_ip is false — init just passes on attempt 1. A genuinely broken
+        # init still fails loudly: after the final attempt we exit non-zero.
         run: |
-          terraform init \
-            -backend-config="${{ inputs.backend_rel }}envs/poc.backend.hcl" \
-            -backend-config="key=${{ inputs.root }}/terraform.tfstate" \
-            -input=false
+          set -euo pipefail
+          attempts=6
+          for i in $(seq 1 "$attempts"); do
+            echo "terraform init attempt $i/$attempts"
+            if terraform init \
+                 -backend-config="${{ inputs.backend_rel }}envs/poc.backend.hcl" \
+                 -backend-config="key=${{ inputs.root }}/terraform.tfstate" \
+                 -input=false; then
+              echo "terraform init succeeded on attempt $i/$attempts."
+              exit 0
+            fi
+            if [ "$i" -lt "$attempts" ]; then
+              echo "::warning::init attempt $i/$attempts failed (likely state-SA firewall still propagating); retrying in 15s"
+              sleep 15
+            fi
+          done
+          echo "::error::terraform init failed after $attempts attempts."
+          exit 1
 
       - name: Terraform Plan
         if: ${{ inputs.action == 'plan' }}
