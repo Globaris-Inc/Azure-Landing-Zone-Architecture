@@ -1,6 +1,6 @@
 # Purpose: Input variables for the reusable FinOps child module.
 # Section: 7 — FinOps: Tagging & Budgets
-# Last updated: 2026-05-12
+# Last updated: 2026-07-07
 #
 # This module creates per-subscription FinOps resources: subscription budget,
 # daily cost export to a shared storage container, and optional VM auto-shutdown
@@ -38,7 +38,7 @@ variable "budget_alert_contact_emails" {
 }
 
 variable "export_enabled" {
-  description = "Whether to create a daily ActualCost export for this subscription."
+  description = "Whether to create a daily ActualCost export for this subscription. This bool is the sole (statically-known) gate on export creation; when true the caller must supply a valid export_container_arm_id."
   type        = bool
   default     = true
 }
@@ -50,7 +50,7 @@ variable "export_name" {
 }
 
 variable "export_container_arm_id" {
-  description = "ARM resource ID of the storage container that receives daily exports. Empty string disables export."
+  description = "ARM resource ID of the storage container that receives daily exports. May be unknown at plan time (it is built from storage-account/container attributes in the caller). Must be non-empty and valid whenever export_enabled = true; it no longer gates export creation (export_enabled does)."
   type        = string
   default     = ""
 }

@@ -1,6 +1,6 @@
 # Purpose: Reusable FinOps resources — subscription budget, daily cost export, VM auto-shutdown.
 # Section: 7 — FinOps: Tagging & Budgets
-# Last updated: 2026-05-12
+# Last updated: 2026-07-07
 #
 # DEVIATION: No AVM module exists for Azure Cost Management resources (budgets, exports,
 # auto-shutdown schedules). All resources use native azurerm provider resources.
@@ -53,7 +53,14 @@ resource "azurerm_consumption_budget_subscription" "this" {
 # to the FOCUS BilledCost column. Migrate to azapi_resource when azurerm adds
 # the FOCUS export type, or when the FinOps Toolkit export pipeline requires it.
 resource "azurerm_subscription_cost_management_export" "this" {
-  for_each = var.export_enabled && var.export_container_arm_id != "" ? { export = true } : {}
+  # for_each keys must be statically known at plan time. The container ARM ID is
+  # built from storage-account/container attributes in the caller and is therefore
+  # unknown until apply, so it cannot gate key existence. Creation is controlled by
+  # the static var.export_enabled bool alone; the caller is responsible for passing a
+  # valid container ARM ID whenever export_enabled = true. The (possibly unknown)
+  # container ID still flows into export_data_storage_location.container_id below,
+  # which is allowed because unknown values are permitted in resource bodies.
+  for_each = var.export_enabled ? { export = true } : {}
 
   name            = var.export_name != "" ? var.export_name : "${var.budget_name}-daily-export"
   subscription_id = var.subscription_id
