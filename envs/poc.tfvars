@@ -47,7 +47,11 @@ budget_amount_per_mg = 600
 budget_alert_thresholds = [50, 75, 90, 100]
 
 # Budget and cost export start date — first of current month, RFC 3339.
-budget_start_date = "2026-05-01T00:00:00Z"
+# NOTE: Azure's Consumption API rejects a start date prior to the current month
+# (400 "Start date for monthly time grain should not be prior to current month"
+# on budgets AND cost-export scheduled actions). Bump to the first of the
+# CURRENT month whenever platform/management is freshly deployed.
+budget_start_date = "2026-07-01T00:00:00Z"
 
 # Cost export end date — set far enough in the future to cover the POC lifecycle.
 export_end_date = "2030-12-01T00:00:00Z"
