@@ -1,7 +1,7 @@
 # Purpose: Connectivity platform root module — dual-hub hub-and-spoke VNets with
 #          Azure Firewall Premium (IDPS), VPN Gateway, and DNS Private Resolver.
 # Section: 8 — Standard Platform Components
-# Last updated: 2026-07-06 (gate DDoS Network Protection Plan on var.enable_ddos_standard — cost/correctness fix)
+# Last updated: 2026-07-06 (delegate dns-resolver-outbound subnet to Microsoft.Network/dnsResolvers - fixes ARM 400 SubnetMissingRequiredDelegation on apply)
 #
 # Apply order: Independent of platform/management; run before platform/security
 #              (Firewall private IPs are consumed by spoke UDRs in Section 8 Batch 3+).
@@ -111,6 +111,18 @@ module "hub_and_spoke" {
           dns-resolver-outbound = {
             name             = "snet-dns-resolver-outbound"
             address_prefixes = [local.hub_primary_dns_outbound_prefix]
+            # Azure requires the DNS Private Resolver outbound endpoint subnet to be
+            # delegated to Microsoft.Network/dnsResolvers. Creating the outbound endpoint
+            # auto-adds this delegation + service-association-link; declaring it here keeps
+            # Terraform's desired state in sync so it does not try to strip the delegation
+            # on subsequent applies (ARM 400 SubnetMissingRequiredDelegation). The module
+            # emits only serviceName; ARM auto-populates the required actions.
+            delegations = [{
+              name = "Microsoft.Network.dnsResolvers"
+              service_delegation = {
+                name = "Microsoft.Network/dnsResolvers"
+              }
+            }]
           }
         }
       }
