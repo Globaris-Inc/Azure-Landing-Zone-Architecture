@@ -12,7 +12,7 @@ variable "budget_name" {
 }
 
 variable "subscription_id" {
-  description = "Azure subscription ID this budget and cost export target."
+  description = "Azure subscription this budget and cost export target. Accepts either a bare subscription GUID or the full resource ID (/subscriptions/<uuid>); the module normalizes to the full resource ID required by azurerm v4."
   type        = string
 }
 

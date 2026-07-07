@@ -1,6 +1,6 @@
 # Purpose: Outputs for the Management platform root module.
 # Section: 7 — FinOps: Tagging & Budgets
-# Last updated: 2026-05-12
+# Last updated: 2026-07-07
 
 output "resource_group_name" {
   description = "Name of the FinOps resource group in the management subscription."
@@ -83,12 +83,17 @@ output "platform_law_workspace_id" {
 
 output "platform_law_workspace_name" {
   description = "Name of the platform Log Analytics workspace."
-  value       = module.platform_law.resource.name
+  # nonsensitive() is safe: sensitivity is inherited from the AVM module's whole-object
+  # `resource` output (sensitive because it contains the workspace shared keys). The name
+  # attribute itself is not sensitive in the azurerm schema and is already exposed
+  # non-sensitively as the last segment of platform_law_workspace_id.
+  value = nonsensitive(module.platform_law.resource.name)
 }
 
 output "platform_law_customer_id" {
-  description = "Workspace GUID (customer_id) of the platform Log Analytics workspace. Required for Sentinel onboarding."
+  description = "Workspace GUID (customer_id) of the platform Log Analytics workspace. Required for Sentinel onboarding. Marked sensitive (inherited from the AVM resource object); retrieve with `terraform output -raw platform_law_customer_id`."
   value       = module.platform_law.resource.workspace_id
+  sensitive   = true
 }
 
 output "automation_account_id" {

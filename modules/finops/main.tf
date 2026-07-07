@@ -15,6 +15,15 @@ terraform {
   required_version = ">= 1.9"
 }
 
+locals {
+  # azurerm v4 validates subscription_id on both azurerm_consumption_budget_subscription
+  # and azurerm_subscription_cost_management_export with commonids.ValidateSubscriptionID
+  # (go-azure-helpers), which requires the full 2-segment resource ID
+  # "/subscriptions/<uuid>", not a bare GUID (verified against provider source at
+  # v4.71.0, 2026-07-07). Normalize here so callers may pass either form.
+  subscription_resource_id = startswith(var.subscription_id, "/subscriptions/") ? var.subscription_id : "/subscriptions/${var.subscription_id}"
+}
+
 # ---------------------------------------------------------------------------
 # Subscription-scope monthly budget
 # ---------------------------------------------------------------------------
@@ -22,7 +31,7 @@ terraform {
 # DEVIATION: No AVM module for azurerm_consumption_budget_subscription.
 resource "azurerm_consumption_budget_subscription" "this" {
   name            = var.budget_name
-  subscription_id = var.subscription_id
+  subscription_id = local.subscription_resource_id
   amount          = var.budget_amount
   time_grain      = "Monthly"
 
@@ -63,7 +72,7 @@ resource "azurerm_subscription_cost_management_export" "this" {
   for_each = var.export_enabled ? { export = true } : {}
 
   name            = var.export_name != "" ? var.export_name : "${var.budget_name}-daily-export"
-  subscription_id = var.subscription_id
+  subscription_id = local.subscription_resource_id
 
   recurrence_type              = "Daily"
   recurrence_period_start_date = var.export_start_date != "" ? var.export_start_date : var.budget_start_date
