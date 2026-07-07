@@ -1,15 +1,45 @@
-# Purpose: Multi-Region DR Topology — inter-hub Global VNet Peering.
+# Purpose: Multi-Region DR Topology — inter-hub connectivity notes.
 # Section: 3 — Multi-Region DR Topology
-# Last updated: 2026-05-21
+# Last updated: 2026-07-06 (hand hub-to-hub peering to the module's native mesh; drop duplicate azurerm peerings)
 #
 # Architecture:
-#   - Global VNet Peering between primary hub (eastus2) and secondary hub (centralus)
-#     enables hub-to-hub transit so corp-a2 DR spoke can reach corp-a1 resources
-#     through the firewall chain without on-premises VPN traversal.
-#   - Primary hub: allow_gateway_transit = true so the secondary hub may eventually
-#     use the primary VPN GW for on-premises reachability.
-#   - Both peerings: allow_forwarded_traffic = true for spoke-to-spoke east-west
-#     traffic that is inspected by each region's Firewall before crossing the peering.
+#   - Hub-to-hub transit between primary (eastus2) and secondary (centralus)
+#     enables the corp-a2 DR spoke to reach corp-a1 resources through the firewall
+#     chain without on-premises VPN traversal.
+#
+# Hub-to-hub peering ownership — module native mesh (no standalone peerings here):
+#   The Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet v0.17.1 module AUTO-MESHES
+#   every hub in hub_virtual_networks whose mesh_peering_enabled is true (the default).
+#   With two hubs keyed primary/secondary it already creates both directions of the
+#   hub-to-hub peering (vnet-hub-primary-...-to-vnet-hub-secondary-... and the reverse).
+#   We previously ALSO declared azurerm_virtual_network_peering resources here, which
+#   made Azure reject the second peering to the same remote VNet
+#   (400 AnotherPeeringAlreadyReferencesRemoteVnet). Those standalone resources have
+#   been removed; the module's mesh peering is the single owner.
+#
+#   The module hard-codes the mesh peering flags (see
+#   modules/hub-virtual-network-mesh/locals.peering.tf lines 8-11 in v0.17.1):
+#     allow_virtual_network_access = true
+#     allow_forwarded_traffic      = true   # both directions — spoke-to-spoke east-west
+#                                            #   inspected by each region's Firewall
+#     allow_gateway_transit        = true   # both directions — satisfies the primary-side
+#                                            #   requirement so the secondary may later use
+#                                            #   the primary VPN GW; true on the secondary is
+#                                            #   a no-op (secondary has no gateway to transit)
+#     use_remote_gateways          = false  # neither hub uses the remote gateway yet
+#   These are not exposed as per-hub inputs; only mesh_peering_enabled (toggle) and
+#   peering_names (name override) are configurable. The fixed values above are a superset
+#   of the DR requirement, so the module mesh is used as-is.
+#
+#   Note vs the prior standalone config: that config set the secondary side
+#   allow_gateway_transit = false. The module sets it true on both sides. This is a benign
+#   difference — allow_gateway_transit advertises the LOCAL gateway to the peer, and the
+#   secondary hub has no VPN/ER gateway, so the flag has no effect until one is added.
+#
+#   Future — to let the secondary actually use the primary VPN GW: the mesh module cannot
+#   set use_remote_gateways = true on the secondary→primary peering. That would require
+#   either a module enhancement or reverting the secondary to a standalone
+#   azurerm_virtual_network_peering with mesh_peering_enabled = false on the secondary hub.
 #
 # DEVIATION — Shared Firewall Policy hierarchy:
 #   PROMPT.md §3 requires a parent Firewall Policy in primary with the secondary
@@ -20,37 +50,3 @@
 #   Production path: migrate firewall policies out of the hub module into standalone
 #   azurerm_firewall_policy resources, then set base_policy_id on the secondary
 #   policy to reference the primary (parent) policy resource.
-
-# ---------------------------------------------------------------------------
-# Global VNet Peering — primary hub → secondary hub
-# ---------------------------------------------------------------------------
-
-resource "azurerm_virtual_network_peering" "primary_hub_to_secondary_hub" {
-  name                      = "peer-primary-hub-to-secondary-hub"
-  resource_group_name       = azurerm_resource_group.connectivity_primary.name
-  virtual_network_name      = module.hub_and_spoke.virtual_network_resource_names["primary"]
-  remote_virtual_network_id = module.hub_and_spoke.virtual_network_resource_ids["secondary"]
-
-  allow_forwarded_traffic = true
-  allow_gateway_transit   = true # primary holds the VPN GW; expose it for future secondary use
-  use_remote_gateways     = false
-
-  depends_on = [module.hub_and_spoke]
-}
-
-# ---------------------------------------------------------------------------
-# Global VNet Peering — secondary hub → primary hub
-# ---------------------------------------------------------------------------
-
-resource "azurerm_virtual_network_peering" "secondary_hub_to_primary_hub" {
-  name                      = "peer-secondary-hub-to-primary-hub"
-  resource_group_name       = azurerm_resource_group.connectivity_secondary.name
-  virtual_network_name      = module.hub_and_spoke.virtual_network_resource_names["secondary"]
-  remote_virtual_network_id = module.hub_and_spoke.virtual_network_resource_ids["primary"]
-
-  allow_forwarded_traffic = true
-  allow_gateway_transit   = false
-  use_remote_gateways     = false # secondary has no local GW; set true if secondary VPN GW added later
-
-  depends_on = [module.hub_and_spoke]
-}
