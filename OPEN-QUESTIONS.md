@@ -145,6 +145,19 @@ which a newer built-in version can make ARM-invalid or newly-required:
 defaults; where an `effect` param exists, pass it explicitly (`Audit|Deny|Disabled`) via `parameter_values`
 rather than trusting the built-in default. Confirm the CIS GUID against the intended benchmark version.
 
+**RESOLVED 2026-07-07:** Verified all 5 built-ins live (`az policy [set-]definition show`) and fixed.
+- **Management (part 1):** the KV GUID was WRONG — `405c5871-…-58ad8008cbe8` returned `PolicyDefinitionNotFound`
+  (would have hard-failed the set-definition PUT). Corrected to `405c5871-…-58e19d68ff5b` ("Azure Key Vault
+  should disable public network access"). SQL `1b8ca024-…` + Storage `34c877ad-…` valid. All three now pass
+  `effect` EXPLICITLY. Effect set to **Audit, not Deny** — code-review found Deny at the landingzones MG would
+  hard-block the spoke NSG flow-log SAs (no `network_acls`) + the Section 13 synthetic layer (public-access by
+  design). Audit governs/reports without blocking; enforce-later path (exemptions then Deny) documented in
+  `platform/management/main.tf`. (User chose Audit 2026-07-07.)
+- **Security (part 2): clean.** NIST `179d1daa-…` = "NIST SP 800-53 Rev. 5" (v14.19.0) and CIS `06f19060-…` =
+  "CIS Microsoft Azure Foundations Benchmark v2.0.0" (v1.10.0) both resolve; CIS IS v2.0.0 as intended; 0
+  required-no-default params. `defender.tf` UNVERIFIED note → VERIFIED. No code change beyond the comment.
+- Committed with the management-deploy prep; **management apply unblocked.**
+
 ### OQ-015: Environment required-reviewer gate unavailable on the current GitHub plan
 
 - **Raised:** 2026-07-04 (Section 10 CI wiring, devsecops)

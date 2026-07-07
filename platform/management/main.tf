@@ -1,7 +1,7 @@
 # Purpose: Management platform root module — FinOps governance, tag policy, budgets,
 #          cost exports, anomaly alerts, and Carbon Optimization workbook.
 # Section: 7 — FinOps: Tagging & Budgets
-# Last updated: 2026-05-12
+# Last updated: 2026-07-07
 #
 # Apply order: depends on platform/management-groups (policy assignments scope to MGs).
 #
@@ -508,14 +508,34 @@ resource "azurerm_portal_dashboard" "platform" {
 # ===========================================================================
 #
 # Custom policy initiative assigned at the Landing Zones management group.
-# Denies creation of SQL Servers, Key Vaults, and Storage Accounts with
-# public network access enabled. Azure Policy Deny effect prevents the
-# resource from being created or updated to a non-compliant state.
+# AUDITS (POC effect) SQL Servers, Key Vaults, and Storage Accounts created with
+# public network access enabled. Effect is Audit for the POC (see EFFECT DECISION
+# note below); the "deny" name is retained for the intended future enforcement pass.
 #
-# Built-in policy definition IDs (confirmed on azadvertizer.net 2026-05-21):
-#   1b8ca024-1d5c-4dec-8995-b1a932b41780  "Deny public access for Azure SQL DB"
-#   405c5871-3e91-4644-8a63-58ad8008cbe8  "Azure Key Vault should disable public network access"
+# Built-in policy definition IDs (VERIFIED live via `az policy definition show`
+# 2026-07-06 — all three return the expected built-ins):
+#   1b8ca024-1d5c-4dec-8995-b1a932b41780  "Public network access on Azure SQL Database should be disabled"
+#   405c5871-3e91-4644-8a63-58e19d68ff5b  "Azure Key Vault should disable public network access"
 #   34c877ad-507e-4c82-993e-3452a6e0ad3c  "Storage accounts should restrict network access"
+#
+# NOTE (OQ-016): the previously pinned KV GUID (...-58ad8008cbe8) was WRONG —
+# `az policy definition show` returned PolicyDefinitionNotFound, which would have
+# hard-failed this set-definition PUT on the management apply. Corrected above.
+#
+# Each of the three built-ins exposes an `effect` parameter
+# (allowedValues [Audit, Deny, Disabled], default Audit). We pass `effect`
+# EXPLICITLY as "Audit" (OQ-016: never rely on a built-in's implicit default).
+#
+# EFFECT DECISION — Audit, not Deny (code-review 2026-07-07): a Deny at the
+# `landingzones` MG would hard-block legitimate POC resources that live under it —
+# the spoke NSG flow-log Storage Accounts (corp-a1/a2, online-p1; no `network_acls`,
+# so defaultAction=Allow) and the entire synthetic layer (Section 13 storage + the
+# red-team Key Vault, which need public access by design). Deny would fail every
+# landing-zone and synthetic apply with RequestDisallowedByPolicy. Audit governs and
+# reports public-network-access without blocking those workloads. The state SA is
+# unaffected either way — it sits under `platform` > `management`, a sibling of
+# `landingzones`, not a descendant. To enforce (Deny) later: add policy exemptions
+# for the flow-log/synthetic RGs first, then flip. Tracked under OQ-016.
 
 resource "azurerm_policy_set_definition" "deny_public_network_access" {
   name         = "deny-public-network-access-${var.org_prefix}"
@@ -528,16 +548,34 @@ resource "azurerm_policy_set_definition" "deny_public_network_access" {
   policy_definition_reference {
     policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/1b8ca024-1d5c-4dec-8995-b1a932b41780"
     reference_id         = "deny-public-access-sql"
+    # Explicit Audit for the POC (OQ-016: set effect explicitly, never rely on the
+    # built-in default). NOT Deny — a Deny at the landingzones MG blocks legit
+    # public-access resources under it (spoke flow-log SAs, synthetic). See note above.
+    parameter_values = jsonencode({
+      effect = { value = "Audit" }
+    })
   }
 
   policy_definition_reference {
-    policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/405c5871-3e91-4644-8a63-58ad8008cbe8"
+    policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/405c5871-3e91-4644-8a63-58e19d68ff5b"
     reference_id         = "deny-public-access-keyvault"
+    # Explicit Audit for the POC (OQ-016: set effect explicitly, never rely on the
+    # built-in default). NOT Deny — a Deny at the landingzones MG blocks legit
+    # public-access resources under it (spoke flow-log SAs, synthetic). See note above.
+    parameter_values = jsonencode({
+      effect = { value = "Audit" }
+    })
   }
 
   policy_definition_reference {
     policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/34c877ad-507e-4c82-993e-3452a6e0ad3c"
     reference_id         = "deny-public-access-storage"
+    # Explicit Audit for the POC (OQ-016: set effect explicitly, never rely on the
+    # built-in default). NOT Deny — a Deny at the landingzones MG blocks legit
+    # public-access resources under it (spoke flow-log SAs, synthetic). See note above.
+    parameter_values = jsonencode({
+      effect = { value = "Audit" }
+    })
   }
 }
 

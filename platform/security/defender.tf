@@ -4,7 +4,7 @@
 #          NIST SP 800-53 R5 + CIS Azure Foundations 2.0 built-in policy
 #          initiatives at the Globaris root management group scope.
 # Section: 6 — Defender for Cloud + Sentinel Tuning
-# Last updated: 2026-05-29
+# Last updated: 2026-07-06
 #
 # Apply order: After platform/management-groups (root MG must exist for the
 #              compliance assignments). The Defender plans + Event Hub depend
@@ -39,10 +39,13 @@ locals {
   # tenant-wide built-ins published by Microsoft and assigned at the root MG
   # scope so every subscription inherits the compliance posture.
   #
-  # UNVERIFIED 2026-05-29: definition IDs are well-documented but should be
-  # confirmed against azadvertizer.net before first apply. Re-verify the CIS
-  # GUID specifically — Microsoft has shipped multiple Azure Foundations
-  # benchmark versions (1.4.0, 2.0.0, 2.1.0).
+  # VERIFIED 2026-07-06 (via `az policy set-definition show`, both GUIDs confirmed):
+  #   179d1daa-458f-4e47-8086-2a68d0d6c38f = "NIST SP 800-53 Rev. 5" (initiative v14.19.0)
+  #   06f19060-9e68-4070-92ca-f15cc126059e = "CIS Microsoft Azure Foundations Benchmark
+  #     v2.0.0" (initiative v1.10.0) — this GUID IS the intended v2.0.0 benchmark.
+  # Neither initiative has any required parameter without a default (0 of 122 each),
+  # so the parameterless assignment below supplies everything needed. GUIDs are
+  # correct as-is — do not change.
   regulatory_compliance_initiatives = {
     nist_sp_800_53_r5 = {
       definition_id = "/providers/Microsoft.Authorization/policySetDefinitions/179d1daa-458f-4e47-8086-2a68d0d6c38f"
