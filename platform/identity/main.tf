@@ -16,7 +16,7 @@
 # policy. Set this to a real emergency-access group before enabling policies.
 #
 # Well-known App IDs (stable across tenants, published by Microsoft):
-#   Azure portal:              c44b4083-3bb0-49c1-b47d-974e53cbdf3c
+#   Azure portal:              c44b4083-3bb0-49c1-b47d-974e53cbdf3c (NOT CA-targetable - Graph 1034; do not re-add to app lists)
 #   Microsoft Azure Mgmt API:  797f4846-ba00-4fd7-ba43-dac1f8f63013
 #
 # Admin role template IDs (stable across tenants — confirmed on
@@ -52,9 +52,13 @@ locals {
   ]
 
   # Azure management app IDs targeted by device compliance + sign-in frequency policies.
+  # NOTE (run 28976315927): Graph CA rejects the Azure portal app id
+  # c44b4083-3bb0-49c1-b47d-974e53cbdf3c with 1034 UnsupportedFirstPartyApplication -
+  # portal first-party apps can no longer be targeted directly. Removed; intent is
+  # preserved because the Microsoft Azure Management app below covers Azure portal
+  # sign-ins (its tokens are issued for the ARM audience - MS CA docs).
   azure_management_app_ids = [
-    "c44b4083-3bb0-49c1-b47d-974e53cbdf3c", # Azure portal
-    "797f4846-ba00-4fd7-ba43-dac1f8f63013", # Microsoft Azure Management (REST API)
+    "797f4846-ba00-4fd7-ba43-dac1f8f63013", # Microsoft Azure Management (covers Azure portal)
   ]
 }
 
