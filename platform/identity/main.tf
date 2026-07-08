@@ -1,6 +1,6 @@
 # Purpose: Zero Trust baseline — Conditional Access policies and Identity Protection.
 # Section: 5 — Zero Trust + Conditional Access
-# Last updated: 2026-05-26
+# Last updated: 2026-07-08
 #
 # Policies deployed (all start in Report-only mode via var.ca_policy_state):
 #   CA-001  Require MFA for all admin roles
@@ -35,13 +35,20 @@ locals {
     "c4e39bd9-1100-46d3-8c65-fb160da0071f", # Authentication Administrator
     "9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3", # Application Administrator
     "158c047a-c907-4556-b7ef-446551a6b5f7", # Cloud Application Administrator
-    "29232cdf-9323-42fd-abe5-b6e039f7c0d5", # Exchange Administrator
     "f28a1f50-f6e7-4571-818b-6a12f2af6b6c", # SharePoint Administrator
     "69091246-20e8-4a56-aa4d-066075b2a7a8", # Teams Administrator
     "17315797-102d-40b4-93e0-432062caca18", # Compliance Administrator
-    "b0f54661-2d74-4c50-afa3-1ec803f12efa", # Billing Administrator
     "966707d0-3269-4727-9be2-8c3a10f19b9d", # Password Administrator
-    "17315797-102d-40b4-93e0-432062caca18", # Compliance Data Administrator (same template)
+    "29232cdf-9323-42fd-ade2-1d097af3e4de", # Exchange Administrator
+    "b0f54661-2d74-4c50-afa3-1ec803f12efe", # Billing Administrator
+    # CORRECTED (run 28953600569 + code review): the original list carried
+    # INVALID GUID variants for Exchange Administrator (...-abe5-b6e039f7c0d5)
+    # and Billing Administrator (...-1ec803f12efa) - right prefix, wrong tail;
+    # Graph CA's 1103 "non-built in role ids" was literally accurate. Replaced
+    # with the published template IDs (permissions-reference, verified
+    # 2026-07-08). Also removed a duplicate Compliance Administrator entry that
+    # was mislabeled "Compliance Data Administrator" (that role's real template
+    # is e6d1a23a-da11-4be4-9570-befc86d067a7; deliberately not added).
   ]
 
   # Azure management app IDs targeted by device compliance + sign-in frequency policies.
