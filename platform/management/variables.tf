@@ -1,6 +1,6 @@
 # Purpose: Input variables for the Management platform root module.
 # Section: 7 — FinOps: Tagging & Budgets (initial); extended in Section 8.
-# Last updated: 2026-05-12
+# Last updated: 2026-07-07
 
 variable "tenant_id" {
   description = "Azure Active Directory tenant ID."
@@ -47,6 +47,11 @@ variable "environment" {
   description = "Deployment environment label used in resource names and tags (e.g. 'poc')."
   type        = string
   default     = "poc"
+}
+
+variable "terraform_sp_object_id" {
+  description = "Object ID of the OIDC service principal running Terraform. Granted Storage Blob Data Contributor on the cost-exports Storage Account (keyless, Entra-only auth). Fed by CI as TF_VAR_terraform_sp_object_id (same as platform/security)."
+  type        = string
 }
 
 # ---------------------------------------------------------------------------

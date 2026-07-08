@@ -150,6 +150,35 @@ resource "azurerm_storage_container" "cost_exports" {
   container_access_type = "private"
 }
 
+# Data-plane RBAC for the CI service principal on the keyless cost-exports SA.
+# The account is Entra-only (shared_access_key_enabled = false); classic roles
+# (Contributor) carry no blob dataActions, so any future blob data-plane operation
+# by the pipeline against this account (Section 4 PE validation, export inspection)
+# needs an explicit data role. Mirrors bootstrap/identity.tf on the tfstate SA.
+#
+# NOTE — refresh does NOT depend on this assignment existing first: with
+# storage_use_azuread = true (providers.tf), the provider's refresh reads (Get Blob/
+# Queue Service Properties) authorize via the control-plane actions
+# Microsoft.Storage/storageAccounts/{blobServices,queueServices}/read, already held
+# via Contributor on this subscription. No queue data role is granted: no
+# queue_properties are managed here and Get Queue Service Properties needs no
+# queue dataAction (per MS REST auth docs, verified 2026-07-07).
+#
+# Contingency only — if a refresh still returns 403 AuthorizationPermissionMismatch,
+# the operator can pre-grant out-of-band, then import to avoid a 409 duplicate:
+#   az role assignment create \
+#     --assignee-object-id $TERRAFORM_SP_OBJECT_ID \
+#     --assignee-principal-type ServicePrincipal \
+#     --role "Storage Blob Data Contributor" \
+#     --scope "/subscriptions/<management-sub-id>/resourceGroups/<finops-rg>/providers/Microsoft.Storage/storageAccounts/<cost-exports-sa>"
+#   terraform import 'azurerm_role_assignment.terraform_sp_cost_exports_blob' <assignment-id-from-az-output>
+resource "azurerm_role_assignment" "terraform_sp_cost_exports_blob" {
+  scope                            = azurerm_storage_account.cost_exports.id
+  role_definition_name             = "Storage Blob Data Contributor"
+  principal_id                     = var.terraform_sp_object_id
+  skip_service_principal_aad_check = true
+}
+
 # ---------------------------------------------------------------------------
 # Tag Governance — custom initiative using built-in Azure Policy definitions
 # ---------------------------------------------------------------------------

@@ -31,6 +31,27 @@
 
 <!-- Newest at the top. -->
 
+### OQ-020: Can Cost Management exports write to the keyless cost-exports SA?
+
+- **Raised:** 2026-07-07 (cost-exports refresh-403 fix, cloud-engineer)
+- **Section:** 7 — FinOps: Tagging & Budgets
+- **Blocking:** No — does not block plan/apply; only the scheduled export RUNS may fail to deliver blobs.
+- **Priority:** Medium
+
+**Question:**
+`stfinops...` has `shared_access_key_enabled = false`. The scheduled export write is performed by the
+Cost Management service, not our CI SP, so the SP's new Storage Blob Data Contributor grant does not
+authorize it. Microsoft supports exports to key-disabled/firewalled SAs via a system-assigned managed
+identity on the export (newer CostManagement API versions), but `azurerm_subscription_cost_management_export`
+in azurerm ~>4.71 exposes no `identity` block. After the next successful apply, verify whether export runs
+actually deliver blobs to `cost-exports`.
+
+**Options being considered:**
+- A: Wait and verify — exports may succeed (trusted-service path). If blobs land, close this OQ.
+- B: If runs fail, manage the export via `azapi` with a newer API version + system-assigned identity, then
+  grant that identity Storage Blob Data Contributor on the SA.
+- C: Re-enable shared keys on this one SA with a `# DEVIATION:` note (weakest, last resort).
+
 ### OQ-019: DDoS governance spans two root modules — introduce one shared toggle so they can't diverge?
 
 - **Raised:** 2026-07-06 (DDoS LinkedAuthorizationFailed root-cause, architect)
