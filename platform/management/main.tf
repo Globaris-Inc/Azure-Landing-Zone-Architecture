@@ -36,9 +36,6 @@ locals {
   # Deterministic workbook GUID derived from org prefix; avoids random IDs.
   carbon_workbook_id = lower(uuidv5("dns", "carbon-optimization.${var.org_prefix}"))
 
-  # ARM ID of the cost export storage container (constructed from SA + container name).
-  export_container_arm_id = "${azurerm_storage_account.cost_exports.id}/blobServices/default/containers/${azurerm_storage_container.cost_exports.name}"
-
   # Required tag names with default values applied by the Modify policy when a RG
   # is created or updated without the tag. These are intentionally generic defaults;
   # workload teams override them on their own resource groups.
@@ -289,11 +286,12 @@ resource "azurerm_resource_provider_registration" "cost_management_exports" {
 # ---------------------------------------------------------------------------
 
 # DEVIATION: No AVM module for subscription budgets or cost management exports.
-# modules/finops is a custom child module using native azurerm resources.
+# modules/finops is a custom child module using native azurerm resources plus azapi
+# for the cost export (ADR-027 - keyless destination SA needs the export MI path).
 # The single management-subscription provider is used for all module calls;
-# azurerm_consumption_budget_subscription and azurerm_subscription_cost_management_export
-# both accept explicit subscription_id parameters enabling cross-subscription management
-# when the OIDC SP holds Owner at the tenant root management group.
+# azurerm_consumption_budget_subscription takes an explicit subscription_id and the
+# azapi export takes the subscription resource ID as parent_id, enabling
+# cross-subscription management from one provider pair.
 module "finops" {
   source   = "../../modules/finops"
   for_each = local.subscription_scopes
@@ -305,12 +303,14 @@ module "finops" {
   budget_alert_thresholds     = var.budget_alert_thresholds
   budget_alert_contact_emails = var.budget_alert_contact_emails
 
-  export_enabled          = true
-  export_name             = each.value.export_name
-  export_container_arm_id = local.export_container_arm_id
-  export_root_folder      = each.key
-  export_start_date       = var.budget_start_date
-  export_end_date         = var.export_end_date
+  export_enabled            = true
+  export_name               = each.value.export_name
+  export_storage_account_id = azurerm_storage_account.cost_exports.id
+  export_container_name     = azurerm_storage_container.cost_exports.name
+  export_identity_location  = var.primary_location
+  export_root_folder        = each.key
+  export_start_date         = var.budget_start_date
+  export_end_date           = var.export_end_date
 
   # No VMs exist yet — auto-shutdown schedules added from Section 8 onwards.
   vm_shutdown_schedules = {}

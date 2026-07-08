@@ -1,12 +1,12 @@
 # Purpose: Provider configuration for the Management platform root module.
 # Section: 7 — FinOps: Tagging & Budgets (initial); extended in Section 8.
-# Last updated: 2026-07-07
+# Last updated: 2026-07-08
 #
-# Single azurerm provider targets the management subscription.
-# azurerm_consumption_budget_subscription and azurerm_subscription_cost_management_export
-# both accept an explicit subscription_id parameter, allowing cross-subscription
-# budget and export management from one provider. The OIDC service principal has
-# Owner at the tenant root management group, enabling cross-subscription operations.
+# azurerm targets the management subscription; azapi (ADR-027) creates the cost
+# exports in modules/finops. azurerm_consumption_budget_subscription accepts an
+# explicit subscription_id parameter and the azapi export scopes via parent_id,
+# allowing cross-subscription budget and export management from one provider pair.
+# The OIDC service principal's MG-scope roles enable cross-subscription operations.
 
 terraform {
   required_version = ">= 1.9"
@@ -15,6 +15,10 @@ terraform {
     azurerm = {
       source  = "hashicorp/azurerm"
       version = "~> 4.71.0"
+    }
+    azapi = {
+      source  = "Azure/azapi"
+      version = "~> 2.5"
     }
     random = {
       source  = "hashicorp/random"
@@ -45,5 +49,8 @@ provider "azurerm" {
 
   features {}
 }
+
+# azapi authenticates via the same ARM_* OIDC env vars as azurerm - no CI changes needed (ADR-027).
+provider "azapi" {}
 
 provider "random" {}

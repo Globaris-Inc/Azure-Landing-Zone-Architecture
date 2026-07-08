@@ -37,6 +37,95 @@
 
 <!-- Newest at the top. -->
 
+### ADR-027: Migrate subscription cost exports to azapi with a system-assigned managed identity (keyless destination SA)
+
+- **Date:** 2026-07-08
+- **Section:** 7 - FinOps: Tagging & Budgets
+- **Status:** Accepted (user-ratified direction 2026-07-08)
+- **Decision makers:** user, claude
+
+**Context:**
+Deploy run 28911617973 (platform/management apply): 4 of 5 `azurerm_subscription_cost_management_export`
+creates failed with `400: Key-based authentication is currently disabled on this storage account. To
+proceed, please enable "Allow storage account key access"`. The destination cost-exports SA is Entra-only
+(`shared_access_key_enabled = false`) by design (repo-wide keyless pattern, LESSONS #1). The azurerm
+~>4.71.0 resource drives an older CostManagement API version that hard-rejects key-disabled destination
+SAs at PUT, so export CREATION fails, not just delivery - this closes OQ-020's "wait and verify" option.
+Microsoft's supported path for keyless/firewalled SAs is CostManagement API 2023-08-01 or newer with a
+system-assigned managed identity on the export; per the improved-exports tutorial, when the creating
+principal holds `Microsoft.Authorization/roleAssignments/write` on the destination SA, the service
+auto-assigns the export's MI Storage Blob Data Contributor scoped to the destination container. Our CI SP
+holds User Access Administrator at subscription scope (ADR-021 row 6), which covers the SA. The 5th export
+(identity sub) failed only on a STALE "RP Not Registered" check - Microsoft.CostManagementExports was
+registered by the same apply and the service check lagged; a plain rerun clears it (propagation lag, no
+design impact).
+
+Verified against the ARM template reference (learn.microsoft.com/azure/templates,
+microsoft.costmanagement/exports, page updated 2026-01-20): GA API versions 2023-08-01 / 2023-09-01 /
+2023-11-01 / 2024-08-01 / 2025-03-01 (latest); `identity` accepts `SystemAssigned`; `location` is "only
+required when utilizing managed identity"; `schedule.recurrencePeriod.from` "must be in future";
+delivery destination takes the STORAGE ACCOUNT `resourceId` plus container NAME (not a container ARM ID).
+Verified against azapi provider docs: `ignore_body_changes` was removed in azapi 2.0 and
+`lifecycle.ignore_changes` on nested `body` paths is the supported replacement (dynamic properties);
+identity block exports read-only `principal_id`/`tenant_id`; OIDC auth honors the ARM_* env vars plus
+GitHub's ACTIONS_ID_TOKEN_REQUEST_* - all already exported by `_tf-root.yml`.
+
+**Decision:**
+Replace `azurerm_subscription_cost_management_export` in `modules/finops` with `azapi_resource` of type
+**`Microsoft.CostManagement/exports@2025-03-01`** (latest GA per the ARM reference; MI support exists from
+2023-08-01, the newest GA is chosen so the FocusCost dataset is a one-line future option), created as an
+extension resource with `parent_id = "/subscriptions/<sub-guid>"`, `identity { type = "SystemAssigned" }`,
+and `location` set from the management root's `var.primary_location`. The SA stays keyless. Dataset parity
+is preserved: ActualCost / MonthToDate / Daily granularity / Csv / Active daily schedule / per-sub root
+folder. The future-start guard carries over unchanged: `schedule.recurrencePeriod.from =
+local.export_recurrence_start` with `lifecycle { ignore_changes =
+[body.properties.schedule.recurrencePeriod.from] }`. Role grant for the export MI: rely on the DOCUMENTED
+service-side auto-assignment (creator SP holds roleAssignments/write on the SA via UAA); do NOT add an
+explicit `azurerm_role_assignment` now. Provider pins: `modules/finops` adds `azapi ~> 2.5` alongside
+azurerm; `platform/management` adds the same pin plus an empty `provider "azapi" {}` block (auth via the
+existing ARM_* OIDC env vars; no CI changes). Module interface change: `export_container_arm_id` is
+replaced by `export_storage_account_id` + `export_container_name` to match the ARM body shape without
+string parsing.
+
+**Alternatives considered:**
+- Re-enable shared keys on the cost-exports SA (`shared_access_key_enabled = true`) - rejected: weakens
+  posture and breaks the repo-wide keyless pattern for a single consumer; the MI path is the supported fix.
+- Drop the cost exports - rejected: loses the Section 7 FinOps export evidence for a solvable problem.
+- Wait for azurerm to expose `identity` on the export resource - rejected: no upstream timeline; azapi is
+  the sanctioned escape hatch for API-version gaps (same rationale as prior azapi uses, ADR-017).
+- Explicit `azurerm_role_assignment` on the MI principal as the PRIMARY grant - rejected as primary: the
+  service may ALSO auto-assign (our SP always holds roleAssignments/write at create time), producing
+  duplicate assignments, and it adds an apply-order dependency on the post-create principal id. Kept as the
+  documented FALLBACK: if the first export run fails delivery with an authorization error, add
+  `azurerm_role_assignment` (scope = SA id, role `Storage Blob Data Contributor`, principal =
+  `azapi_resource...identity[0].principal_id`) inside `modules/finops`. A 409 duplicate is only possible on
+  identical role+scope+principal; the service assigns at CONTAINER scope, the fallback at SA scope, so they
+  cannot collide.
+- API version 2023-08-01 (minimum for MI, used in Microsoft's own azapi sample) - not chosen as primary:
+  older versions age out and FocusCost is absent; it is the designated FALLBACK if azapi plan-time schema
+  validation rejects 2025-03-01 (see UNVERIFIED below). Never disable `schema_validation_enabled` to force
+  a version through.
+
+**Consequences:**
+- Positive: keyless SA preserved end to end; exports move to the supported MI delivery path; the
+  plantimestamp future-start guard and `export_enabled` gating carry over; FocusCost is one version-string
+  away; no CI/workflow changes (azapi OIDC already proven in this pipeline by platform/connectivity).
+- Negative / trade-offs: second provider in modules/finops; the export body loses azurerm's typed schema
+  (azapi embedded-schema validation covers it at plan); the service-side role assignment lives outside
+  Terraform state (documented here, verified operationally); azapi pin drift across roots grows by one
+  (picked `~> 2.5` to match ADR-017; the OQ-017 standardization pass reconciles all azapi pins later).
+- Follow-ups required: (1) rerun clears the stale RP check on the 5th export; (2) after the first
+  scheduled run, verify blobs land in `cost-exports` AND that the auto-created MI role assignment exists on
+  the container - if delivery fails with an auth error, implement the explicit role-assignment fallback;
+  (3) migration is a clean swap - all 5 exports failed to create, so nothing exists in Azure or in state
+  (engineer confirms with `terraform state list` before deleting the old resource block; no
+  import/moved blocks).
+- UNVERIFIED (marked honestly): whether the azapi release resolved by `~> 2.5` embeds api-version
+  2025-03-01 in its validation schema cannot be enumerated offline; failure mode is a plan-time validation
+  error (fail-fast, no Azure mutation), remedy is the 2023-08-01 fallback above. The tutorial documents MI
+  auto-assignment for export creation generally; it has not yet been observed in this tenant - hence
+  follow-up (2) is mandatory, not optional.
+
 ### ADR-026: Neutralise the ALZ `Enable-DDoS-VNET` Modify policy at the Connectivity MG for the POC
 
 - **Date:** 2026-07-06

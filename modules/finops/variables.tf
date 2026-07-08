@@ -1,6 +1,6 @@
 # Purpose: Input variables for the reusable FinOps child module.
 # Section: 7 — FinOps: Tagging & Budgets
-# Last updated: 2026-07-07
+# Last updated: 2026-07-08
 #
 # This module creates per-subscription FinOps resources: subscription budget,
 # daily cost export to a shared storage container, and optional VM auto-shutdown
@@ -38,7 +38,7 @@ variable "budget_alert_contact_emails" {
 }
 
 variable "export_enabled" {
-  description = "Whether to create a daily ActualCost export for this subscription. This bool is the sole (statically-known) gate on export creation; when true the caller must supply a valid export_container_arm_id."
+  description = "Whether to create a daily ActualCost export for this subscription. This bool is the sole (statically-known) gate on export creation; when true the caller must supply a valid export_storage_account_id, export_container_name, and export_identity_location."
   type        = bool
   default     = true
 }
@@ -49,14 +49,26 @@ variable "export_name" {
   default     = ""
 }
 
-variable "export_container_arm_id" {
-  description = "ARM resource ID of the storage container that receives daily exports. May be unknown at plan time (it is built from storage-account/container attributes in the caller). Must be non-empty and valid whenever export_enabled = true; it no longer gates export creation (export_enabled does)."
+variable "export_storage_account_id" {
+  description = "ARM resource ID of the storage account that receives daily exports. May be unknown at plan time. Must be non-empty and valid whenever export_enabled = true; it does not gate export creation (export_enabled does)."
+  type        = string
+  default     = ""
+}
+
+variable "export_container_name" {
+  description = "Name of the blob container inside export_storage_account_id that receives daily exports (container name only, not an ARM ID). Required when export_enabled = true."
+  type        = string
+  default     = ""
+}
+
+variable "export_identity_location" {
+  description = "Azure region for the export resource's system-assigned managed identity (ARM requires location only when the export carries an identity). Required when export_enabled = true."
   type        = string
   default     = ""
 }
 
 variable "export_root_folder" {
-  description = "Folder prefix inside the export storage container (no leading slash)."
+  description = "Folder prefix inside the export storage container. No leading slash - the value is passed verbatim as deliveryInfo.destination.rootFolderPath in the ARM body."
   type        = string
   default     = "exports"
 }

@@ -61,6 +61,20 @@ needs CostManagement API 2023-08-01+; whether azurerm ~>4.71 drives this resourc
 version is the remaining unknown. Outlook improved; still verify blob delivery after the first successful
 apply (option A first).
 
+**ANSWERED 2026-07-08 (run 28911617973) - CLOSED by ADR-027.** Live evidence refuted Option A: 4 of 5
+export CREATES failed with `400: Key-based authentication is currently disabled on this storage account.
+To proceed, please enable "Allow storage account key access"` - the azurerm ~>4.71 resource drives an
+older CostManagement API that hard-rejects key-disabled destination SAs at PUT, so even resource creation
+fails (not just scheduled delivery). User chose **Option B**: migrate the export in `modules/finops` to
+`azapi_resource` (`Microsoft.CostManagement/exports@2025-03-01`) with `identity { type = "SystemAssigned" }`;
+the SA stays keyless. Role grant relies on the documented service-side auto-assignment (creator SP holds
+roleAssignments/write on the SA via UAA at sub scope); an explicit `azurerm_role_assignment` is the recorded
+fallback if delivery fails. Option C (re-enable shared keys) rejected. The 5th export (identity sub) failed
+only on a STALE "RP Not Registered" check - Microsoft.CostManagementExports was registered by the same
+apply and the service check lagged; a plain rerun clears it. Full design, provider pins, state-migration
+note (clean swap, nothing in state), and the remaining post-apply verification (blobs must land in
+`cost-exports` after the first scheduled run) are recorded in **ADR-027**.
+
 ### OQ-019: DDoS governance spans two root modules — introduce one shared toggle so they can't diverge?
 
 - **Raised:** 2026-07-06 (DDoS LinkedAuthorizationFailed root-cause, architect)

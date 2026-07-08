@@ -1,6 +1,6 @@
 # Purpose: Outputs for the Management platform root module.
 # Section: 7 — FinOps: Tagging & Budgets
-# Last updated: 2026-07-07
+# Last updated: 2026-07-08
 
 output "resource_group_name" {
   description = "Name of the FinOps resource group in the management subscription."
@@ -20,11 +20,6 @@ output "cost_export_storage_account_name" {
 output "cost_export_storage_account_id" {
   description = "ARM resource ID of the cost export storage account."
   value       = azurerm_storage_account.cost_exports.id
-}
-
-output "cost_export_container_arm_id" {
-  description = "ARM resource ID of the cost export storage container (used by modules/finops)."
-  value       = "${azurerm_storage_account.cost_exports.id}/blobServices/default/containers/${azurerm_storage_container.cost_exports.name}"
 }
 
 output "tag_governance_initiative_id" {
