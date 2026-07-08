@@ -76,9 +76,10 @@ enable_ddos_standard = false # DDoS Standard ~$2,944/mo — disabled for POC cos
 #   "none"     — Identity sub left empty.
 identity_mode = "entra-ds"
 
-# Managed-domain FQDN (required when identity_mode = "entra-ds"). Placeholder —
-# replace with the real POC domain (ties to OQ-003), e.g. aadds.globaris.onmicrosoft.com.
-identity_domain_name = "<ENTRA_DS_DOMAIN>"
+# Managed-domain FQDN (required when identity_mode = "entra-ds"). Set 2026-07-08
+# (resolves the OQ-003 placeholder): subdomain of the org-owned domain, first label
+# 15 chars or less (NetBIOS), IMMUTABLE after the managed domain is created.
+identity_domain_name = "aadds.globaris.org"
 
 # Identity VNet CIDR — non-overlapping with hubs (10.0/16, 10.1/16) and spokes
 # (10.10/16, 10.11/16, 10.20/16). Entra DS subnet is carved from this.

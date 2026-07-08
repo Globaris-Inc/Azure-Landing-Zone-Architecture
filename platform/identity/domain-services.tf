@@ -2,7 +2,7 @@
 #          Services + a Recovery Services Vault for future DC/management VMs.
 #          (Section 8 — G1 / Gap-Closure Wave 3 / ADR-010)
 # Section: 8 — Standard Platform Components (Identity subscription)
-# Last updated: 2026-06-28
+# Last updated: 2026-07-08
 #
 # DEVIATION: there is NO AVM module for Entra Domain Services (the registry returns
 # 404 for avm-res-aad-domainservice, confirmed 2026-06-25). This uses the native
@@ -30,6 +30,21 @@
 #     : optional list block (max 1)
 #   - secure_ldap : optional list block (left unset — disabled; would require a PFX cert)
 # ---------------------------------------------------------------------------
+
+# Microsoft.AAD RP registration - identity subscription. Verified NotRegistered live
+# on 2026-07-08 (pre-deploy constraint sweep), and Microsoft.AAD is in NONE of the
+# azurerm v4.71.0 auto-register sets (internal/resourceproviders/required.go at the
+# v4.71.0 tag: absent from Core/Extended/All/Legacy), so without this the managed
+# domain create fails with the RP-not-registered 400 class (same class as
+# Microsoft.CostManagementExports, run 28909509585). The CI SP holds Contributor on
+# the identity sub, which includes */register/action. Create blocks until the RP
+# reports Registered (2h timeout).
+resource "azurerm_resource_provider_registration" "aad" {
+  provider = azurerm.identity
+  count    = local.entra_ds_enabled ? 1 : 0
+
+  name = "Microsoft.AAD"
+}
 
 resource "azurerm_active_directory_domain_service" "this" {
   provider = azurerm.identity
@@ -72,6 +87,7 @@ resource "azurerm_active_directory_domain_service" "this" {
   depends_on = [
     module.identity_vnet,
     azurerm_network_security_group.entra_ds,
+    azurerm_resource_provider_registration.aad,
   ]
 }
 

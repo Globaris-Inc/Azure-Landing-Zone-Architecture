@@ -498,6 +498,11 @@ Conditional Access, Entra ID, and any custom domain bindings need a domain. Are 
 - The default `*.onmicrosoft.com` tenant domain (cheapest, no DNS work)
 - A custom domain you own (more realistic, requires DNS verification)
 
+**RESOLVED 2026-07-08:** Custom owned domain. The Entra DS managed-domain FQDN is set in
+envs/poc.tfvars (`identity_domain_name`, subdomain of the org-owned domain; first label under the
+15-char NetBIOS limit). IMMUTABLE once the managed domain is created - do not re-decide. Entra DS
+requires no DNS verification for the managed-domain name.
+
 ---
 
 ### OQ-004: Region pair selection for DR
