@@ -64,13 +64,19 @@ resource "azurerm_active_directory_domain_service" "this" {
     subnet_id = module.identity_vnet[0].subnets["entra-ds"].resource_id
   }
 
-  # Harden the managed domain: disable legacy/insecure protocols. These mirror the
-  # Microsoft-recommended secure baseline for a greenfield managed domain.
+  # Harden the managed domain: disable legacy/insecure protocols. Mirrors the
+  # Microsoft secure baseline (secure-your-domain doc) for a greenfield managed
+  # domain - EXCEPT Kerberos hash sync, which the API requires Enabled: run
+  # 28950922048 failed 400 "The property 'SyncKerberosPasswords' cannot have the
+  # value 'Disabled'" (the managed domain issues Kerberos tickets from those
+  # hashes; disabling would break all Kerberos auth). Disabling NTLM sync IS
+  # documented-supported hardening (secure-your-domain doc); on-prem sync off is
+  # justified independently: cloud-only tenant, nothing to sync.
   security {
     ntlm_v1_enabled         = false
     tls_v1_enabled          = false
-    sync_ntlm_passwords     = false
-    sync_kerberos_passwords = false
+    sync_ntlm_passwords     = false # Supported hardening; breaks LDAP simple binds (none used here).
+    sync_kerberos_passwords = true  # API-mandated Enabled; see header note above.
     sync_on_prem_passwords  = false # Cloud-only POC; no on-prem AD Connect sync.
   }
 
