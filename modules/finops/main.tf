@@ -1,6 +1,6 @@
 # Purpose: Reusable FinOps resources — subscription budget, daily cost export, VM auto-shutdown.
 # Section: 7 — FinOps: Tagging & Budgets
-# Last updated: 2026-07-07
+# Last updated: 2026-07-08
 #
 # DEVIATION: No AVM module exists for Azure Cost Management resources (budgets, exports,
 # auto-shutdown schedules). All resources use native azurerm provider resources.
@@ -22,6 +22,16 @@ locals {
   # "/subscriptions/<uuid>", not a bare GUID (verified against provider source at
   # v4.71.0, 2026-07-07). Normalize here so callers may pass either form.
   subscription_resource_id = startswith(var.subscription_id, "/subscriptions/") ? var.subscription_id : "/subscriptions/${var.subscription_id}"
+
+  # Azure rejects an export whose schedule.recurrencePeriod.from is not strictly
+  # in the future ("The start date must be in future" - ARM reference for
+  # Microsoft.CostManagement/exports, verified 2026-07-08). A static tfvars date
+  # inevitably goes stale between authoring and apply (this exact class already
+  # bit the budgets, commit 7dde32b), so guard it: use the requested date when it
+  # is still in the future, otherwise start the recurrence 24h after plan time.
+  # ignore_changes on the export keeps later plans from churning the date.
+  requested_export_start  = var.export_start_date != "" ? var.export_start_date : var.budget_start_date
+  export_recurrence_start = timecmp(local.requested_export_start, plantimestamp()) > 0 ? local.requested_export_start : timeadd(plantimestamp(), "24h")
 }
 
 # ---------------------------------------------------------------------------
@@ -75,8 +85,15 @@ resource "azurerm_subscription_cost_management_export" "this" {
   subscription_id = local.subscription_resource_id
 
   recurrence_type              = "Daily"
-  recurrence_period_start_date = var.export_start_date != "" ? var.export_start_date : var.budget_start_date
+  recurrence_period_start_date = local.export_recurrence_start
   recurrence_period_end_date   = var.export_end_date
+
+  # The start date is derived from plantimestamp() when the requested date is in
+  # the past; without ignore_changes every subsequent plan would try to rewrite
+  # it. To intentionally change the recurrence start, taint/replace the export.
+  lifecycle {
+    ignore_changes = [recurrence_period_start_date]
+  }
 
   export_data_storage_location {
     container_id     = var.export_container_arm_id

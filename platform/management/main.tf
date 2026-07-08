@@ -1,7 +1,7 @@
 # Purpose: Management platform root module — FinOps governance, tag policy, budgets,
 #          cost exports, anomaly alerts, and Carbon Optimization workbook.
 # Section: 7 — FinOps: Tagging & Budgets
-# Last updated: 2026-07-07
+# Last updated: 2026-07-08
 #
 # Apply order: depends on platform/management-groups (policy assignments scope to MGs).
 #
@@ -262,6 +262,29 @@ resource "azurerm_role_assignment" "tag_policy_remediation" {
 }
 
 # ---------------------------------------------------------------------------
+# Resource Provider registration - Microsoft.CostManagementExports
+# ---------------------------------------------------------------------------
+
+# Deploy run 28909509585: all 5 azurerm_subscription_cost_management_export
+# instances failed with 400 "RP Not Registered. Register destination storage
+# account subscription with Microsoft.CostManagementExports." The destination
+# SA (cost-exports) lives in the MANAGEMENT subscription, so the RP is
+# registered here only, on the default (management-sub) provider.
+#
+# Standalone resource, not a provider-block change: verified at azurerm
+# v4.71.0 (docs + internal/resourceproviders/required.go) that
+# Microsoft.CostManagementExports is absent from every auto-registered set
+# (core/extended/all/legacy), so this cannot conflict with the provider's
+# automatic RP registration and the root's resource_provider_registrations
+# mode stays untouched. The CI SP holds Contributor on this subscription,
+# which includes */register/action, so it may register RPs. Registration can
+# take minutes; the resource blocks until the RP reports Registered (create
+# timeout defaults to 2h per provider docs) - acceptable.
+resource "azurerm_resource_provider_registration" "cost_management_exports" {
+  name = "Microsoft.CostManagementExports"
+}
+
+# ---------------------------------------------------------------------------
 # Per-subscription budgets + daily cost exports (calls modules/finops)
 # ---------------------------------------------------------------------------
 
@@ -294,7 +317,11 @@ module "finops" {
 
   tags = local.common_tags
 
-  depends_on = [azurerm_storage_container.cost_exports]
+  # RP registration first: exports 400 "RP Not Registered" otherwise (run 28909509585).
+  depends_on = [
+    azurerm_storage_container.cost_exports,
+    azurerm_resource_provider_registration.cost_management_exports,
+  ]
 }
 
 # ---------------------------------------------------------------------------
@@ -330,9 +357,12 @@ resource "azurerm_consumption_budget_management_group" "this" {
 # ---------------------------------------------------------------------------
 
 # DEVIATION: No AVM module for azurerm_cost_anomaly_alert.
+# display_name is capped at 50 characters by Azure (InvalidScheduledActionDisplayName,
+# deploy run 28909509585) - keep it short. Current value is 34 chars with org_prefix
+# "globaris", leaving headroom.
 resource "azurerm_cost_anomaly_alert" "management" {
   name            = "anomaly-alert-management-${var.org_prefix}"
-  display_name    = "Cost Anomaly Alert — ${title(var.org_prefix)} Management Subscription"
+  display_name    = "Cost Anomaly Alert - ${title(var.org_prefix)} Mgmt"
   subscription_id = "/subscriptions/${var.management_subscription_id}"
   email_subject   = "[${upper(var.environment)}] Azure Cost Anomaly Detected — ${title(var.org_prefix)}"
   email_addresses = var.budget_alert_contact_emails

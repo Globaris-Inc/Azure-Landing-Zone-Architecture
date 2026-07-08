@@ -52,6 +52,15 @@ actually deliver blobs to `cost-exports`.
   grant that identity Storage Blob Data Contributor on the SA.
 - C: Re-enable shared keys on this one SA with a `# DEVIATION:` note (weakest, last resort).
 
+**Update 2026-07-08 (constraint sweep):** Per the exports tutorial (learn.microsoft.com,
+tutorial-improved-exports), Cost Management creates a system-assigned managed identity for a NEW export when
+the creating principal holds `Microsoft.Authorization/roleAssignments/write` on the destination SA, and
+auto-assigns that MI Storage Blob Data Contributor scoped to the container. Our CI SP holds User Access
+Administrator at subscription scope (ADR-021 row 6), so it has that permission at create time. The MI flow
+needs CostManagement API 2023-08-01+; whether azurerm ~>4.71 drives this resource with a new enough API
+version is the remaining unknown. Outlook improved; still verify blob delivery after the first successful
+apply (option A first).
+
 ### OQ-019: DDoS governance spans two root modules — introduce one shared toggle so they can't diverge?
 
 - **Raised:** 2026-07-06 (DDoS LinkedAuthorizationFailed root-cause, architect)
