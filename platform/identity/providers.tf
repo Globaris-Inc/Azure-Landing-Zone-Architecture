@@ -32,6 +32,13 @@ terraform {
       source  = "Azure/azapi"
       version = "~> 2.5"
     }
+    # ADR-028: propagation waits for the AADDS policy exemption and the
+    # greenfield named-location race. Same pin as bootstrap/ (0.13.1 verified
+    # present in that lock file / provider cache, 2026-07-09).
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.13.1"
+    }
   }
   backend "azurerm" {}
 }

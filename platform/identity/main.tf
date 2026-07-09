@@ -75,6 +75,18 @@ resource "azuread_named_location" "approved_countries" {
   }
 }
 
+# ADR-028: greenfield named-location race hardening. Microsoft Graph replicates a
+# FRESHLY created named location asynchronously; CA-005 (geo_block) references it by
+# id and failed with error 1040 one second after create in run 28978396902. This
+# 300s buffer makes the greenfield DEPLOYMENT path deterministic. For an existing
+# tenant (named location already replicated) it costs nothing meaningful and a plain
+# rerun clears geo_block regardless. See ADR-028.
+resource "time_sleep" "wait_named_location" {
+  create_duration = "300s"
+
+  depends_on = [azuread_named_location.approved_countries]
+}
+
 # ---------------------------------------------------------------------------
 # CA-001: Require MFA for all admin roles
 # ---------------------------------------------------------------------------
@@ -221,6 +233,10 @@ resource "azuread_conditional_access_policy" "geo_block" {
     operator          = "OR"
     built_in_controls = ["block"]
   }
+
+  # ADR-028: wait out the Graph replication lag on the named location this policy
+  # references (excluded_locations), so the create does not fail with error 1040.
+  depends_on = [time_sleep.wait_named_location]
 }
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,50 @@ resource "azurerm_resource_provider_registration" "aad" {
   name = "Microsoft.AAD"
 }
 
+# ---------------------------------------------------------------------------
+# ADR-028: Resource-group-scoped policy exemption for Entra DS vs Deny-Public-IP
+#
+# The managed domain's Standard SKU public IP is a MANDATORY service-created
+# resource (MS Learn: entra/identity/domain-services/network-considerations),
+# written by the Entra DS service principal - not our CI SP. The `Deny-Public-IP`
+# assignment at the identity MG (ALZ identity-archetype default) blocks that write
+# regardless of caller, terminally failing the domain create
+# (ResourceActionsBlockedByPolicy, run 28978396902). A Waiver exemption scoped to
+# ONLY the AADDS RG unblocks the service-created PIP while leaving Deny-Public-IP
+# fully enforced elsewhere in the identity MG. No expires_on: the PIP is required
+# for the lifetime of the managed domain. See ADR-028.
+#
+# The policy_assignment_id is a LITERAL string. The `Deny-Public-IP` assignment is
+# owned by the platform/management-groups root (deployed via avm-ptn-alz); there is
+# no cross-root Terraform output exposing it, so we cannot reference it by symbol.
+# COUPLING: this hard-codes the ALZ assignment NAME `Deny-Public-IP` at the
+# `identity` MG. If the management-groups root renames or rescopes that assignment,
+# this string must be updated in lockstep. See ADR-028.
+resource "azurerm_resource_group_policy_exemption" "aadds_deny_public_ip" {
+  provider = azurerm.identity
+  count    = local.entra_ds_enabled ? 1 : 0
+
+  name                 = "exempt-deny-public-ip-aadds"
+  resource_group_id    = azurerm_resource_group.identity_aadds[0].id
+  policy_assignment_id = "/providers/Microsoft.Management/managementGroups/identity/providers/Microsoft.Authorization/policyAssignments/Deny-Public-IP"
+  exemption_category   = "Waiver"
+
+  display_name = "Entra DS service PIP waiver (ADR-028)"
+  description  = "Waiver for the mandatory Standard SKU public IP that the Entra Domain Services managed service creates in this RG. Scoped to rg-identity-aadds only; Deny-Public-IP stays enforced elsewhere in the identity MG. See ADR-028."
+}
+
+# Exemptions propagate to the policy-engine caches asynchronously. The managed
+# domain deploys its network resources (incl. the service PIP) within the first
+# minutes of provisioning; a lost race costs another multi-hour failed cycle.
+# 300s propagation buffer before the domain create. (ADR-028)
+resource "time_sleep" "wait_aadds_policy_exemption" {
+  count = local.entra_ds_enabled ? 1 : 0
+
+  create_duration = "300s"
+
+  depends_on = [azurerm_resource_group_policy_exemption.aadds_deny_public_ip]
+}
+
 resource "azurerm_active_directory_domain_service" "this" {
   provider = azurerm.identity
   count    = local.entra_ds_enabled ? 1 : 0
@@ -90,10 +134,16 @@ resource "azurerm_active_directory_domain_service" "this" {
   # The managed domain provisions into the Entra DS subnet; ensure the VNet/subnet
   # and its NSG exist first. (count-indexed refs already create implicit deps; the
   # explicit list keeps apply ordering unambiguous.)
+  # ADR-028: block the domain create until the AADDS RG policy exemption exists
+  # AND its 300s propagation buffer has elapsed, so the service-created PIP is not
+  # denied. Un-indexed resource references match this list's existing convention
+  # for count-gated deps (the RP registration below is also count-gated); both the
+  # sleep and this domain share the same entra_ds_enabled gate.
   depends_on = [
     module.identity_vnet,
     azurerm_network_security_group.entra_ds,
     azurerm_resource_provider_registration.aad,
+    time_sleep.wait_aadds_policy_exemption,
   ]
 }
 
