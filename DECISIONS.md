@@ -37,6 +37,124 @@
 
 <!-- Newest at the top. -->
 
+### ADR-028: Resource-group-scoped policy exemption for Entra Domain Services vs the ALZ Deny-Public-IP assignment at the Identity MG
+
+- **Date:** 2026-07-09
+- **Section:** 8 (Identity subscription, Entra DS) / 2 (ALZ policy stack)
+- **Status:** Accepted
+- **Decision makers:** user (mandated systemic fix), claude (architect)
+
+**Context:**
+Deploy run 28978396902 (platform/identity, 4th apply) failed with the Entra DS managed domain reaching
+terminal `Failed`: `ResourceActionsBlockedByPolicy - Unable to deploy network resources into
+rg-identity-aadds-globaris-poc because there is a policy preventing this action`. Activity Log evidence
+(captured live): the denied write was `Microsoft.Network/publicIPAddresses/aadds-...-pip` in
+`rg-identity-aadds-globaris-poc`, and the caller was the Entra Domain Services service principal, NOT our
+CI SP. The denying assignment is `Deny-Public-IP` at the `identity` MG (built-in definition
+`6c112d4e-5bc7-47ae-a041-ea2d9dccd749` "Not allowed resource types", effect `Deny`,
+`listOfResourceTypesNotAllowed = ["Microsoft.Network/publicIPAddresses"]`, enforcementMode `Default`,
+verified live 2026-07-09). That assignment is the ALZ identity-archetype DEFAULT, deployed by our own
+`platform/management-groups` root via avm-ptn-alz.
+
+This is a structural collision, not a bug in either side:
+- The managed domain's Standard SKU public IP is a MANDATORY service-created resource. MS Learn
+  (entra/identity/domain-services/network-considerations, verified 2026-07-09) lists it in "Network
+  resources used by Domain Services": "Domain Services communicates with the synchronization and
+  management service using a Standard SKU public IP address", with an explicit warning not to delete or
+  modify these resources. There is no SKU, argument, or configuration that suppresses it.
+- Azure Policy `Deny` evaluates every write at the scope regardless of caller, so no permission grant to
+  any principal can bypass it. The only levers are: exemption, enforcement mode, or parameter change.
+- The AADDS-vs-identity-MG-deny collision is a known pattern class in the Enterprise-Scale/ALZ community
+  (same family as the Enable-DDoS-VNET placeholder trap, ADR-026). No single canonical upstream issue was
+  found to cite; the load-bearing verification here is the MS Learn requirement doc plus our live
+  Activity Log and policy-assignment evidence.
+
+**Decision:**
+Create a **resource-group-scoped policy exemption** on `rg-identity-aadds-globaris-poc` for the
+`Deny-Public-IP` assignment, category **Waiver**, managed as code in `platform/identity` with
+`azurerm_resource_group_policy_exemption` (resource verified present in azurerm v4.71.0; args `name`,
+`resource_group_id`, `policy_assignment_id`, `exemption_category` in {Waiver, Mitigated}, optional
+`display_name`/`description`/`expires_on`). The exemption must be created BEFORE the domain create
+retries, with a propagation wait between them. `Deny-Public-IP` stays fully enforced everywhere else in
+the identity MG, including `rg-identity-network-globaris-poc`.
+
+**Implementation brief (cloud-engineer lane, all in `platform/identity`):**
+1. `providers.tf`: add `time = { source = "hashicorp/time", version = "~> 0.13.1" }` to
+   required_providers (same pin as bootstrap). Regenerate the lock file for windows_amd64 + linux_amd64.
+2. `domain-services.tf`, before the domain resource:
+   - `resource "azurerm_resource_group_policy_exemption" "aadds_deny_public_ip"`:
+     `provider = azurerm.identity`, `count = local.entra_ds_enabled ? 1 : 0`,
+     `name = "exempt-deny-public-ip-aadds"`,
+     `resource_group_id = azurerm_resource_group.identity_aadds[0].id`,
+     `policy_assignment_id = "/providers/Microsoft.Management/managementGroups/identity/providers/Microsoft.Authorization/policyAssignments/Deny-Public-IP"`
+     (literal string; the assignment is owned by the management-groups root, there is no cross-root
+     output for it - add a comment saying so and referencing this ADR),
+     `exemption_category = "Waiver"`, plus display_name/description referencing ADR-028. No
+     `expires_on`: the PIP is required for the lifetime of the managed domain.
+   - `resource "time_sleep" "wait_aadds_policy_exemption"`: `count` same gate,
+     `create_duration = "300s"`, `depends_on = [azurerm_resource_group_policy_exemption.aadds_deny_public_ip]`.
+     Rationale: exemptions propagate to policy-engine caches asynchronously; the domain deploys its
+     network resources within the first minutes of provisioning, and a lost race costs another
+     multi-hour failed provisioning cycle.
+   - Add `time_sleep.wait_aadds_policy_exemption` to the domain resource's `depends_on` list.
+3. `main.tf` (greenfield hardening, same time provider): `resource "time_sleep" "wait_named_location"`
+   with `create_duration = "300s"` and `depends_on = [azuread_named_location.approved_countries]`; make
+   `azuread_conditional_access_policy.geo_block` depend on it. This encodes the known Graph
+   replication lag on FRESHLY created named locations (error 1040 fired 1 second after creation in run
+   28978396902). For THIS tenant no wait is strictly needed anymore (the named location has existed
+   since 2026-07-08, well past the lag window; a plain rerun clears geo_block), but the sleep makes the
+   greenfield DEPLOYMENT.md path deterministic. It only costs 5 minutes when the named location is
+   newly created.
+4. **Manual pre-apply step (operator, az CLI): delete the failed managed-domain shell.** The failed
+   create left a hollow `Microsoft.AAD/domainServices` object (ARM envelope `provisioningState:
+   Succeeded` but replica set empty - no subnet, no DC IPs, verified live 2026-07-09). It is NOT in
+   Terraform state: the provider only records the ID after successful polling, and the run-4 log shows
+   the create errored during polling. Consequence of NOT deleting: azurerm v4's requires-import guard
+   GETs the resource at create start, finds it, and fails fast with "already exists ... needs to be
+   imported". Import-then-replace is pointless for a broken shell; Microsoft's guidance for a failed
+   managed-domain deployment is delete and redeploy. Command shape:
+   `az resource delete --ids /subscriptions/<identity-sub>/resourceGroups/rg-identity-aadds-globaris-poc/providers/Microsoft.AAD/domainServices/aadds-globaris-poc`
+   (wait for completion before the next apply).
+5. RBAC check (verified): exemption writes need `Microsoft.Authorization/policyExemptions/write`; the
+   CI SP holds Owner at the org root MG (verified live 2026-07-08 sweep) which covers it at the RG.
+6. Expected next plan: 5 to add (exemption, 2x time_sleep, domain, geo_block CA policy), 0 change,
+   0 destroy. 7 of 8 CA policies already exist after run 4.
+
+**Alternatives considered:**
+- `policy_assignments_to_modify` -> `enforcementMode = DoNotEnforce` for `Deny-Public-IP` at the identity
+  MG (ADR-026 precedent) - rejected: disables public-IP denial for the ENTIRE identity subscription to
+  admit one service-managed PIP in one RG; also couples the identity deploy to a management-groups
+  re-apply. ADR-026 used this lever because the DDoS Modify policy was broken tenant-wide by a
+  placeholder parameter; here the policy is correct and should stay live.
+- Parameter-modify `listOfResourceTypesNotAllowed` (drop publicIPAddresses) - rejected: functionally
+  disables the assignment at the whole MG, worse than DoNotEnforce for observability (compliance still
+  reports green), same blast radius problem.
+- `notScopes` on the assignment - rejected: same effect as an exemption but managed in the
+  management-groups root, invisible to compliance reporting (exemptions are first-class, auditable
+  objects with category and expiry; notScopes are not), and Azure Policy documentation positions
+  exemptions as the purpose-built mechanism for exactly this.
+- Do nothing / retry - rejected: Deny is caller-independent and the PIP is mandatory; the failure is
+  deterministic, proven by 1 failed provisioning cycle.
+
+**Consequences:**
+- Positive: unblocks the Entra DS create; the deny stays enforced across the identity MG; the exemption
+  is IaC-managed, auditable, and scoped to the one RG that structurally requires it; the time provider
+  pattern also fixes the named-location race for greenfield deploys.
+- Negative / trade-offs: everything in `rg-identity-aadds-globaris-poc` (currently the domain + the
+  identity RSV) is exempt from Deny-Public-IP; acceptable - the RG is dedicated and the RSV creates no
+  PIPs. Two 5-minute sleeps on fresh creates. The literal policy-assignment ID string couples
+  platform/identity to the ALZ assignment name `Deny-Public-IP`; if the ALZ library renames it, the
+  exemption dangles (documented in the code comment).
+- Follow-ups required: (1) operator deletes the failed domain shell BEFORE the next apply (step 4);
+  (2) after the domain reaches Running, REMOVE the two directory roles (Application Administrator +
+  Groups Administrator) from the CI SP - standing mandatory follow-up from the 2026-07-08 session;
+  (3) the failed `Deploy-Diag-LogsCat` DINE deployment (aad-domainservices diagnostics to the platform
+  LAW) is follow-on noise from the failed domain - it should self-heal on the next compliance/
+  remediation cycle once the domain exists; verify the diagnostic setting exists within ~24h of the
+  domain reaching Running, else trigger `az policy remediation create` on that assignment;
+  (4) pre-clearance doc for platform/identity (docs/preclearance/platform-identity.md) carries the full
+  re-apply runbook.
+
 ### ADR-027: Migrate subscription cost exports to azapi with a system-assigned managed identity (keyless destination SA)
 
 - **Date:** 2026-07-08
