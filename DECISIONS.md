@@ -115,8 +115,15 @@ the identity MG, including `rg-identity-network-globaris-poc`.
    managed-domain deployment is delete and redeploy. Command shape:
    `az resource delete --ids /subscriptions/<identity-sub>/resourceGroups/rg-identity-aadds-globaris-poc/providers/Microsoft.AAD/domainServices/aadds-globaris-poc`
    (wait for completion before the next apply).
-5. RBAC check (verified): exemption writes need `Microsoft.Authorization/policyExemptions/write`; the
-   CI SP holds Owner at the org root MG (verified live 2026-07-08 sweep) which covers it at the RG.
+5. RBAC check (verified live 2026-07-09, `az role assignment list`): the exemption write
+   (`Microsoft.Authorization/policyExemptions/write`) is AUTHORIZED and will not 403 at
+   `rg-identity-aadds-globaris-poc`. It is covered TWO independent ways, both inherited to the RG:
+   (a) the standing **Owner** @ managementGroups/globaris (org root MG), and (b) **Resource Policy
+   Contributor** @ managementGroups/globaris, which grants `Microsoft.Authorization/policyExemptions/*`.
+   Least-privilege note: ADR-028 does NOT depend on the broad Owner grant. Even after the OQ-008
+   Owner-at-globaris grant is eventually removed (the ADR-021 scope-down), the exemption write still
+   succeeds via Resource Policy Contributor @ globaris, which survives that scope-down by design. See
+   [OQ-008](OPEN-QUESTIONS.md) for the standing-Owner removal that is still pending.
 6. Expected next plan: 5 to add (exemption, 2x time_sleep, domain, geo_block CA policy), 0 change,
    0 destroy. 7 of 8 CA policies already exist after run 4.
 

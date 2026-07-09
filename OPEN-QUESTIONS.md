@@ -614,4 +614,36 @@ real CI `target=all` **apply** then **teardown** with the SP holding exactly thi
 add the precise missing scope, never revert to Owner. The **azuread Graph app permissions are separate ARM-vs-
 directory and unchanged** by OQ-008. Stays referenced until the live apply/destroy passes green.
 
+**UPDATE 2026-07-09 (architect) - scope-down is INCOMPLETE, standing Owner never removed. STILL OPEN.**
+A live RBAC enumeration (`az role assignment list`, assignee = the CI SP, run 2026-07-09) surfaced the
+real state versus the ADR-021 design. The verified live assignment set the CI SP holds SIMULTANEOUSLY:
+- Owner @ managementGroups/globaris (org root MG)
+- Owner @ managementGroups/connectivity
+- Owner @ managementGroups/platform
+- Resource Policy Contributor @ managementGroups/globaris
+- User Access Administrator @ managementGroups/globaris
+- Management Group Contributor @ Tenant Root Group
+- Contributor @ one landing-zone subscription + User Access Administrator @ that same subscription
+  (only one sub's direct grants were visible to the querying user; Owner @ globaris inherits Owner to all
+  subs under the hierarchy regardless).
+
+What this means: the ADR-021 scoped roles were **added ALONGSIDE**, not in **replacement of**, three
+standing **Owner** grants (globaris + connectivity + platform MGs) that were never removed. The intended
+substitution (drop broad Owner, stand up the scoped set) did NOT happen - the two sets coexist.
+**Owner @ globaris (org root MG) is nearly as broad as the Owner @ Tenant Root this item set out to
+eliminate**: full `elevateAccess`-adjacent control across the entire landing-zone hierarchy. So the real
+security win of OQ-008 is not yet realized.
+
+**Required remediation to actually realize ADR-021 (the concrete blocker keeping OQ-008 open):**
+1. Run a real CI `target=all` apply THEN teardown with the scoped set present, to prove the scoped roles
+   (MG Contributor @ tenant root, Resource Policy Contributor + UAA @ globaris, per-sub Contributor + UAA)
+   are sufficient. This is the ADR-021 validation gate.
+2. Only after that gate passes green, REMOVE the three standing Owner @ MG grants
+   (globaris + connectivity + platform).
+3. Risk of removing Owner prematurely: a mid-deploy 403 on a scope the scoped set missed. Mitigation - on
+   any 403, add the PRECISE missing action/scope, never revert to Owner.
+
+Note: ADR-028's exemption write does NOT depend on these Owner grants (it also resolves via Resource
+Policy Contributor @ globaris), so the Owner removal above does not regress ADR-028.
+
 ---

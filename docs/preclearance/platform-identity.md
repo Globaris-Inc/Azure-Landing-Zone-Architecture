@@ -28,6 +28,13 @@ NOT in Terraform state.
 - TEMP directory roles on the CI SP: Application Administrator + Groups Administrator. **Remove both after the domain reaches Running (mandatory ADR follow-up).**
 - Entra ID P2 trial active (all 8 CA policies licensed). Watch expiry (30 days from 2026-07-08 activation).
 - Microsoft.AAD RP registered (in state, `azurerm_resource_provider_registration.aad`).
+- **RBAC for the ADR-028 exemption write - CLEARED (verified live 2026-07-09, `az role assignment list`).**
+  The exemption resource needs `Microsoft.Authorization/policyExemptions/write` at
+  `rg-identity-aadds-globaris-poc`. The CI SP holds it TWO independent ways, both inherited to that RG:
+  (a) Owner @ managementGroups/globaris (org root MG), and (b) Resource Policy Contributor @
+  managementGroups/globaris (grants `Microsoft.Authorization/policyExemptions/*`). It will not 403 even
+  after the OQ-008 Owner scope-down, since Resource Policy Contributor @ globaris survives it. This
+  closes the last RBAC uncertainty for the identity re-apply.
 
 ## Known provider/service behaviors in play
 
