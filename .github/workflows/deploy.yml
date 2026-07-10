@@ -36,24 +36,53 @@ on:
           - landing-zones/online-p1
           - synthetic
       action:
-        description: "plan (dry-run, ungated) or apply (gated by the production environment)"
+        description: "plan (dry-run, ungated) | apply (gated by production) | untaint (state op, single target + resource_address)"
         type: choice
         default: plan
         options:
           - plan
           - apply
+          - untaint
+      resource_address:
+        # ADR-029 recovery. Only read by action=untaint. Terraform resource address to
+        # clear the taint marker on (e.g. azurerm_active_directory_domain_service.this[0]).
+        # Untaint is a pure state write (no Azure mutation); it stays ungated like plan.
+        # Single target only (target != all) so the address resolves in exactly one root's
+        # state. Leave blank for plan/apply.
+        description: "action=untaint only: Terraform resource address to untaint (single target). Blank otherwise."
+        type: string
+        default: ""
+        required: false
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
+  # Fail-fast guard (ADR-029). action=untaint is a PER-ROOT state write: resource_address
+  # is free-text and resolves against ONE root's state. With target=all it would fan the
+  # SAME address into every root - e.g. azurerm_mssql_server.this has no count/for_each so
+  # its address is byte-identical in corp-a1 AND corp-a2 state, and untaint (a silent state
+  # write, no confirmation) would clear the taint in BOTH. Reject it before any root job
+  # runs. Mirrors the existing single-target rule (manage_runner_ip: target != 'all'). The
+  # root jobs below ALSO disable their target=='all' branch for untaint, so this guard is
+  # the loud error and that `if` is the enforcement (defense in depth).
+  guard-untaint-target:
+    if: ${{ inputs.action == 'untaint' && inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject untaint with target=all
+        run: |
+          echo "::error::action=untaint requires a single target (target != 'all'). resource_address resolves per-root state and target=all would fan it into every root. Re-run with a specific target."
+          exit 1
+
   management-groups:
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/management-groups') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/management-groups') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/management-groups
       action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -63,11 +92,12 @@ jobs:
 
   management:
     needs: [management-groups]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/management') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/management') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/management
       action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -77,11 +107,12 @@ jobs:
 
   connectivity:
     needs: [management]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/connectivity') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/connectivity') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/connectivity
       action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -91,11 +122,12 @@ jobs:
 
   identity:
     needs: [management-groups]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/identity') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/identity') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/identity
       action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -105,11 +137,12 @@ jobs:
 
   security:
     needs: [management]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/security') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/security') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/security
       action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -119,11 +152,12 @@ jobs:
 
   corp-a1:
     needs: [connectivity, security]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a1') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'landing-zones/corp-a1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/corp-a1
       action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -133,11 +167,12 @@ jobs:
 
   corp-a2:
     needs: [connectivity, security]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a2') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'landing-zones/corp-a2') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/corp-a2
       action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -147,11 +182,12 @@ jobs:
 
   online-p1:
     needs: [connectivity, security]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/online-p1') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'landing-zones/online-p1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/online-p1
       action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -161,11 +197,12 @@ jobs:
 
   synthetic:
     needs: [corp-a1, corp-a2, online-p1]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'synthetic') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'synthetic') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: synthetic
       action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
       backend_rel: "../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target

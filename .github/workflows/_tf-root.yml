@@ -31,9 +31,18 @@ on:
         required: true
         type: string
       action:
-        description: "plan | apply | destroy"
+        description: "plan | apply | destroy | untaint"
         required: true
         type: string
+      resource_address:
+        # ADR-029 recovery. Only read by action=untaint: the Terraform resource address
+        # whose taint marker to clear (e.g. azurerm_active_directory_domain_service.this[0]).
+        # Ignored by plan/apply/destroy. Passed via env into the untaint step (never
+        # interpolated straight into a shell) to avoid run-step injection.
+        description: "action=untaint only: resource address to untaint. Empty otherwise."
+        required: false
+        type: string
+        default: ""
       backend_rel:
         description: "Relative prefix to envs/ — '../../' for most roots, '../' for synthetic"
         required: true
@@ -231,6 +240,29 @@ jobs:
         if: ${{ inputs.action == 'destroy' }}
         working-directory: ${{ inputs.root }}
         run: terraform destroy -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve
+
+      # ADR-029 recovery. `terraform untaint` clears the taint marker on ONE resource so
+      # the next apply KEEPS it (Read/refresh) instead of destroying-and-replacing it. This
+      # recovers the built-but-tainted Entra DS managed domain: the timed-out create left it
+      # in state TAINTED, which a plain apply would turn into a destructive `-/+` replace.
+      # It is a PURE STATE WRITE (no Azure API mutation), scoped to a single resource address
+      # and gated by the operator inspecting a follow-up plan before any apply. No
+      # gh_environment gate (reuses the plan-path OIDC federated credential). Reaching the
+      # firewalled state SA requires manage_runner_ip=true, so run this single-target
+      # (deploy.yml sets manage_runner_ip = target != 'all'). Init has already run above.
+      - name: Terraform Untaint (ADR-029 state recovery)
+        if: ${{ inputs.action == 'untaint' }}
+        working-directory: ${{ inputs.root }}
+        env:
+          RESOURCE_ADDRESS: ${{ inputs.resource_address }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RESOURCE_ADDRESS" ]; then
+            echo "::error::action=untaint requires a non-empty resource_address (single resource, single target)."
+            exit 1
+          fi
+          echo "Untainting '$RESOURCE_ADDRESS' in root '${{ inputs.root }}' (pure state write, no Azure mutation)."
+          terraform untaint "$RESOURCE_ADDRESS"
 
       # Always restore default_action=Deny — even if a prior step failed — so the state SA
       # never stays publicly reachable past the run. Guarded on env.SA_OPENED being set by
