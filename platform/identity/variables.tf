@@ -60,19 +60,21 @@ variable "approved_sign_in_countries" {
 variable "enable_geo_block_ca_policy" {
   description = <<-EOT
     Whether to create the CA-005 geo-block Conditional Access policy (and its
-    named-location replication wait). Default false: the policy create fails
-    persistently with Microsoft Graph error 1040 "NamedLocation ... does not
-    exist in the directory" even though the named location exists (verified live
-    via Graph), and it repeatedly blocks the whole platform/identity apply. In run
-    29068343843 the 1040 hit ~1 minute into a ~34-minute apply while the OIDC
-    token was still valid, so it is a genuine named-location reference issue, not
-    token expiry. The policy is report-only and 1 of 8 CA policies, so disabling
-    its creation loses no enforcement. Set true again once the reference bug is
-    fixed. See ADR-030 (geo_block 1040 persists post-fix; gated off pending root
-    cause).
+    named-location replication wait). Default true (OQ-023 / ADR-030 resolved):
+    the prior Microsoft Graph error 1040 "NamedLocation ... does not exist in
+    the directory" was caused by referencing azuread_named_location.id, which
+    the azuread v3.9.0 provider resolves to the full Graph resource path
+    (/identity/conditionalAccess/namedLocations/<guid>), not the bare GUID that
+    conditions.locations.excluded_locations expects. Fixed by referencing the
+    provider's `object_id` attribute instead, which is documented as the bare
+    named-location object id. Confirmed against the pinned v3.9.0 provider
+    schema (terraform providers schema -json). The policy is enabled by
+    default again now that the reference bug is fixed; the 300s replication
+    wait (time_sleep.wait_named_location, ADR-028) remains in place to cover
+    genuine Graph replication lag on greenfield deployments.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "break_glass_group_object_id" {
