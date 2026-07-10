@@ -7,8 +7,9 @@
 #     subscription via the azurerm.connectivity alias.
 #   - VNet link registers the corp-a2 (DR) spoke VNet with the SQL zone.
 #   - DNS zone group on the corp-a2 SQL private endpoint resolves private FQDNs.
-#   - VNet flow log (whole spoke VNet) flows to the platform LA workspace
-#     (Traffic Analytics); replaces the retired NSG flow log.
+#   - VNet flow log (whole spoke VNet) delivers raw logs to a centralus storage
+#     account; replaces the retired NSG flow log. Traffic Analytics is disabled
+#     on this DR spoke (no region-matched LAW - see the flow log resource note).
 #
 # NOTE: corp-a2 is in centralus (secondary region). The Network Watcher and
 # storage account are created in centralus.
@@ -80,10 +81,13 @@ data "azurerm_network_watcher" "secondary" {
 }
 
 # ---------------------------------------------------------------------------
-# VNet flow log - corp-a2 spoke VNet -> platform Log Analytics (Traffic Analytics)
-# Migrated from an NSG flow log: Azure retired new NSG flow log creation on
-# June 30, 2025. target_resource_id points at the spoke VNet (whole-VNet coverage);
-# it replaces the removed network_security_group_id argument.
+# VNet flow log - corp-a2 spoke VNet -> flow-log storage account (raw logs).
+# Traffic Analytics is DISABLED on this DR (centralus) spoke - it needs a
+# region-matched Log Analytics workspace and the only LAW is in eastus2
+# (InvalidTAWorkspaceRegion); see the resource comment below. Migrated from an
+# NSG flow log: Azure retired new NSG flow log creation on June 30, 2025.
+# target_resource_id points at the spoke VNet (whole-VNet coverage); it replaces
+# the removed network_security_group_id argument.
 # ---------------------------------------------------------------------------
 
 resource "azurerm_network_watcher_flow_log" "spoke" {
@@ -100,13 +104,16 @@ resource "azurerm_network_watcher_flow_log" "spoke" {
     days    = var.flow_log_retention_days
   }
 
-  traffic_analytics {
-    enabled               = true
-    workspace_id          = var.platform_law_customer_id
-    workspace_region      = var.secondary_location
-    workspace_resource_id = var.platform_law_workspace_id
-    interval_in_minutes   = 10
-  }
+  # Traffic Analytics is intentionally DISABLED on the corp-a2 DR (centralus)
+  # spoke. TA requires the flow log and its Log Analytics workspace to be
+  # region-matched (or a supported pairing); the only platform LAW is in
+  # eastus2, and there is no centralus LAW. Enabling TA here returns
+  # 400 InvalidTAWorkspaceRegion (workspace located in eastus2, flow log in
+  # centralus). The flow log still delivers raw logs to
+  # azurerm_storage_account.flow_logs; only the TA enrichment is dropped.
+  # Re-enable the traffic_analytics block if a centralus LAW is provisioned.
+  # traffic_analytics is an optional block in the azurerm 4.71
+  # azurerm_network_watcher_flow_log schema, so omitting it is valid.
 
   tags = local.common_tags
 }
