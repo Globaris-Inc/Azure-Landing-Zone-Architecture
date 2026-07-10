@@ -37,6 +37,70 @@
 
 <!-- Newest at the top. -->
 
+### ADR-030: Gate the geo_block Conditional Access policy off by default - Graph 1040 named-location reference failure persists after the ADR-029 fixes
+
+- **Date:** 2026-07-10
+- **Section:** 5 (azuread Conditional Access) / 8 (Identity)
+- **Status:** Accepted. Amends the geo_block prediction in ADR-029 Part C (proven wrong - see Context).
+- **Decision makers:** user, claude (architect)
+
+**Context:**
+ADR-029 Part C predicted geo_block would succeed on the recovery apply for two independent reasons: (1) the
+post-import apply is short, so the OIDC client assertion stays valid; (2) the approved_countries named
+location is days old, so error 1040 could not be propagation lag. **That prediction was WRONG.**
+
+Evidence gathered this session (all verified):
+- In deploy run 29068343843 (the recovery apply, ~34 min total), `azuread_conditional_access_policy.geo_block`
+  was attempted about 1 minute into the apply - the OIDC token was unambiguously valid at that point - and
+  still failed with Graph `400 / 1040 "NamedLocation ... does not exist in the directory."` So the cause is
+  NOT token expiry. (ADR-029 conflated two failure modes: run 5's trailing-op failure was AADSTS700024 token
+  expiry, but the 1040 itself is a separate, reproducible reference failure.) This is roughly the 5th
+  recurrence of 1040 on geo_block.
+- The named location DOES exist and is readable: a live Graph GET on its object id (created 2026-07-08)
+  returns the object, yet the conditionalAccessPolicies create endpoint reports it does not exist. So this is
+  neither "location missing" nor simple replication lag on a fresh object.
+- Leading (unproven) hypothesis for a future root-cause pass: the policy references the named location by its
+  full resource path (`/identity/conditionalAccess/namedLocations/<id>`) where the CA policy store expects the
+  bare object id (or vice versa); OR a Graph CA-store consistency issue distinct from ordinary propagation.
+  Secondary data-quality smell: the named location displayName came back with a replacement character where an
+  em dash was likely intended - worth checking during diagnosis.
+
+**Decision:**
+Gate `azuread_conditional_access_policy.geo_block` behind a new `var.enable_geo_block_ca_policy`
+(default `false`), so the identity root applies green with **7 of 8** CA policies. `time_sleep.wait_named_location`
+(ADR-028) is gated on the same variable - it exists only to serialise geo_block behind the named location.
+`azuread_named_location.approved_countries` STAYS created unconditionally: it is harmless, intended geo
+configuration and is the object a re-enabled geo_block will reference. Re-enable by setting
+`enable_geo_block_ca_policy = true` once the reference bug is root-caused.
+
+Justification: **no enforcement or posture is lost by deferring geo_block.** All 8 CA policies in this POC are
+report-only (they enforce nothing), and geo_block is 1 of 8. Deferring its CREATION while its named location
+stays in place costs nothing operationally and unblocks a green identity apply, which the 4-fail bar makes the
+priority. This is a scoped defer plus a bounded diagnosis follow-up, explicitly NOT another blind retry.
+
+**Alternatives considered:**
+- Keep retrying geo_block as-is - rejected: 5 identical 1040 failures make a 6th deterministic, and it keeps
+  the whole identity root red for one report-only policy.
+- Blind-add more `time_sleep` / propagation wait - rejected: the location is days old and a live GET resolves
+  it, so this is not propagation; more sleep cannot fix a reference-format or CA-store-consistency bug.
+- Speculatively switch geo_block's named-location reference (bare id vs full path) in this pass - rejected as
+  premature: the correct reference form is exactly what the diagnosis pass must establish; changing it blind
+  risks a 6th failure and burns the failure budget. Park it as the hypothesis to test (OQ-023).
+- Delete and recreate the named location - rejected: it resolves on GET, so recreating it is unlikely to
+  change the create-endpoint behaviour and only adds churn.
+
+**Consequences:**
+- Positive: identity root applies green (7/8 CA policies, all report-only); no posture lost; the named
+  location stays in place so re-enabling is a one-variable flip; the failure is captured as a bounded
+  diagnosis task, not carried as silent debt.
+- Negative / trade-offs: geo_block does not exist in the directory until the reference bug is root-caused and
+  the variable is flipped; the "8 CA policies" story is 7/8 until then (documented). A default-false feature
+  flag now lives in the identity root.
+- Follow-ups required: (1) **OQ-023** tracks the bounded named-location-reference diagnosis (test the
+  full-path-vs-bare-id hypothesis and the CA-store-consistency angle; check the displayName
+  replacement-character smell) and the re-enable via `enable_geo_block_ca_policy = true`; (2)
+  `docs/preclearance/platform-identity.md` records geo_block as deferred (post-recovery addendum).
+
 ### ADR-029: Entra DS recovery - restore the default NSG inbound rules (AADDS104 fix), config-driven import of the built-but-unstated managed domain, and OIDC-token-expiry-on-long-apply mitigation
 
 - **Date:** 2026-07-10
@@ -200,6 +264,44 @@ both of which the CI-only rule forbids.
   SP after the domain is healthy; (4) OQ-022 tracks the durable greenfield token-expiry fix (root split or CI
   re-auth); (5) OQ-021 (unwired Deploy-Diag-LogsCat LAW parameter) and OQ-008 (standing Owner removal) are
   unchanged by this ADR.
+
+**Addendum (2026-07-10, post-recovery-apply run 29068343843) - what actually happened vs the plan above.**
+The core diagnosis held: the AADDS104 NSG deny-all was the root cause, and removing it healed the domain (the
+2nd DC IP appeared). But three mechanisms played out differently in execution. Recorded here for accuracy; the
+decision above is not rewritten.
+
+1. **Recovery was `terraform untaint`, NOT the config-driven import.** The timed-out create did not leave the
+   domain absent from state - it left it **tainted** in state (the provider had recorded the ID, then marked
+   it tainted when the create-wait errored). Config-driven `import {}` is skipped for any resource already in
+   state, so Part B's import block was a **no-op** and the plan fell through to a destructive **REPLACE**
+   (create-new + destroy-old) of the live managed domain. The actual recovery mechanism was `terraform
+   untaint` on the domain address, run as a new **CI-only `action=untaint`** path added to `deploy.yml` /
+   `_tf-root.yml`, single-target-guarded (untaint is scoped to one resource address, never a whole root). The
+   `import {}` block and the `aadds_import_replica_set_id` variable are retained but re-scoped to the
+   **greenfield-redeploy adoption path only** (where the domain genuinely is built-but-unstated), not this
+   recovery.
+
+2. **A second ForceNew replace surfaced after untaint: `domain_configuration_type`.** Untaint cleared the
+   taint, but the next plan still proposed a ForceNew replace because `domain_configuration_type` was unset in
+   config (planned null) while Azure had defaulted it server-side to `"FullySynced"`. Fixed by pinning
+   `domain_configuration_type = "FullySynced"` in the module call (committed 305757f). General lesson:
+   `azurerm_active_directory_domain_service` has **Optional + ForceNew + not-Computed** arguments that Azure
+   fills in server-side; any such argument must be pinned explicitly in config or every plan proposes a
+   destructive replace.
+
+3. **The AADDS post-deploy DNS step was missed and had to be done manually, now wired in IaC.** A managed
+   domain requires the identity VNet's DNS servers to point at the two DC IPs, which are only knowable AFTER
+   the domain exists. Our AVM VNet module call omitted `dns_servers`, so the operator set them manually in the
+   portal to make the domain usable. This is now in IaC by passing the DC IPs through the AVM VNet module's
+   `dns_servers` input. A separate `azapi_update_resource` to set VNet DNS was rejected: the AVM VNet module
+   asserts `dhcpOptions = null` and would fight an out-of-band update, causing perpetual drift. Checklist gap
+   recorded: **"AADDS post-deploy: identity VNet DNS -> DC IPs"** is now a required step in the identity
+   pre-clearance / runbook.
+
+Net: the domain is healthy and in clean steady state (untaint + FullySynced pin + DNS-in-IaC), and the NSG
+diagnosis in the decision above stands. Only the recovery MECHANISM (untaint, not import) and the two
+follow-on ForceNew / DNS details differed from the plan. geo_block, which Part C predicted would now succeed,
+did NOT - see **ADR-030**.
 
 ### ADR-028: Resource-group-scoped policy exemption for Entra Domain Services vs the ALZ Deny-Public-IP assignment at the Identity MG
 

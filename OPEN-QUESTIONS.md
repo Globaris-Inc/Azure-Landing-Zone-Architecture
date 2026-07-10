@@ -31,6 +31,39 @@
 
 <!-- Newest at the top. -->
 
+### OQ-023: Root-cause the geo_block Conditional Access 1040 named-location reference failure (bounded diagnosis, then re-enable)
+
+- **Raised:** 2026-07-10 (identity recovery apply run 29068343843, architect, ADR-030)
+- **Section:** 5 (azuread Conditional Access) / 8 (Identity)
+- **Blocking:** No - ADR-030 gates geo_block off by default (`enable_geo_block_ca_policy = false`); the
+  identity root applies green with 7 of 8 report-only CA policies. geo_block enforces nothing, so nothing is
+  blocked operationally.
+- **Priority:** Medium
+
+**Question:**
+`azuread_conditional_access_policy.geo_block` has failed Graph `400 / 1040 "NamedLocation ... does not exist"`
+roughly 5 times, most recently ~1 minute into run 29068343843 with a valid OIDC token (so NOT the ADR-029
+token-expiry cause). The approved_countries named location exists and resolves on a live Graph GET (created
+2026-07-08), yet the CA-policy create endpoint says it does not exist. What is the actual cause, and what is
+the correct fix to re-enable geo_block?
+
+**Options being considered:**
+- A: **Reference-format bug** - the policy passes the named location by full resource path
+  (`/identity/conditionalAccess/namedLocations/<id>`) where the CA store expects the bare object id (or vice
+  versa). Test by inspecting the exact request body azuread emits and comparing to the Graph
+  conditionalAccessPolicies schema. Likeliest and cheapest to confirm.
+- B: **Graph CA-store consistency issue** distinct from ordinary propagation - the location is visible via the
+  namedLocations endpoint but not yet consistent in the CA-policy store's view. Test by creating the same
+  policy via raw Graph / portal and observing whether it also 1040s.
+- C: **Data-quality defect on the named location** - its displayName returned with a replacement character
+  (where an em dash was likely intended). Long shot; re-create the location with a clean ASCII displayName and
+  retry.
+
+**Recommendation:** Run a single **bounded** diagnosis pass in order A -> C -> B (cheapest / likeliest first),
+NOT another blind apply retry. Once the cause is confirmed and the fix is known, flip
+`enable_geo_block_ca_policy = true` and verify geo_block creates on one apply. Do not spend more than one
+focused pass here - geo_block is 1 of 8 report-only policies and nothing depends on it.
+
 ### OQ-022: Durable greenfield fix for OIDC token expiry on the identity root's long (1-3h) AADDS create - split the root, or add CI job-level re-auth?
 
 - **Raised:** 2026-07-10 (identity apply run 29055619749 recovery, architect, ADR-029 Part C)

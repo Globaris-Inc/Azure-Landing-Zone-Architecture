@@ -95,3 +95,35 @@ Sequencing note: NSG fix and the import block MUST ship together. An NSG-only ap
 still-unstated domain and fail the requires-import guard. Import has no create-wait, so it succeeds even
 while the 2nd DC is still healing; the heal completes asynchronously afterward (benign computed update).
 Healing before import is not achievable without a local import or -target, both forbidden by the CI-only rule.
+
+## ADDENDUM - post-recovery outcome (run 29068343843, 2026-07-10)
+
+The recovery apply completed (~34 min, domain healthy). The NSG root-cause analysis above was correct, but
+the recovery MECHANISM differed from the import-based plan. This addendum records the REAL sequence and
+supersedes the ordered actions above where they conflict. Governing decisions: ADR-029 addendum + ADR-030.
+
+Real sequence that green-lit the domain (untaint -> plan-gate -> apply -> DNS-in-IaC -> geo_block deferred):
+1. **NSG:** `Deny-All-Inbound` @4000 removed (as planned) - AADDS104 cleared, the 2nd DC IP appeared.
+2. **Recovery was `terraform untaint`, NOT config-driven import.** The timed-out create left the domain
+   **tainted** in state (not absent), and `import {}` is skipped for in-state resources, so the import block
+   was a no-op and the plan fell through to a destructive REPLACE. Used a new CI-only `action=untaint`
+   (`deploy.yml` / `_tf-root.yml`, single-target-guarded). The import block + `aadds_import_replica_set_id`
+   variable are retained for the greenfield-redeploy adoption path only.
+3. **Plan-gate:** after untaint, a second ForceNew replace surfaced - `domain_configuration_type` unset in
+   config (null) vs Azure default `"FullySynced"`. Fixed by pinning `domain_configuration_type = "FullySynced"`
+   (305757f). The plan gate MUST confirm 0 destroy on the domain before apply.
+4. **Apply:** short, OIDC token valid throughout.
+5. **AADDS post-deploy DNS (NEW checklist item, was missed):** the identity VNet DNS servers must point at the
+   DC IPs (known only after the domain exists). Initially set manually in the portal; now wired in IaC via the
+   AVM VNet module `dns_servers` input. An out-of-band `azapi_update_resource` was rejected - the module
+   asserts `dhcpOptions = null` and would fight it (perpetual drift).
+6. **geo_block: DEFERRED, not created.** It failed Graph 1040 again ~1 min into the apply with a VALID token,
+   so it is a genuine named-location reference bug, not token expiry. Gated off via
+   `enable_geo_block_ca_policy = false` (ADR-030). 7 of 8 report-only CA policies applied green. Diagnosis
+   tracked in **OQ-023**.
+
+Identity pre-clearance checklist gap now closed: **"AADDS post-deploy: identity VNet DNS -> DC IPs (via the
+AVM VNet module `dns_servers` input)"** is a required post-deploy step for any greenfield identity redeploy.
+
+Steady state: a subsequent CI plan shows 0 changes on the domain (untaint + FullySynced pin + DNS-in-IaC),
+confirming clean state and that the token-expiry exposure is closed for the POC.
