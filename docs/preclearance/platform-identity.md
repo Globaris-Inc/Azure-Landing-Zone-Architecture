@@ -19,7 +19,7 @@ NOT in Terraform state.
 | `Deny-Subnet-Without-Nsg` | identity MG | Deny / Default | Subnet PUTs | PASS: the Entra DS subnet already exists with its NSG (created run 1) |
 | `Deny-MgmtPorts-Internet` | identity MG | Deny / Default | NSG rules allowing mgmt ports from Internet | PASS: AADDS NSG rules use service tags, proven in run 1 |
 | `Deploy-VM-Backup` | identity MG | DINE / Default | VMs | N/A (no VMs) |
-| `Deploy-Diag-LogsCat` | globaris MG | DINE / Default | aad-domainservices diagnostics to platform LAW | Noise: the failed DINE from run 4 was follow-on from the failed domain. Self-heals on the next compliance cycle once the domain is Running; verify within ~24h, else `az policy remediation create` |
+| `Deploy-Diag-LogsCat` | globaris MG | DINE / Default | aad-domainservices diagnostics to platform LAW | **Does NOT self-heal (correction).** Verified 2026-07-09 (run 29055619749): the DINE fails with `LinkedAuthorizationFailed` because the assignment's central LAW parameter is unwired - the workspace resource ID resolves to the zero-GUID subscription `00000000-...`. Structural defect, fails for EVERY targeted resource tenant-wide, not just AADDS. `az policy remediation create` would re-fail. Does NOT block the identity apply. Fix = wire the real platform LAW resource ID into the assignment in `platform/management-groups`. Tracked in **OQ-021**. |
 
 ## Tenant / directory prerequisites (all verified in place 2026-07-08 sessions)
 
@@ -54,5 +54,7 @@ NOT in Terraform state.
    and waits for completion (verify with `az resource list -g rg-identity-aadds-globaris-poc`).
 3. CI plan: expect 5 to add (exemption, 2 sleeps, domain, geo_block), 0 change, 0 destroy.
 4. CI apply.
-5. Post-apply: domain reaches Running -> remove the 2 temp directory roles; verify the
-   aad-domainservices diagnostic setting exists (~24h) or remediate.
+5. Post-apply: domain reaches Running -> remove the 2 temp directory roles. Note: the
+   aad-domainservices diagnostic setting will NOT appear via auto-remediation - `Deploy-Diag-LogsCat`
+   fails structurally on its unwired LAW parameter (see the policy-collisions table and OQ-021).
+   Do not wait on it here; fix is a separate `platform/management-groups` change.

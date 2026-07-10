@@ -31,6 +31,61 @@
 
 <!-- Newest at the top. -->
 
+### OQ-021: ALZ diagnostic-settings DINE (`Deploy-Diag-LogsCat`) fails - its central Log Analytics workspace parameter is unwired (resolves to the zero-GUID subscription)
+
+- **Raised:** 2026-07-09 (identity apply run 29055619749 remediation failure, architect)
+- **Section:** 2 - Management Group Hierarchy (MG policy) / cross-cutting observability
+- **Blocking:** No - does not block any apply. It is a policy auto-remediation (DINE); the Entra DS
+  managed domain reached Running and the platform/identity Terraform apply are both unaffected.
+- **Priority:** Medium
+
+**Question:**
+The ALZ `Deploy-Diag-LogsCat` DeployIfNotExists policy (assigned at the globaris/platform MG scope by
+`platform/management-groups` via avm-ptn-alz) is failing every auto-remediation. When the new Entra DS
+managed domain appeared, the policy tried to deploy a diagnostic setting routing the domain's logs to a
+central Log Analytics workspace and the deployment failed. Verified evidence (az deployment operation
+detail, 2026-07-09) on the `PolicyDeployment_...` deployment in the identity subscription's AADDS resource
+group (`rg-identity-aadds-globaris-poc`):
+- **code:** `LinkedAuthorizationFailed`
+- **target:** `microsoft.aad/domainservices/providers/diagnosticSettings`
+- **message:** the client had permission to write the diagnostic setting `setByPolicy-LogAnalytics` on the
+  domain, "however the linked subscription '00000000-0000-0000-0000-000000000000' was not found."
+
+This is NOT scoped to AADDS. Because the failure is at the policy-ASSIGNMENT parameter level (an empty
+workspace resource ID that resolves to the all-zeros subscription), this DINE fails IDENTICALLY for every
+resource it targets tenant-wide, not just the managed domain. How do we wire the real central workspace?
+
+**Root cause:**
+The avm-ptn-alz policy assignment for diagnostic-settings-to-LAW was deployed WITHOUT its `logAnalytics`
+(workspace resource ID) parameter set to the real platform LAW. The deployed diagnostic setting's workspace
+resource ID therefore resolves to the zero-GUID subscription `00000000-...`, which does not exist - hence
+`LinkedAuthorizationFailed`. The platform LAW itself exists (its workspace/customer IDs were captured as
+repo Secrets after the management apply); it is the POLICY ASSIGNMENT parameter in
+`platform/management-groups` that was never wired to that workspace's resource ID.
+
+**Correction of an earlier disposition:** prior docs (docs/preclearance/platform-identity.md and ADR-028
+follow-up 3) claimed this DINE was "noise" that would "self-heal on the next compliance cycle once the
+domain is Running." That is WRONG. It is a structural unwired-parameter defect, not a transient follow-on of
+the earlier failed domain create. It will keep failing until the assignment's workspace parameter is
+populated with the real platform LAW resource ID; `az policy remediation create` would also re-fail. It
+needs a real fix, not a wait.
+
+**Options being considered:**
+- A (recommended): Wire the platform LAW resource ID into the ALZ diagnostic-settings policy assignment's
+  parameter via avm-ptn-alz `policy_default_values` / the alz library assignment parameters in
+  `platform/management-groups`, then re-apply that root and run `az policy remediation create` to clear the
+  remediation backlog. Restores central diagnostics with the governance signal intact.
+- B: Disable or adjust the `Deploy-Diag-LogsCat` assignment if central diagnostics are out of POC scope.
+  Weaker - loses the governance/observability signal that logs are being routed centrally.
+
+**Lane:** this is a `platform/management-groups` change (DevSecOps/policy to shape the assignment
+parameter, cloud-engineer to wire the module input). It is SEPARATE from and does not block the identity
+re-apply - track and fix it on its own.
+
+**Consequence of leaving it:** the managed domain's and other targeted resources' diagnostic logs do not
+ship to the central platform LAW until the parameter is wired. This is an observability gap, not a
+security or availability one.
+
 ### OQ-020: Can Cost Management exports write to the keyless cost-exports SA?
 
 - **Raised:** 2026-07-07 (cost-exports refresh-403 fix, cloud-engineer)

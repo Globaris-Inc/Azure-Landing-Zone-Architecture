@@ -155,10 +155,14 @@ the identity MG, including `rg-identity-network-globaris-poc`.
 - Follow-ups required: (1) operator deletes the failed domain shell BEFORE the next apply (step 4);
   (2) after the domain reaches Running, REMOVE the two directory roles (Application Administrator +
   Groups Administrator) from the CI SP - standing mandatory follow-up from the 2026-07-08 session;
-  (3) the failed `Deploy-Diag-LogsCat` DINE deployment (aad-domainservices diagnostics to the platform
-  LAW) is follow-on noise from the failed domain - it should self-heal on the next compliance/
-  remediation cycle once the domain exists; verify the diagnostic setting exists within ~24h of the
-  domain reaching Running, else trigger `az policy remediation create` on that assignment;
+  (3) **Correction (2026-07-09, run 29055619749):** the failed `Deploy-Diag-LogsCat` DINE deployment
+  (aad-domainservices diagnostics to the platform LAW) is NOT follow-on noise from the failed domain and
+  does NOT self-heal. Verified root cause: the assignment's central Log Analytics workspace parameter is
+  unwired, so the diagnostic setting's workspace resource ID resolves to the zero-GUID subscription
+  `00000000-...` and the deploy fails with `LinkedAuthorizationFailed`. This fails for every resource the
+  policy targets tenant-wide, not just AADDS; `az policy remediation create` would re-fail. It needs a real
+  fix - wire the platform LAW resource ID into the assignment in `platform/management-groups` - not a wait.
+  Tracked in [OQ-021](OPEN-QUESTIONS.md). It does not block the identity apply;
   (4) pre-clearance doc for platform/identity (docs/preclearance/platform-identity.md) carries the full
   re-apply runbook.
 
