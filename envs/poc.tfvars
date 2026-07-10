@@ -85,11 +85,11 @@ identity_domain_name = "aadds.globaris.org"
 # (10.10/16, 10.11/16, 10.20/16). Entra DS subnet is carved from this.
 identity_vnet_address_space = "10.2.0.0/24"
 
-# AADDS domain-controller IPs the identity VNet uses for DNS (mandatory AADDS
-# post-deploy step - ADR-029). Order matches the live portal value the operator
-# set to heal the domain, so the first apply aligns state with no Azure change and
-# steady-state re-plans are 0 changes. Private RFC-1918 IPs, safe to commit.
-identity_vnet_dns_servers = ["10.2.0.5", "10.2.0.4"]
+# AADDS DC IPs the identity VNet uses for DNS are now DERIVED from the AADDS subnet
+# CIDR (cidrhost offsets 4/5 of local.snet_entra_ds - ADR-029), so no static value is
+# set here: greenfield gets the self-adjusting default. Leaving identity_vnet_dns_servers
+# unset (empty list) selects the derived pair; set it to a non-empty list only to
+# override. For 10.2.0.0/24 the derivation yields sort(10.2.0.4, 10.2.0.5).
 
 # Hub peering targets for the identity VNet. Populate from platform/connectivity
 # outputs after that module is applied (same values the corp-a1 spoke consumes).

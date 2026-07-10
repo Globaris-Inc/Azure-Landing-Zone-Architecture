@@ -1,5 +1,5 @@
 # Purpose: Identity subscription network plane — resource groups, identity VNet
-#          (with static AADDS DC IPs as its DNS servers), Entra DS subnet + NSG
+#          (DNS servers derived from the AADDS subnet CIDR), Entra DS subnet + NSG
 #          (Microsoft-mandated rules), and bidirectional peering to the primary
 #          hub. (Section 8 — G1 / Gap-Closure Wave 3 / ADR-010, ADR-029)
 # Section: 8 — Standard Platform Components (Identity subscription)
@@ -37,8 +37,30 @@ locals {
 
   # Entra DS lives in a dedicated subnet. Microsoft recommends a small dedicated
   # subnet with no NSG-blocking of the managed inbound flows. /27 carved from the
-  # identity VNet space (default 10.2.0.0/24 → 10.2.0.0/27).
+  # identity VNet space (default 10.2.0.0/24 → 10.2.0.0/27). This CIDR is also the
+  # source of truth for the AADDS DC DNS IPs below.
   snet_entra_ds = cidrsubnet(var.identity_vnet_address_space, 3, 0)
+
+  # Identity VNet DNS servers (ADR-029). When entra-ds is the identity mode, these are
+  # DERIVED from the AADDS subnet CIDR (local.snet_entra_ds) rather than hardcoded:
+  # Entra DS places its two managed domain controllers on the first two usable host
+  # addresses of the DS subnet. Azure reserves the first four addresses of any subnet
+  # (.0 network, .1-.3 gateway/DNS/reserved), so the DCs land on host offsets 4 and 5 -
+  # e.g. for 10.2.0.0/27 that is 10.2.0.4 and 10.2.0.5. sort() gives a deterministic
+  # ascending order so the value is stable across plans, and the wiring self-adjusts if
+  # the VNet/subnet address space ever changes. The derivation reads ONLY static inputs
+  # (the subnet CIDR + the static gate local), never a domain output, so there is no
+  # VNet -> domain -> VNet dependency cycle. The derived fallback is gated on
+  # local.entra_ds_enabled: for any other identity mode (e.g. the ad-ds stub) there are
+  # no managed DCs at .4/.5, so we fall back to an empty list -> module dns_servers = null
+  # -> Azure-default DNS. An operator can still override via var.identity_vnet_dns_servers
+  # in ANY mode: a non-empty list always wins.
+  identity_vnet_dns_servers = length(var.identity_vnet_dns_servers) > 0 ? var.identity_vnet_dns_servers : (
+    local.entra_ds_enabled ? sort([
+      cidrhost(local.snet_entra_ds, 4),
+      cidrhost(local.snet_entra_ds, 5),
+    ]) : []
+  )
 }
 
 # ---------------------------------------------------------------------------
@@ -155,17 +177,19 @@ module "identity_vnet" {
   # managed domain and it appears broken (a MANDATORY AADDS post-deploy step - MS
   # Learn: entra/identity/domain-services, "Update DNS settings for the Azure
   # virtual network"). ADR-029: we feed these through the module's OWN dns_servers
-  # input (STATIC values from tfvars, NOT a reference to the domain output) so there
-  # is NO VNet -> domain -> VNet dependency cycle. Because the module now writes real
-  # dhcpOptions.dnsServers into its VNet body, there is a single writer of this field
-  # - no second resource re-asserting an explicit `dhcpOptions: null` to fight it
-  # (azapi ignore_null_property defaults false, so passing null here would re-null
-  # the field every apply and revert DNS to default). The operator already set these
-  # same IPs live via the portal, so the first apply aligns state with no functional
-  # Azure change and steady-state re-plans show 0 changes. IP order matches the live
-  # portal order (envs/poc.tfvars) to avoid a reorder diff.
-  dns_servers = length(var.identity_vnet_dns_servers) > 0 ? {
-    dns_servers = var.identity_vnet_dns_servers
+  # input, and the value comes from local.identity_vnet_dns_servers which is DERIVED
+  # from the AADDS subnet CIDR (cidrhost offsets 4/5 of local.snet_entra_ds), NOT a
+  # reference to the domain output - so there is NO VNet -> domain -> VNet dependency
+  # cycle. Because the module writes real dhcpOptions.dnsServers into its VNet body,
+  # there is a single writer of this field - no second resource re-asserting an
+  # explicit `dhcpOptions: null` to fight it (azapi ignore_null_property defaults
+  # false, so passing null here would re-null the field every apply and revert DNS to
+  # default). The live/state order is descending (10.2.0.5, 10.2.0.4) whereas sort()
+  # yields ascending (10.2.0.4, 10.2.0.5), so the next apply produces a ONE-TIME
+  # cosmetic in-place reorder of dnsServers, then 0 changes forever after. DNS
+  # resolver order is not functionally significant here so this is acceptable.
+  dns_servers = length(local.identity_vnet_dns_servers) > 0 ? {
+    dns_servers = local.identity_vnet_dns_servers
   } : null
 
   subnets = {

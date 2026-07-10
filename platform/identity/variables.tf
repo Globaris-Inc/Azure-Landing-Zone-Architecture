@@ -174,13 +174,18 @@ variable "identity_vnet_address_space" {
 
 variable "identity_vnet_dns_servers" {
   description = <<-EOT
-    The AADDS domain-controller IPs that the identity VNet must use as its DNS
-    servers. Pointing the VNet DNS at the managed domain's DCs is a mandatory AADDS
-    post-deploy step; without it clients on the VNet cannot locate the domain
-    (ADR-029). Set these to the managed domain's two DC IPs, in the order Azure
-    stores them, to avoid a reorder diff. Empty list leaves the VNet on Azure-default
-    DNS (dns_servers passed as null to the VNet module). These are private RFC-1918
-    IPs, safe to commit in tfvars.
+    OPTIONAL override for the identity VNet's DNS servers. Pointing the VNet DNS at
+    the managed domain's two DC IPs is a mandatory AADDS post-deploy step; without it
+    clients on the VNet cannot locate the domain (ADR-029). By DEFAULT (empty list)
+    this is NOT needed when identity_mode = "entra-ds": the module derives the DNS
+    servers from the AADDS subnet CIDR (local.snet_entra_ds) as cidrhost offsets 4 and
+    5 - the first two usable host addresses of the DS subnet, where Entra DS places its
+    two domain controllers (Azure reserves the first four addresses of any subnet). In
+    any OTHER identity mode (e.g. the ad-ds stub, with no managed DCs) the derived
+    fallback is skipped and the VNet stays on Azure-default DNS. Set this only to force
+    a specific pair - a non-empty list always wins over the derived default, in every
+    mode; use the order Azure stores them to avoid a reorder diff. Private RFC-1918
+    IPs, safe to commit.
   EOT
   type        = list(string)
   default     = []
