@@ -180,16 +180,43 @@ resource "azurerm_role_assignment" "terraform_sp_cost_exports_blob" {
 # Tag Governance — custom initiative using built-in Azure Policy definitions
 # ---------------------------------------------------------------------------
 #
-# Built-in policy IDs used (confirmed on azadvertizer.net 2026-05-12):
-#   d157c373-a6c4-483d-aaad-570756956268  "Add or replace a tag on resource groups"
+# see tag-churn fix (2026-07-10): the initiative previously used
+# "Add or replace a tag on resource groups" (d157c373) and "Inherit a tag from
+# the resource group" (cd3aa116), both of which unconditionally OVERWRITE the
+# live tag value with the static default on every apply/remediation cycle -
+# this was the root cause of tenant-wide tag churn (identity domain/NSG/RGs/
+# RSV/VNet showing perpetual 6-change drift). Both builtins are replaced below
+# with their "if missing" equivalents, which only ADD the default when the tag
+# key is absent and never touch an existing value.
+#
+# Built-in policy IDs used (VERIFIED live via `az policy definition show`
+# 2026-07-10 - both resolve, displayName/effect/params confirmed below):
+#   726aca4c-86e9-4b04-b0c5-073027359532  "Add a tag to resource groups"
 #     Effect: Modify | Mode: All (targets resource groups)
 #     Params: tagName (string), tagValue (string)
+#     Behavior (from policyRule): adds the tag only if
+#     `[concat('tags[', tagName, ']')]` does not exist on the RG; "If the tag
+#     exists with a different value it will not be changed" (API description).
+#     Remediation role: Contributor (b24988ac-6180-42a0-ab88-20f7382dd24c),
+#     already granted below to the assignment's SystemAssigned identity.
 #
-#   cd3aa116-8754-49c9-a813-ad46512ece54  "Inherit a tag from the resource group"
+#   ea3f2387-9b95-492a-a190-fcdc54f7b070  "Inherit a tag from the resource group if missing"
 #     Effect: Modify | Mode: Indexed (targets resources, not RGs)
 #     Params: tagName (string)
+#     Behavior (from policyRule): adds the tag from the parent RG only if the
+#     resource is missing it AND the RG value is non-empty; existing resource
+#     tag values are left untouched. Same Contributor remediation role.
 #
-# DEVIATION: "Add or replace a tag on resource groups" sets a static default tagValue.
+# NOTE: a third candidate for the RG policy, "Append a tag and its value to
+# resource groups" (49c88fc8-6fd1-46fd-a676-f12d1d3a4c71), also resolved live
+# and has equivalent add-if-missing semantics, but uses the "append" effect
+# (no remediation-task support for pre-existing RGs, no identity/role needed).
+# 726aca4c was chosen instead because it uses Modify (consistent with the
+# inherit-if-missing policy below), supports remediation of RGs that already
+# exist without the tag, and reuses the same Contributor remediation identity
+# already assigned to this initiative.
+#
+# DEVIATION: "Add a tag to resource groups" sets a static default tagValue.
 # The CreatedDate default is "1970-01-01" because the Modify effect cannot use a
 # dynamic date expression. Teams should set CreatedDate manually on their RGs.
 
@@ -197,19 +224,20 @@ resource "azurerm_policy_set_definition" "tag_governance" {
   name         = "tag-governance-${var.org_prefix}"
   policy_type  = "Custom"
   display_name = "${title(var.org_prefix)} — Tag Governance Initiative"
-  description  = "Enforces 8 mandatory tags on every resource group (Modify) and propagates them to all child resources (Modify). Assigned at the Globaris root management group."
+  description  = "Adds 8 mandatory tags to every resource group when missing (Modify, if-missing) and propagates them to child resources when missing (Modify, if-missing). Never overwrites an existing tag value - see tag-churn fix. Assigned at the Globaris root management group."
 
   # DEVIATION: management_group_id is marked deprecated in azurerm ~>4.71 with no documented
   # replacement. Policy set definitions must be scoped to a management group; this attribute
   # is the only available mechanism in the current provider. Review when upgrading azurerm.
   management_group_id = local.globaris_mg_id
 
-  # For each required tag: add or replace on the resource group (Modify, RG scope).
+  # For each required tag: add to the resource group only if missing (Modify, RG scope).
+  # "Add a tag to resource groups" (726aca4c) - never overwrites an existing value.
   dynamic "policy_definition_reference" {
     for_each = local.required_tags_with_defaults
     iterator = tag
     content {
-      policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/d157c373-a6c4-483d-aaad-570756956268"
+      policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/726aca4c-86e9-4b04-b0c5-073027359532"
       reference_id         = "modify-tag-${lower(tag.key)}-on-rg"
       parameter_values = jsonencode({
         tagName  = { value = tag.key }
@@ -218,12 +246,14 @@ resource "azurerm_policy_set_definition" "tag_governance" {
     }
   }
 
-  # For each required tag: inherit from RG to resource (Modify, resource scope).
+  # For each required tag: inherit from RG to resource only if missing (Modify, resource scope).
+  # "Inherit a tag from the resource group if missing" (ea3f2387) - never overwrites
+  # an existing resource tag value.
   dynamic "policy_definition_reference" {
     for_each = local.required_tags_with_defaults
     iterator = tag
     content {
-      policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/cd3aa116-8754-49c9-a813-ad46512ece54"
+      policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/ea3f2387-9b95-492a-a190-fcdc54f7b070"
       reference_id         = "inherit-tag-${lower(tag.key)}-from-rg"
       parameter_values = jsonencode({
         tagName = { value = tag.key }
@@ -239,7 +269,7 @@ resource "azurerm_management_group_policy_assignment" "tag_governance" {
   management_group_id  = local.globaris_mg_id
   policy_definition_id = azurerm_policy_set_definition.tag_governance.id
   display_name         = "Tag Governance — All ${title(var.org_prefix)} Resources"
-  description          = "Mandatory tag governance initiative covering all 8 required tags on resource groups and resources under the Globaris hierarchy."
+  description          = "Fills in missing tags (never overwrites existing values) for all 8 required tags on resource groups and resources under the Globaris hierarchy. See tag-churn fix."
   location             = var.primary_location
 
   identity {
@@ -250,8 +280,10 @@ resource "azurerm_management_group_policy_assignment" "tag_governance" {
 }
 
 # Grant the remediation managed identity Contributor at root MG scope.
-# Contributor is required for the Modify effect to add/replace tags on resources
+# Contributor is required for the Modify effect to add missing tags to resources
 # across the entire Globaris hierarchy without per-subscription role assignments.
+# Both if-missing built-ins declare roleDefinitionIds = [Contributor] in their
+# policyRule, so this is the exact role the Modify effect requests.
 resource "azurerm_role_assignment" "tag_policy_remediation" {
   scope                = local.globaris_mg_id
   role_definition_name = "Contributor"
