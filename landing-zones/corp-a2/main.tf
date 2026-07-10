@@ -208,13 +208,27 @@ resource "azurerm_virtual_network_peering" "hub_to_spoke" {
 }
 
 # ---------------------------------------------------------------------------
-# App Service Plan (Linux B2) — mirrors corp-a1 for DR parity
+# App Service tier (Plan + Site) - mirrors corp-a1 for DR parity
 # Module: Azure/avm-res-web-serverfarm/azurerm v2.0.4
+#
+# DEVIATION (App Service tier gated off - enable_app_service = false, default):
+# The landingzones subscription's DEDICATED App Service compute quota is 0
+# (ARM ExtendedCode 70007 "Total VMs: 0, required 3", corp-a1 run 29126639533 -
+# a Microsoft.Web dedicated-compute offer cap, NOT the Microsoft.Compute quota,
+# which was confirmed fine). The App Service Plan create failed on the quota, and
+# the App Service depends on the plan, so neither entered state. The App Service
+# tier (plan + site) is gated behind var.enable_app_service so the DR spoke
+# topology stands. Pre-staged capability: set enable_app_service = true once a
+# quota increase is granted, or redesign serverless (Consumption/Flex Functions
+# or a Static Web App, as online-p1 uses). Same class as the SQL gate (enable_sql).
+# See ADR-032, DECISIONS.md, OPEN-QUESTIONS.md.
 # ---------------------------------------------------------------------------
 
 module "app_service_plan" {
   source  = "Azure/avm-res-web-serverfarm/azurerm"
   version = "2.0.4"
+
+  count = var.enable_app_service ? 1 : 0
 
   name      = "asp-corp-a2-${var.org_prefix}-${var.environment}"
   location  = var.secondary_location
@@ -239,10 +253,12 @@ module "app_service" {
   source  = "Azure/avm-res-web-site/azurerm"
   version = "0.22.0"
 
+  count = var.enable_app_service ? 1 : 0
+
   name                     = "app-corp-a2-${var.org_prefix}-${var.environment}"
   location                 = var.secondary_location
   parent_id                = azurerm_resource_group.workload.id
-  service_plan_resource_id = module.app_service_plan.resource_id
+  service_plan_resource_id = module.app_service_plan[0].resource_id
 
   virtual_network_subnet_id = module.spoke_vnet.subnets["integration"].resource_id
 

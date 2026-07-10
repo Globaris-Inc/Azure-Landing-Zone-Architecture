@@ -31,6 +31,34 @@
 
 <!-- Newest at the top. -->
 
+### OQ-026: Corp-spoke workload tier (App Service + SQL) is fully offer-capped off - for a persistent environment, request quota / relocate, or redesign to serverless?
+
+- **Raised:** 2026-07-10 (landing-zones deploy, architect)
+- **Section:** 9 (Landing Zone Spokes)
+- **Blocking:** No - both tiers are pre-staged off behind default-false flags (`enable_app_service`, ADR-032;
+  `enable_sql`, ADR-031). The corp spokes stand as network landing zones without them.
+- **Priority:** Low
+
+**Question:**
+The `landingzones` subscription is compute-restricted for dedicated / reserved resources: dedicated App
+Service (`Microsoft.Web` VM quota = 0, offer cap, ADR-032) and Azure SQL (`ProvisioningDisabled`, ADR-031) are
+both offer-capped, while serverless and PaaS-shared compute works. That gates the entire corp workload tier
+(App Service + SQL) off. For a persistent (non-teardown) environment, which path do we take?
+
+**Options being considered:**
+- A (recommended): Defer. The environment is scheduled for teardown by end of week, so the workload tier is
+  very likely moot. Revisit only if a persistent environment is stood up. The gates are default-false and
+  cross-referenced from ADR-031 and ADR-032 so they are not forgotten.
+- B: Request quota / move the landing zones to an unrestricted subscription, then flip `enable_app_service` and
+  `enable_sql` to `true` - keeps the current dedicated-SKU design; cost is the quota-request latency (often
+  slow or denied on restricted offer types) or a subscription migration.
+- C: Redesign the workload tier to serverless (Flex Consumption Functions plus serverless SQL alternatives)
+  that fits the offer - a real application redesign, only worth it for a durable environment.
+
+Consolidates the workload-tier re-enable story. OQ-025 remains the SQL-specific re-enable trigger (allowed
+region vs support exception, relocate vs wait); this OQ frames the broader App-Service-plus-SQL decision for a
+persistent environment.
+
 ### OQ-025: Re-enable trigger for the corp-spoke SQL tier - which allowed region or support exception, and relocate vs wait?
 
 - **Raised:** 2026-07-10 (landing-zones deploy, architect)

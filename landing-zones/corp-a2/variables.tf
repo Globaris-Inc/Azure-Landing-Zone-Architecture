@@ -135,6 +135,12 @@ variable "flow_log_retention_days" {
 # App Service
 # ---------------------------------------------------------------------------
 
+variable "enable_app_service" {
+  description = "Gate for the App Service tier (App Service Plan + Site). Default false: the App Service tier is gated off because the landingzones subscription's DEDICATED App Service compute quota is 0 (ARM ExtendedCode 70007 'Total VMs: 0, required 3' - a Microsoft.Web dedicated-compute offer cap, not the Microsoft.Compute quota). The plan create fails on the quota and the site depends on it, so neither can deploy. Pre-staged: set true when a quota increase is granted (or after a serverless redesign). Same class as enable_sql. See the DEVIATION note on the App Service tier in main.tf and ADR-032."
+  type        = bool
+  default     = false
+}
+
 variable "app_service_sku" {
   description = "SKU name for the App Service Plan."
   type        = string

@@ -37,6 +37,68 @@
 
 <!-- Newest at the top. -->
 
+### ADR-032: Gate the corp-spoke App Service tier off - `landingzones` subscription dedicated App Service compute quota is 0 (offer cap)
+
+- **Date:** 2026-07-10
+- **Section:** 9 (Landing Zone Spokes)
+- **Status:** Accepted.
+- **Decision makers:** user, claude (architect)
+
+**Context:**
+Deploying the corp landing-zone spokes. After the azapi-anchor and zone-balancing fixes cleared the prior
+errors, the corp-a1 apply (deploy run 29126639533) failed on `module.app_service_plan` with
+`400 Unauthorized / ExtendedCode 70007: "Operation cannot be completed without additional quota. Current
+Limit (Total VMs): 0, Amount required: 3."` Verified facts this session:
+- This is the **dedicated App Service compute quota** (provider `Microsoft.Web`, the reserved VM instances
+  behind a Basic+ App Service Plan), **not** the IaaS Compute vCPU quota. Two portal quota exports for the
+  **Compute** provider confirm the `landingzones` subscription has healthy VM/vCPU quota in East US 2 (Total
+  Regional vCPUs limit 10, VMs limit 25000, every family limit 10, 0 usage). So this is **not** a used-up
+  quota - it is an **offer cap** on dedicated App Service (Basic and above), the same class of restriction as
+  the Azure SQL `ProvisioningDisabled` in ADR-031.
+- Serverless / PaaS-shared compute is **unaffected**: Consumption / Flex Consumption Functions and Static Web
+  Apps do not draw on the dedicated App Service VM quota. online-p1's Static Web App provisions fine; it has
+  no App Service Plan.
+- The failing resources are the App Service tier only: `module.app_service_plan` (the
+  `Microsoft.Web/serverFarms` dedicated plan) and `module.app_service` (the site). The `snet-integration`
+  subnet and its `Microsoft.Web/serverFarms` delegation are topology, not compute, and are unaffected.
+
+**Decision:**
+Gate the corp App Service tier behind a new `var.enable_app_service` (bool, default `false`) in
+`landing-zones/corp-a1` and `landing-zones/corp-a2`. The flag gates `module "app_service"` and
+`module "app_service_plan"`; the App Service outputs return `null` via `one(...)` when the tier is off. The
+`snet-integration` subnet and its `Microsoft.Web/serverFarms` delegation **stay** (pre-staged topology), so
+re-enabling is a single-variable flip. Re-enable by setting `enable_app_service = true` once an unrestricted
+subscription is available or a quota/offer exception lifts the cap.
+
+Broader finding: the `landingzones` subscription is **compute-restricted for dedicated / reserved resources.**
+This ADR (dedicated App Service) and ADR-031 (Azure SQL) together establish that **both** dedicated App
+Service and SQL are offer-capped in this subscription, while **serverless and PaaS-shared** compute works. Any
+future workload tier in these spokes should assume dedicated/reserved SKUs are unavailable here.
+
+**Alternatives considered:**
+- Request a quota increase on the dedicated App Service offer - rejected: offer-cap increases on sponsored /
+  restricted subscription types are commonly slow or denied outright, which does not fit the planned
+  end-of-week teardown; the tier would stay down while the request is pending.
+- Redesign the workload tier to serverless (Flex Consumption Functions, plus serverless alternatives that fit
+  the offer) - rejected: that is a real application redesign, out of scope for a POC being torn down at the end
+  of the week. Parked in OQ-026 for a persistent environment.
+
+**Consequences:**
+- Positive: the corp spokes stand as **network landing zones** - VNet, hub peering, NSG, UDR-to-firewall,
+  Recovery Services Vault, VNet flow logs, and policy compliance/exemptions all provision. The running App
+  Service and SQL workloads (POC filler, not the landing-zone story) are the only things gated off. The
+  failure is captured as a scoped, documented gate rather than a blind retry against a capability the
+  subscription does not have.
+- Negative / trade-offs: no App Service plan or site exists in the corp spokes until an unrestricted
+  subscription or an offer exception is available and `enable_app_service` is flipped. Combined with ADR-031,
+  the corp spoke's "app + database" workload story is fully pre-staged-off; the spokes demonstrate topology and
+  governance, not a running workload. A second default-false feature flag now lives in both corp landing-zone
+  roots.
+- Follow-ups required: **OQ-026** tracks the persistent-environment path (request quota / relocate to an
+  unrestricted subscription vs redesign to serverless). Non-blocking and likely moot given the planned
+  teardown. See also **ADR-031** (the SQL half of the same offer-cap finding) and **OQ-025** (SQL re-enable
+  trigger).
+
 ### ADR-031: Gate the corp-spoke SQL tier off - Azure SQL `ProvisioningDisabled` in the `landingzones` subscription region
 
 - **Date:** 2026-07-10

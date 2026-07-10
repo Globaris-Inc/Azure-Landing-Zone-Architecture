@@ -33,13 +33,13 @@ output "monitoring_rg_name" {
 }
 
 output "app_service_default_hostname" {
-  description = "Default hostname of the corp-a1 App Service. Used as App Gateway backend target in online-p1 and for smoke-test validation."
-  value       = module.app_service.resource_uri
+  description = "Default hostname of the corp-a1 App Service. Used as App Gateway backend target in online-p1 and for smoke-test validation. Null when the App Service tier is gated off (var.enable_app_service = false)."
+  value       = one(module.app_service[*].resource_uri)
 }
 
 output "app_service_id" {
-  description = "ARM resource ID of the corp-a1 App Service."
-  value       = module.app_service.resource_id
+  description = "ARM resource ID of the corp-a1 App Service. Null when the App Service tier is gated off (var.enable_app_service = false)."
+  value       = one(module.app_service[*].resource_id)
   sensitive   = true
 }
 

@@ -33,13 +33,13 @@ output "monitoring_rg_name" {
 }
 
 output "app_service_default_hostname" {
-  description = "Default hostname of the corp-a2 (DR) App Service."
-  value       = module.app_service.resource_uri
+  description = "Default hostname of the corp-a2 (DR) App Service. Null when the App Service tier is gated off (var.enable_app_service = false)."
+  value       = one(module.app_service[*].resource_uri)
 }
 
 output "app_service_id" {
-  description = "ARM resource ID of the corp-a2 App Service."
-  value       = module.app_service.resource_id
+  description = "ARM resource ID of the corp-a2 App Service. Null when the App Service tier is gated off (var.enable_app_service = false)."
+  value       = one(module.app_service[*].resource_id)
   sensitive   = true
 }
 
