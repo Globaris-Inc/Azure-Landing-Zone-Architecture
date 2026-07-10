@@ -1,0 +1,61 @@
+# Purpose: online-p1 RG-scoped Waiver policy exemption for the corp-MG
+#          Deny-Public-Endpoints (Deny-PublicPaaSEndpoints) StorageDenyPaasPublicIP
+#          member (OQ-024, ADR-028 pattern).
+# Section: 9 - Landing Zone Spokes / 2 - policy
+# Last updated: 2026-07-10
+#
+# online-p1 sits under the corp MG (the online MG has no subscription; topology
+# mismatch parked in OQ-024). Only ONE corp-MG Deny collides with an online-p1
+# resource that cannot be made both compliant and functional:
+#   - Flow-log storage account (StorageDenyPaasPublicIP) - the policy requires
+#     publicNetworkAccess Disabled/SecuredByPerimeter, but NSG flow-log delivery needs
+#     the SA public endpoint reachable (Network Watcher is not a storage trusted-service
+#     bypass). Cannot comply + stay functional -> exemption.
+#
+# No App Service exemption here: online-p1 has NO Microsoft.Web/sites (its workload is a
+# Static Web App = Microsoft.Web/staticSites, which AsDenyPublicIP does not target). The
+# App Gateway public IP is a standalone publicIPAddresses, denied by nothing on this
+# chain (matrix rows 6-7 PASS). All three online-p1 subnets already carry an NSG
+# (Deny-Subnet-Without-Nsg PASS), so no subnet fix is needed either.
+
+locals {
+  # LITERAL corp-MG Deny-Public-Endpoints assignment id (owned by
+  # platform/management-groups; no cross-root output exposes it). Live-enumerated
+  # 2026-07-10 (docs/preclearance/landing-zones.md rows 2-3). COUPLING: keep in lockstep
+  # if that assignment is renamed/rescoped (same caveat as ADR-028).
+  deny_public_endpoints_assignment_id = "/providers/Microsoft.Management/managementGroups/corp/providers/Microsoft.Authorization/policyAssignments/Deny-Public-Endpoints"
+
+  # Scoped to the StorageDenyPaasPublicIP member only, so the rest of the initiative
+  # stays enforced on the network RG. Member id verified against Enterprise-Scale
+  # Deny-PublicPaaSEndpoints.json + this tenant's live assignment.
+  corp_policy_exemptions = {
+    flow-log-storage = {
+      resource_group_id               = azurerm_resource_group.network.id
+      policy_definition_reference_ids = ["StorageDenyPaasPublicIP"]
+      display_name                    = "Flow-log storage public-access waiver (OQ-024)"
+      description                     = "Waiver for the NSG flow-log storage account (sink for both online-p1 flow logs), which must keep public network access Enabled: Network Watcher is not a storage trusted-service bypass, so flow-log delivery breaks if publicNetworkAccess is Disabled. Scoped to rg-online-p1-network for StorageDenyPaasPublicIP only. See ADR-028 + OQ-024."
+    }
+  }
+}
+
+resource "azurerm_resource_group_policy_exemption" "corp_paas" {
+  for_each = var.enable_corp_policy_exemptions ? local.corp_policy_exemptions : {}
+
+  name                            = "exempt-${each.key}-online-p1"
+  resource_group_id               = each.value.resource_group_id
+  policy_assignment_id            = local.deny_public_endpoints_assignment_id
+  policy_definition_reference_ids = each.value.policy_definition_reference_ids
+  exemption_category              = "Waiver"
+
+  display_name = each.value.display_name
+  description  = each.value.description
+}
+
+# 300s async-propagation buffer before the exempted flow-log SA is created (ADR-028).
+resource "time_sleep" "wait_corp_policy_exemptions" {
+  for_each = var.enable_corp_policy_exemptions ? toset(["this"]) : toset([])
+
+  create_duration = "300s"
+
+  depends_on = [azurerm_resource_group_policy_exemption.corp_paas]
+}

@@ -141,6 +141,16 @@ variable "app_service_sku" {
 }
 
 # ---------------------------------------------------------------------------
+# Policy exemptions (OQ-024 / ADR-028)
+# ---------------------------------------------------------------------------
+
+variable "enable_corp_policy_exemptions" {
+  description = "Create the RG-scoped Waiver policy exemptions for the corp-MG Deny-Public-Endpoints initiative members (StorageDenyPaasPublicIP on the flow-log SA, AsDenyPublicIP on the App Service) that cannot be made compliant without breaking function. Default true; set false only if this spoke is moved out from under the corp MG or the governance changes (OQ-024)."
+  type        = bool
+  default     = true
+}
+
+# ---------------------------------------------------------------------------
 # Common
 # ---------------------------------------------------------------------------
 

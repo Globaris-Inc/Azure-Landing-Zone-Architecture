@@ -86,8 +86,25 @@ module "alz_management_groups" {
   # Schema: Azure/avm-ptn-alz 0.19.1 variables.tf L392-455 (map(MG-id) ->
   # policy_assignments -> assignment-name -> { enforcement_mode }). enforcement_mode
   # allowed values: "Default" | "DoNotEnforce".
+  #
+  # ADR-026 amendment (2026-07-10): the SAME placeholder-plan trap is still live at the
+  # landingzones MG, where enforcementMode=Default injects the invalid ddosProtectionPlan
+  # into every SPOKE VNet PUT (the connectivity-MG fix above never reached this scope).
+  # Extend the DoNotEnforce lever to the landingzones MG so all three spokes can create
+  # their VNets. Same policy, same rationale, next MG down; see
+  # docs/preclearance/landing-zones.md section 6 + matrix row 1. This root MUST be applied
+  # before any spoke. Verify after apply: `az policy assignment show --name Enable-DDoS-VNET
+  # --scope /providers/Microsoft.Management/managementGroups/landingzones --query
+  # enforcementMode` == "DoNotEnforce".
   policy_assignments_to_modify = {
     connectivity = {
+      policy_assignments = {
+        "Enable-DDoS-VNET" = {
+          enforcement_mode = "DoNotEnforce"
+        }
+      }
+    }
+    landingzones = {
       policy_assignments = {
         "Enable-DDoS-VNET" = {
           enforcement_mode = "DoNotEnforce"

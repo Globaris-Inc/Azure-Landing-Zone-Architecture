@@ -123,6 +123,16 @@ variable "flow_log_retention_days" {
 }
 
 # ---------------------------------------------------------------------------
+# Policy exemptions (OQ-024 / ADR-028)
+# ---------------------------------------------------------------------------
+
+variable "enable_corp_policy_exemptions" {
+  description = "Create the RG-scoped Waiver policy exemption for the corp-MG Deny-Public-Endpoints StorageDenyPaasPublicIP member on the flow-log storage account, which cannot be made compliant without breaking flow-log delivery. Default true; set false only if this spoke is moved out from under the corp MG or the governance changes (OQ-024)."
+  type        = bool
+  default     = true
+}
+
+# ---------------------------------------------------------------------------
 # Common
 # ---------------------------------------------------------------------------
 

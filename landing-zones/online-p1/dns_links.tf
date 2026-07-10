@@ -51,7 +51,12 @@ resource "azurerm_storage_account" "flow_logs" {
   min_tls_version                 = "TLS1_2"
   allow_nested_items_to_be_public = false
 
+  # public_network_access stays Enabled by design (NSG flow-log delivery requires it).
+  # The corp-MG StorageDenyPaasPublicIP Deny is admitted via the RG-scoped Waiver
+  # exemption in policy_exemptions.tf (OQ-024 / ADR-028). Wait for it to propagate.
   tags = local.common_tags
+
+  depends_on = [time_sleep.wait_corp_policy_exemptions]
 }
 
 # ---------------------------------------------------------------------------

@@ -140,6 +140,15 @@ module "spoke_vnet" {
       route_table = {
         id = azurerm_route_table.spoke.id
       }
+
+      # NSG required to satisfy the landingzones-MG Deny-Subnet-Without-Nsg policy
+      # (docs/preclearance/landing-zones.md matrix row 4, OQ-024). Reuses the spoke
+      # NSG (deny Internet inbound); App Service regional VNet integration delegated
+      # subnets support NSGs and need no inbound rules (egress-only). Clean compliance
+      # fix - no exemption.
+      network_security_group = {
+        id = azurerm_network_security_group.spoke.id
+      }
     }
 
     data = {
@@ -269,7 +278,9 @@ module "app_service" {
 
   tags = local.common_tags
 
-  depends_on = [module.spoke_vnet]
+  # Wait for the AsDenyPublicIP Waiver exemption to propagate before the App Service
+  # PUT (OQ-024 / ADR-028), otherwise the corp-MG Deny fires on a lost race.
+  depends_on = [module.spoke_vnet, time_sleep.wait_corp_policy_exemptions]
 }
 
 # ---------------------------------------------------------------------------
