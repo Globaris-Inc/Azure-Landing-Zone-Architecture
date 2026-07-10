@@ -90,7 +90,7 @@ output "sentinel_data_connector_ids" {
   value = {
     aad = azurerm_sentinel_data_connector_azure_active_directory.this.id
     mdc = azurerm_sentinel_data_connector_azure_security_center.this.id
-    mde = azurerm_sentinel_data_connector_microsoft_defender_advanced_threat_protection.this.id
+    mde = one(azurerm_sentinel_data_connector_microsoft_defender_advanced_threat_protection.this[*].id)
     ti  = azurerm_sentinel_data_connector_threat_intelligence.this.id
   }
 }

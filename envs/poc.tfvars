@@ -198,13 +198,21 @@ enable_regulatory_compliance = true
 enable_mdc_event_hub_export  = true
 event_hub_namespace_capacity = 1 # 1 TU = 1 MB/s ingress (~2.5 GB/day)
 
-# Pipe Entra ID + Security-sub Activity logs into the Security LA workspace.
-enable_aad_diagnostics           = true
+# Pipe Security-sub Activity logs into the Security LA workspace.
+# enable_aad_diagnostics gated OFF: azurerm_monitor_aad_diagnostic_setting needs a
+# Security Administrator directory role the CI SP does not hold. Re-enable in a
+# later pass once the role is granted (see docs/preclearance/platform-security.md).
+enable_aad_diagnostics           = false
 enable_subscription_activity_log = true
 
-# Enable Sentinel UEBA + Entity Analytics. ~7 days of data needed before
-# behaviour baselines stabilise.
-enable_ueba = true
+# Sentinel UEBA + Entity Analytics gated OFF: the azapi settings writes need a
+# Security Administrator directory role the CI SP does not hold. Re-enable once
+# the role is granted. ~7 days of data needed before baselines stabilise.
+enable_ueba = false
+
+# Microsoft Defender for Endpoint Sentinel connector gated OFF: tenant lacks an
+# MDE license so the connector create fails. Pre-staged for a later pass.
+enable_mde_connector = false
 
 # Default scheduled-rule cadence. Per-rule overrides live in sentinel.tf.
 analytics_rule_lookback_minutes        = 60

@@ -111,6 +111,12 @@ variable "enable_ueba" {
   default     = true
 }
 
+variable "enable_mde_connector" {
+  description = "If true, create the Microsoft Defender for Endpoint (MDATP) Sentinel data connector. Requires a Microsoft Defender for Endpoint tenant license plus Security Administrator consent. Default false: this tenant lacks the MDE license, so the connector create would fail. Left pre-staged for a later enablement pass."
+  type        = bool
+  default     = false
+}
+
 variable "sentinel_owner_group_object_id" {
   description = "Entra ID group object ID that becomes the default owner for newly-created Sentinel incidents via an automation rule. Leave empty to skip the auto-assign automation rule."
   type        = string

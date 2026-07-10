@@ -35,9 +35,15 @@ resource "azurerm_sentinel_data_connector_azure_security_center" "this" {
 }
 
 # Microsoft Defender for Endpoint (formerly MDATP). Requires tenant MDE
-# subscription + Security Administrator to consent — the connector resource
+# subscription + Security Administrator to consent - the connector resource
 # itself is just the Sentinel-side enablement.
+# GATED OFF: this tenant lacks a Microsoft Defender for Endpoint license, so the
+# connector create fails (see docs/preclearance/platform-security.md prereq 2).
+# Pre-staged behind enable_mde_connector (default false); flip on after the
+# license is in place.
 resource "azurerm_sentinel_data_connector_microsoft_defender_advanced_threat_protection" "this" {
+  count = var.enable_mde_connector ? 1 : 0
+
   name                       = "dc-mde-${var.org_prefix}-${var.environment}"
   log_analytics_workspace_id = module.security_law.resource_id
   tenant_id                  = var.tenant_id
