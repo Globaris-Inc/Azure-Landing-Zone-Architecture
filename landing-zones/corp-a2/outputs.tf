@@ -44,23 +44,23 @@ output "app_service_id" {
 }
 
 output "sql_server_fqdn" {
-  description = "Fully qualified domain name of the corp-a2 SQL logical server."
-  value       = azurerm_mssql_server.this.fully_qualified_domain_name
+  description = "Fully qualified domain name of the corp-a2 SQL logical server. Null when the SQL tier is gated off (var.enable_sql = false)."
+  value       = one(azurerm_mssql_server.this[*].fully_qualified_domain_name)
 }
 
 output "sql_server_id" {
-  description = "ARM resource ID of the corp-a2 SQL logical server. Referenced when configuring geo-replication from corp-a1."
-  value       = azurerm_mssql_server.this.id
+  description = "ARM resource ID of the corp-a2 SQL logical server. Referenced when configuring geo-replication from corp-a1. Null when the SQL tier is gated off (var.enable_sql = false)."
+  value       = one(azurerm_mssql_server.this[*].id)
 }
 
 output "sql_database_id" {
-  description = "ARM resource ID of the corp-a2 application SQL database."
-  value       = azurerm_mssql_database.app.id
+  description = "ARM resource ID of the corp-a2 application SQL database. Null when the SQL tier is gated off (var.enable_sql = false)."
+  value       = one(azurerm_mssql_database.app[*].id)
 }
 
 output "sql_private_endpoint_id" {
-  description = "ARM resource ID of the SQL Private Endpoint."
-  value       = azurerm_private_endpoint.sql.id
+  description = "ARM resource ID of the SQL Private Endpoint. Null when the SQL tier is gated off (var.enable_sql = false)."
+  value       = one(azurerm_private_endpoint.sql[*].id)
 }
 
 output "recovery_services_vault_id" {

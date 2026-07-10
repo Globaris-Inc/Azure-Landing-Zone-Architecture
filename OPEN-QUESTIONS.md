@@ -31,6 +31,36 @@
 
 <!-- Newest at the top. -->
 
+### OQ-025: Re-enable trigger for the corp-spoke SQL tier - which allowed region or support exception, and relocate vs wait?
+
+- **Raised:** 2026-07-10 (landing-zones deploy, architect)
+- **Section:** 9 (Landing Zone Spokes)
+- **Blocking:** No - the SQL tier is pre-staged off behind `enable_sql = false` (ADR-031); the rest of the
+  corp spoke stands without it.
+- **Priority:** Low
+
+**Question:**
+ADR-031 gated the corp SQL tier off because Azure SQL provisioning is `ProvisioningDisabled` for the
+`landingzones` subscription in eastus2 (corp-a1) and expected the same in centralus (corp-a2). When, if ever,
+do we re-enable it, and how? The two levers are: an **allowed region/subscription** where SQL provisioning is
+permitted, or an **Azure support-request exception** to lift the restriction on the current region. And if we
+do re-enable, do we **relocate** SQL to an allowed region (accepting cross-region split from the rest of the
+spoke) or **wait** for the restriction to lift in place?
+
+**Options being considered:**
+- A (recommended): Keep the tier off for this POC's lifetime. The environment is scheduled for teardown by
+  end of week, so the SQL tier is very likely moot. Revisit only if a persistent (non-teardown) environment
+  is stood up.
+- B: Relocate SQL to an allowed region and flip `enable_sql = true` - accept cross-region fragmentation from
+  the rest of the spoke. Only worth it for a durable environment.
+- C: Raise a support-request exception and wait for it to lift in the current region, then flip
+  `enable_sql = true` in place - slow; not aligned with the teardown timeline.
+
+Tracked so the gate is not forgotten. Also carries the one-line .tf follow-up from ADR-031: the
+`SqlServerDenyPaasPublicIP` comments in `landing-zones/corp-a1/policy_exemptions.tf:38-39` and
+`corp-a2/policy_exemptions.tf:28` are stale while `enable_sql = false` (no SQL server exists) and should be
+refreshed on the next edit of those files.
+
 ### OQ-024: corp-MG `Deny-Public-Endpoints` (+ `Deny-Subnet-Without-Nsg`) collide with the spoke public-PaaS resources - exempt, redesign, or downgrade?
 
 - **Raised:** 2026-07-10 (landing-zones deploy pre-clearance, architect)

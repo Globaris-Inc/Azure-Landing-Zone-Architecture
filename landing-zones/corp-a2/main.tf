@@ -1,7 +1,7 @@
 # Purpose: corp-a2 landing zone — DR spoke VNet (centralus), App Service + SQL mirroring
 #          corp-a1, Recovery Services Vault for Azure Site Recovery.
 # Section: 9 — Landing Zone Spokes
-# Last updated: 2026-05-14
+# Last updated: 2026-07-10
 #
 # Architecture:
 #   - Spoke VNet (10.11.0.0/16) peered to secondary (DR) hub VNet (centralus)
@@ -281,17 +281,28 @@ module "app_service" {
 #
 # DEVIATION: Native azurerm resources used (see corp-a1/main.tf deviation note).
 #
+# DEVIATION (SQL tier gated off - enable_sql = false, default):
+# Azure SQL provisioning is restricted in eastus2/centralus for the landingzones
+# subscription (ProvisioningDisabled, returned during the server PUT polling - a
+# subscription/region restriction, not a code bug). The SQL data tier (server +
+# database + private endpoint) is gated behind var.enable_sql so the rest of the DR
+# spoke stands. It is pre-staged capability: set enable_sql = true once an allowed
+# region/subscription is available or a support-request exception lifts the
+# restriction. See DECISIONS.md / OPEN-QUESTIONS.md.
+#
 # Geo-replication: to configure SQL geo-replication between corp-a1 and corp-a2,
 # add a secondary database using creation_source_database_id referencing the
 # corp-a1 database ID after both spokes are deployed.
 # ---------------------------------------------------------------------------
 
 resource "random_id" "sql_suffix" {
+  count       = var.enable_sql ? 1 : 0
   byte_length = 4
 }
 
 resource "azurerm_mssql_server" "this" {
-  name                = "sql-corp-a2-${var.org_prefix}-${var.environment}-${random_id.sql_suffix.hex}"
+  count               = var.enable_sql ? 1 : 0
+  name                = "sql-corp-a2-${var.org_prefix}-${var.environment}-${random_id.sql_suffix[0].hex}"
   resource_group_name = azurerm_resource_group.workload.name
   location            = var.secondary_location
   version             = "12.0"
@@ -309,8 +320,9 @@ resource "azurerm_mssql_server" "this" {
 }
 
 resource "azurerm_mssql_database" "app" {
+  count     = var.enable_sql ? 1 : 0
   name      = "sqldb-app-corp-a2-${var.org_prefix}-${var.environment}"
-  server_id = azurerm_mssql_server.this.id
+  server_id = azurerm_mssql_server.this[0].id
 
   sku_name    = "GP_S_Gen5_1"
   collation   = "SQL_Latin1_General_CP1_CI_AS"
@@ -325,6 +337,7 @@ resource "azurerm_mssql_database" "app" {
 }
 
 resource "azurerm_private_endpoint" "sql" {
+  count               = var.enable_sql ? 1 : 0
   name                = "pe-sql-corp-a2-${var.org_prefix}-${var.environment}"
   resource_group_name = azurerm_resource_group.shared.name
   location            = var.secondary_location
@@ -332,7 +345,7 @@ resource "azurerm_private_endpoint" "sql" {
 
   private_service_connection {
     name                           = "psc-sql-corp-a2"
-    private_connection_resource_id = azurerm_mssql_server.this.id
+    private_connection_resource_id = azurerm_mssql_server.this[0].id
     subresource_names              = ["sqlServer"]
     is_manual_connection           = false
   }

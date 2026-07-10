@@ -1,6 +1,6 @@
 # Purpose: Input variables for the corp-a1 landing zone root module.
 # Section: 9 — Landing Zone Spokes
-# Last updated: 2026-05-14
+# Last updated: 2026-07-10
 
 # ---------------------------------------------------------------------------
 # Subscription targeting
@@ -70,6 +70,12 @@ variable "primary_firewall_private_ip" {
 # ---------------------------------------------------------------------------
 # Workload — SQL
 # ---------------------------------------------------------------------------
+
+variable "enable_sql" {
+  description = "Gate for the SQL data tier (logical server, database, and its private endpoint). Default false: Azure SQL provisioning is restricted in the spoke region (eastus2) for the landingzones subscription (ProvisioningDisabled - a subscription/region restriction surfaced during PUT polling, not a code bug), so the SQL tier is pre-staged but not deployed. Set true once a region/subscription that permits Azure SQL is available or a support-request exception is granted. See the DEVIATION note on azurerm_mssql_server.this in main.tf."
+  type        = bool
+  default     = false
+}
 
 variable "sql_aad_admin_object_id" {
   description = "Object ID of the Entra ID group or user to set as the SQL Server Azure AD administrator."

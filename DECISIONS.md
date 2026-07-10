@@ -37,6 +37,60 @@
 
 <!-- Newest at the top. -->
 
+### ADR-031: Gate the corp-spoke SQL tier off - Azure SQL `ProvisioningDisabled` in the `landingzones` subscription region
+
+- **Date:** 2026-07-10
+- **Section:** 9 (Landing Zone Spokes)
+- **Status:** Accepted.
+- **Decision makers:** user, claude (architect)
+
+**Context:**
+Deploying the corp landing-zone spokes. The corp-a1 apply (deploy run 29120479723) failed on
+`azurerm_mssql_server.this` with `Status: ProvisioningDisabled` and the message "Provisioning is restricted
+in this region. Please choose a different region...". Verified facts this session:
+- This is a **subscription/region capability restriction, not a code or design fault.** Azure SQL logical
+  server provisioning is disabled for the `landingzones` subscription in **eastus2** (corp-a1's region), and
+  is expected to be disabled in **centralus** (corp-a2's region) for the same reason. This restriction is
+  common on sponsored / Visual Studio subscription types and is imposed by Azure capacity/policy, not by our
+  Terraform.
+- The failing resources are the SQL tier only: `azurerm_mssql_server.this` (with its Entra admin nested
+  block), `azurerm_mssql_database.app`, and `azurerm_private_endpoint.sql` (with its SQL DNS zone group). The
+  corp App Service has **no** dependency on the SQL server, so it is not affected. online-p1 has no SQL tier.
+
+**Decision:**
+Gate the entire corp SQL tier behind a new `var.enable_sql` (bool, default `false`) in `landing-zones/corp-a1`
+and `landing-zones/corp-a2`. The flag gates `random_id.sql_suffix`, `azurerm_mssql_server.this`,
+`azurerm_mssql_database.app`, and `azurerm_private_endpoint.sql` (including its SQL DNS zone group nested
+block). The 5 (corp-a1) / 4 (corp-a2) SQL-related outputs return `null` via `one(...)` when the tier is off.
+The rest of the spoke stands. The pre-staged SQL wiring stays in place: the SQL private DNS zone data source
+plus its vnet link in `dns_links.tf` are **not** provisioning-dependent, so they remain so a future re-enable
+is a single-variable flip. Re-enable by setting `enable_sql = true` once an allowed region/subscription is
+available or a support-request exception lifts the restriction.
+
+**Alternatives considered:**
+- Move the SQL tier to an Azure region where provisioning is allowed - rejected: introduces cross-region
+  fragmentation (SQL split from the rest of the spoke, its VNet, and its private endpoint subnet), and corp-a2
+  in centralus is expected to hit the same restriction, so it does not generalise. Not worth the topology
+  distortion for a POC.
+- Raise an Azure support-request exception to lift the regional provisioning restriction - rejected: too slow
+  for the planned end-of-week teardown timeline; the tier would still be down while the request is pending.
+
+**Consequences:**
+- Positive: the full corp spoke topology stands minus the SQL database - VNet, peering, App Service, Recovery
+  Services Vault, NSG, flow logs, and the PE subnet all provision. The App Service has no SQL dependency so it
+  is unaffected. The pre-staged SQL DNS wiring (zone data source + vnet link) remains, so re-enabling is a
+  one-variable flip. The failure is captured as a scoped, documented gate rather than silent debt or a blind
+  retry against a capability the subscription does not have.
+- Negative / trade-offs: no SQL server or database exists in the corp spokes until an allowed
+  region/subscription is available and `enable_sql` is flipped; the spoke's "app + database" story is
+  app-only until then. A default-false feature flag now lives in both corp landing-zone roots.
+- Follow-ups required: (1) **OQ-025** tracks the re-enable trigger (which allowed region or support exception,
+  and relocate-vs-wait), non-blocking and likely moot given the planned teardown. (2) **.tf comment cleanup
+  (do not fix now, next touch of those files):** `landing-zones/corp-a1/policy_exemptions.tf:38-39` and
+  `landing-zones/corp-a2/policy_exemptions.tf:28` still describe `SqlServerDenyPaasPublicIP` as "keeps
+  governing the (already-private) SQL server" - now moot while `enable_sql = false` because no SQL server
+  exists. The implementer should refresh those comments the next time those files are edited.
+
 ### ADR-030: Gate the geo_block Conditional Access policy off by default - Graph 1040 named-location reference failure persists after the ADR-029 fixes
 
 - **Date:** 2026-07-10
