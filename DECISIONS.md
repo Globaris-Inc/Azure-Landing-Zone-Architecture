@@ -570,6 +570,20 @@ enforcement.
 - Negative / trade-offs: no DDoS auto-enable enforcement during the POC (accepted). Introduces a documented coupling — the DDoS decision now spans two root modules (`management-groups` policy + `connectivity` plan) that must be flipped together.
 - Follow-ups required: OQ-019 (single shared `enable_ddos_standard` variable driving both stacks so they cannot diverge). Supersedes commit `e2733db` as the **fix location** for this failure; `e2733db` remains valid as the cost gate for the DDoS plan resource itself.
 
+**ADDENDUM 2026-07-10 - DoNotEnforce extended to the `landingzones` MG (committed 2581bd4):**
+The original decision only DoNotEnforce'd `Enable-DDoS-VNET` at the **Connectivity** MG. Live
+pre-clearance for the landing-zone spokes found the SAME `Enable-DDoS-VNET` assignment still
+**ENFORCED at the `landingzones` MG**, with the same placeholder-plan `ddosPlan` parameter. Left as-is
+it would inject the invalid zero-GUID plan id into every spoke VNet PUT and reproduce the identical
+`403 LinkedAuthorizationFailed` outage on corp-a1 / corp-a2 / online-p1. Extended the DoNotEnforce to
+the `landingzones` MG via the same `policy_assignments_to_modify` input of `Azure/avm-ptn-alz/azurerm`
+0.19.1 in `platform/management-groups/main.tf` (committed 2581bd4). This is the **OQ-019 split-toggle
+risk materialising**: because the plan resource in `platform/connectivity` and the `Enable-DDoS-VNET`
+policy in `platform/management-groups` were never linked, neutralising the policy at one MG scope did
+nothing at another, and the enforced assignment had to be found and DoNotEnforce'd per MG. This
+reinforces the OQ-019 recommendation (a single `enable_ddos_standard` driving the plan resource AND
+the policy assignment enforcement across every relevant MG scope). See OQ-019.
+
 ### ADR-025: CI state-SA firewall — JIT default_action Allow/Deny flip, not single-IP allow-list (fixes LESSON 16 race)
 
 - **Date:** 2026-07-06

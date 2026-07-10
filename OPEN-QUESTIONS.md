@@ -66,6 +66,25 @@ Also parks a topology observation: an "online" archetype workload (`online-p1`) 
 is a placement mismatch (the `online` MG has no subscription). Non-blocking; note for a later hierarchy
 decision.
 
+**RESOLVED 2026-07-10 (user decision: compliance-first, exemption fallback; committed 2581bd4):**
+Split by whether the resource could be made genuinely compliant without breaking function:
+- **`snet-integration` (corp-a1/a2) - made COMPLIANT.** Attached the existing spoke NSG to the subnet
+  (App Service delegated subnets support NSGs), so `Deny-Subnet-Without-Nsg` is satisfied in code. No
+  exemption used.
+- **Flow-log storage accounts (all 3 spokes) and corp App Services (corp-a1/a2) - Waiver fallback.**
+  These could not be made compliant without breaking function: Network Watcher is **not** a storage
+  trusted-service, so a private flow-log SA breaks NSG flow-log delivery; and a private App Service
+  needs net-new private-endpoint infrastructure. Fell back to RG-scoped `azurerm_resource_group_policy_exemption`
+  Waivers (the ADR-028 pattern), each scoped to **only the single offending initiative member** -
+  `StorageDenyPaasPublicIP` for the flow-log SAs, `AsDenyPublicIP` for the App Services.
+  `SqlServerDenyPaasPublicIP` stays **enforced** and the spoke SQL server is independently private.
+
+**Standing follow-up (RESOLVED-with-follow-up, do not delete):** the durable corp posture for the App
+Service is a genuinely private App Service (`public_network_access = false` + a
+`privatelink.azurewebsites.net` private endpoint), which would retire the `AsDenyPublicIP` Waiver.
+Decision pending: build the private App Service infra or keep the Waiver. Likely moot given the planned
+POC teardown by end of week.
+
 ### OQ-023: Root-cause the geo_block Conditional Access 1040 named-location reference failure (bounded diagnosis, then re-enable)
 
 - **Raised:** 2026-07-10 (identity recovery apply run 29068343843, architect, ADR-030)
@@ -98,6 +117,17 @@ the correct fix to re-enable geo_block?
 NOT another blind apply retry. Once the cause is confirmed and the fix is known, flip
 `enable_geo_block_ca_policy = true` and verify geo_block creates on one apply. Do not spend more than one
 focused pass here - geo_block is 1 of 8 report-only policies and nothing depends on it.
+
+**RESOLVED 2026-07-10 (Option A confirmed and PROVEN live):**
+Root cause was the **reference-format bug (Option A)**: the policy passed the named location by its
+`.id` (the full resource path `/identity/conditionalAccess/namedLocations/<id>`) where the CA store
+expects the bare `.object_id` (the GUID only). Switching the reference to `.object_id` and re-enabling
+(`enable_geo_block_ca_policy = true`) fixed it. Evidence: deploy run **29111153212** created the
+geo_block policy (`id 6b96eb0d-...`) with **no 1040**, and QA verified it live in Graph - report-only,
+`excludeLocations` set to the bare GUID which resolves to the real `approved_countries` named location.
+Notes: the tag-churn management fix (built-ins made **add-if-missing** rather than overwrite) is applied
+in Azure; QA observed a **mojibake in the `platform/management` tag-governance `display_name`** (a
+replacement character where a clean glyph was intended) - minor cosmetic follow-up, non-blocking.
 
 ### OQ-022: Durable greenfield fix for OIDC token expiry on the identity root's long (1-3h) AADDS create - split the root, or add CI job-level re-auth?
 
