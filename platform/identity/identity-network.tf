@@ -65,19 +65,24 @@ resource "azurerm_resource_group" "identity_aadds" {
 # ---------------------------------------------------------------------------
 # Network Security Group — Entra DS subnet
 #
-# Rule set verified against the current Microsoft doc "Network considerations for
-# Microsoft Entra Domain Services" (learn.microsoft.com, reviewed 2026-06-28):
+# Rule set verified against the current Microsoft docs "Network considerations for
+# Microsoft Entra Domain Services" and "AADDS104 - Network error" (learn.microsoft.com,
+# reviewed 2026-07-10 for ADR-029):
 #   - REQUIRED inbound: TCP 5986 from the AzureActiveDirectoryDomainServices
-#     service tag — Entra DS management/synchronisation (PowerShell remoting).
+#     service tag — Entra DS management/synchronisation (PowerShell remoting). This
+#     equals Microsoft's own default `AllowPSRemoting` @301.
 #   - The managed service no longer requires the legacy CorpNetSaw/ports 443/3389
 #     inbound rules that older guidance listed; those are intentionally omitted.
 #   - TCP 636 (secure LDAP) is added ONLY if/when secure LDAP is enabled — left
 #     out here because secure_ldap is disabled in this build (see domain-services.tf).
-#   - A low-priority Deny-All-Inbound backstop sits below the allow rule.
+#   - There is DELIBERATELY no custom deny-all inbound rule (ADR-029). Azure's
+#     undeletable default rules AllowVnetInBound @65000, AllowAzureLoadBalancerInBound
+#     @65001, and DenyAllInBound @65500 must remain in effect - Domain Services relies
+#     on the first two for DC replication and the load-balancer health path, and a
+#     custom low-priority deny-all overrides them and breaks AADDS (AADDS104). See the
+#     inline comment on the rule set below and ADR-029.
 # Outbound is left at Azure defaults (Entra DS needs broad managed outbound; do not
 # restrict it on the DS subnet).
-# UNVERIFIED: exact priority ordering is a local choice; the service-tag source and
-# port 5986 are the load-bearing, doc-confirmed values.
 # ---------------------------------------------------------------------------
 
 resource "azurerm_network_security_group" "entra_ds" {
@@ -102,19 +107,21 @@ resource "azurerm_network_security_group" "entra_ds" {
     description                = "Microsoft-mandated: Entra DS management/sync (WinRM-HTTPS) from the AADDS service tag."
   }
 
-  # Belt-and-suspenders deny backstop below the managed allow rule.
-  security_rule {
-    name                       = "Deny-All-Inbound"
-    priority                   = 4000
-    direction                  = "Inbound"
-    access                     = "Deny"
-    protocol                   = "*"
-    source_port_range          = "*"
-    destination_port_range     = "*"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-    description                = "Default-deny backstop; the AADDS service-tag allow rule above takes precedence."
-  }
+  # NO custom blanket deny-all inbound rule here - INTENTIONAL (ADR-029). A prior
+  # `Deny-All-Inbound` @4000 rule sat numerically above Azure's undeletable default
+  # rules `AllowVnetInBound` @65000 and `AllowAzureLoadBalancerInBound` @65001, so it
+  # won evaluation and blocked the two flows Microsoft REQUIRES for the managed domain:
+  # intra-VNet DC replication (AllowVnetInBound) and the internal load-balancer
+  # management / health-probe path from 168.63.129.16 (AllowAzureLoadBalancerInBound).
+  # That triggered the CRITICAL AADDS104 network-error alert and stranded the 2nd DC
+  # (run 29055619749). MS Learn is explicit: alert-nsg says "delete any custom rules
+  # that block required traffic", and network-considerations says "Domain Services also
+  # relies on the Default Security rules AllowVnetInBound and AllowAzureLoadBalancerInBound"
+  # and "Don't create or use an existing network security group with your own custom rules".
+  # With no custom deny, Azure's defaults govern: AllowVnetInBound @65000,
+  # AllowAzureLoadBalancerInBound @65001, DenyAllInBound @65500. Internet inbound is still
+  # denied by the default @65500, so no protection is lost. DO NOT re-add a low-priority
+  # deny-all "hardening" rule - it re-breaks AADDS. See ADR-029.
 
   tags = local.identity_common_tags
 }

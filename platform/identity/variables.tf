@@ -134,6 +134,20 @@ variable "identity_domain_name" {
   default     = ""
 }
 
+variable "aadds_import_replica_set_id" {
+  description = <<-EOT
+    ONE-TIME RECOVERY INPUT (ADR-029). GUID of the managed domain's initial replica
+    set, used to build the composite config-driven import ID for the built-but-unstated
+    Entra Domain Services resource:
+    '<domain resource ID>/initialReplicaSetId/<this GUID>'. Supplied operationally via
+    TF_VAR_aadds_import_replica_set_id in CI for the recovery apply only. Leave "" for a
+    greenfield deploy (no domain to import): the import block is then a no-op, keeping the
+    config portable. Never commit the live GUID to tfvars.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "identity_vnet_address_space" {
   description = "CIDR block for the identity VNet. Must not overlap the hubs (10.0.0.0/16, 10.1.0.0/16) or the spokes (10.10/16, 10.11/16, 10.20/16). The Entra DS subnet is computed from this block."
   type        = string
