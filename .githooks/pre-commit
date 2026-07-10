@@ -34,6 +34,18 @@ if [ -n "$tf_files" ]; then
   done
 fi
 
+# --- writing style: block em/en dashes in staged ADDITIONS (project rule: hyphen only) ---
+# Codepoint class (en dash U+2013, em dash U+2014) via PCRE; this hook file has no matched
+# extension so it never trips on itself. Only newly added lines are checked, so pre-existing
+# text is not retro-blocked. Enforces the standing "no em dashes in commits" rule for every author.
+dash_hits="$(git diff --cached -U0 --diff-filter=ACM -- '*.tf' '*.tfvars' '*.md' '*.hcl' '*.yml' '*.yaml' '*.sh' '*.json' \
+  | grep -aP '^\+' | grep -aP '[\x{2013}\x{2014}]' || true)"
+if [ -n "$dash_hits" ]; then
+  echo "pre-commit: em/en dash in staged additions (project rule: use a plain hyphen '-'):"
+  echo "$dash_hits" | sed 's/^/  /'
+  fail=1
+fi
+
 # --- workflows: actionlint (best-effort) ---
 wf="$(echo "$staged" | grep -E '^\.github/workflows/.*\.ya?ml$' || true)"
 if [ -n "$wf" ]; then
