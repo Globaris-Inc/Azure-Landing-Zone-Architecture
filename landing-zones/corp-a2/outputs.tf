@@ -1,6 +1,6 @@
 # Purpose: Outputs for the corp-a2 landing zone root module (DR spoke).
 # Section: 9 — Landing Zone Spokes
-# Last updated: 2026-05-14
+# Last updated: 2026-07-10
 
 output "spoke_vnet_id" {
   description = "ARM resource ID of the corp-a2 spoke VNet (centralus DR). Referenced by Section 4 Private DNS zone links."
@@ -34,12 +34,13 @@ output "monitoring_rg_name" {
 
 output "app_service_default_hostname" {
   description = "Default hostname of the corp-a2 (DR) App Service."
-  value       = module.app_service.resource.default_hostname
+  value       = module.app_service.resource_uri
 }
 
 output "app_service_id" {
   description = "ARM resource ID of the corp-a2 App Service."
   value       = module.app_service.resource_id
+  sensitive   = true
 }
 
 output "sql_server_fqdn" {

@@ -1,6 +1,6 @@
 # Purpose: Outputs for the corp-a1 landing zone root module.
 # Section: 9 — Landing Zone Spokes
-# Last updated: 2026-05-14
+# Last updated: 2026-07-10
 
 output "spoke_vnet_id" {
   description = "ARM resource ID of the corp-a1 spoke VNet. Referenced by Section 4 (Private DNS zone links) and Section 3 (DR topology)."
@@ -34,12 +34,13 @@ output "monitoring_rg_name" {
 
 output "app_service_default_hostname" {
   description = "Default hostname of the corp-a1 App Service. Used as App Gateway backend target in online-p1 and for smoke-test validation."
-  value       = module.app_service.resource.default_hostname
+  value       = module.app_service.resource_uri
 }
 
 output "app_service_id" {
   description = "ARM resource ID of the corp-a1 App Service."
   value       = module.app_service.resource_id
+  sensitive   = true
 }
 
 output "sql_server_fqdn" {
