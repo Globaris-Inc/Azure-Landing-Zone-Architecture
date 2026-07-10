@@ -101,6 +101,14 @@ resource "azurerm_active_directory_domain_service" "this" {
   domain_name = var.identity_domain_name
   sku         = "Standard" # Single replica set; lowest-cost SKU (ADR-010 cost posture).
 
+  # ForceNew argument (verified azurerm v4.71.0 provider source: Optional, not
+  # Computed, ValidateFunc allows "FullySynced" | "ResourceTrusting"). Left unset,
+  # Terraform plans this as null while Azure defaults a User Forest domain to
+  # "FullySynced" server-side, producing a spurious null -> "FullySynced" replace
+  # on every plan. Set explicitly to match the live value and the User Forest
+  # topology already in use. See ADR-029 recovery (run 29067315405).
+  domain_configuration_type = "FullySynced"
+
   # Sync the whole directory (false = no scoped/filtered sync) for the POC.
   filtered_sync_enabled = false
 
