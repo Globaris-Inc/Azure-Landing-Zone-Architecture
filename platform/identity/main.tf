@@ -1,6 +1,6 @@
 # Purpose: Zero Trust baseline — Conditional Access policies and Identity Protection.
 # Section: 5 — Zero Trust + Conditional Access
-# Last updated: 2026-07-08
+# Last updated: 2026-07-10
 #
 # Policies deployed (all start in Report-only mode via var.ca_policy_state):
 #   CA-001  Require MFA for all admin roles
@@ -81,7 +81,14 @@ resource "azuread_named_location" "approved_countries" {
 # 300s buffer makes the greenfield DEPLOYMENT path deterministic. For an existing
 # tenant (named location already replicated) it costs nothing meaningful and a plain
 # rerun clears geo_block regardless. See ADR-028.
+#
+# Gated on the same var.enable_geo_block_ca_policy as its only consumer, the
+# geo_block policy below (ADR-030): with geo_block off the path there is nothing to
+# wait for, so this 300s sleep is skipped too. Re-enabling the policy re-enables
+# this wait in lockstep.
 resource "time_sleep" "wait_named_location" {
+  count = var.enable_geo_block_ca_policy ? 1 : 0
+
   create_duration = "300s"
 
   depends_on = [azuread_named_location.approved_countries]
@@ -205,9 +212,25 @@ resource "azuread_conditional_access_policy" "phishing_resistant_mfa_pim" {
 
 # ---------------------------------------------------------------------------
 # CA-005: Geo-block — deny sign-ins from outside approved countries
+#
+# DEVIATION: creation is gated OFF by default (var.enable_geo_block_ca_policy =
+# false). The policy create fails persistently (~5 straight runs) with Microsoft
+# Graph error 1040 "NamedLocation ... does not exist in the directory" even though
+# azuread_named_location.approved_countries exists and is replicated (verified live
+# via Graph), and it kept blocking the entire platform/identity apply. Evidence it
+# is a genuine named-location reference issue and NOT OIDC token expiry: in run
+# 29068343843 the 1040 fired ~1 minute into a ~34-minute apply, while the token was
+# still valid. It is report-only and 1 of 8 CA policies, so gating its creation off
+# loses NO enforcement while letting the root finish green. The named location
+# itself (approved_countries) stays in place - it is harmless and is the intended
+# geo config. Re-enable by setting var.enable_geo_block_ca_policy = true once the
+# reference (1040) bug is fixed. See ADR-030 (geo_block 1040 persists post-fix;
+# gated off pending root cause).
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "geo_block" {
+  count = var.enable_geo_block_ca_policy ? 1 : 0
+
   display_name = "CA-005 [${upper(var.org_prefix)}] Geo-Block — Outside Approved Countries"
   state        = var.ca_policy_state
 

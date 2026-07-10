@@ -1,8 +1,9 @@
-# Purpose: Identity subscription network plane — resource groups, identity VNet,
-#          Entra DS subnet + NSG (Microsoft-mandated rules), and bidirectional
-#          peering to the primary hub. (Section 8 — G1 / Gap-Closure Wave 3 / ADR-010)
+# Purpose: Identity subscription network plane — resource groups, identity VNet
+#          (with static AADDS DC IPs as its DNS servers), Entra DS subnet + NSG
+#          (Microsoft-mandated rules), and bidirectional peering to the primary
+#          hub. (Section 8 — G1 / Gap-Closure Wave 3 / ADR-010, ADR-029)
 # Section: 8 — Standard Platform Components (Identity subscription)
-# Last updated: 2026-06-28
+# Last updated: 2026-07-10
 #
 # All resources here are gated on identity_mode != "none" via the static boolean
 # local.identity_enabled (LESSON 5 — gate on a static bool, never on an unknown ID)
@@ -148,6 +149,24 @@ module "identity_vnet" {
   parent_id     = azurerm_resource_group.identity_network[0].id # v0.17.1: parent_id (RG resource ID)
   location      = var.identity_location
   address_space = [var.identity_vnet_address_space]
+
+  # AADDS requires the identity VNet's DNS servers to point at the managed domain's
+  # two domain-controller IPs; otherwise clients on the VNet cannot locate the
+  # managed domain and it appears broken (a MANDATORY AADDS post-deploy step - MS
+  # Learn: entra/identity/domain-services, "Update DNS settings for the Azure
+  # virtual network"). ADR-029: we feed these through the module's OWN dns_servers
+  # input (STATIC values from tfvars, NOT a reference to the domain output) so there
+  # is NO VNet -> domain -> VNet dependency cycle. Because the module now writes real
+  # dhcpOptions.dnsServers into its VNet body, there is a single writer of this field
+  # - no second resource re-asserting an explicit `dhcpOptions: null` to fight it
+  # (azapi ignore_null_property defaults false, so passing null here would re-null
+  # the field every apply and revert DNS to default). The operator already set these
+  # same IPs live via the portal, so the first apply aligns state with no functional
+  # Azure change and steady-state re-plans show 0 changes. IP order matches the live
+  # portal order (envs/poc.tfvars) to avoid a reorder diff.
+  dns_servers = length(var.identity_vnet_dns_servers) > 0 ? {
+    dns_servers = var.identity_vnet_dns_servers
+  } : null
 
   subnets = {
     entra-ds = {

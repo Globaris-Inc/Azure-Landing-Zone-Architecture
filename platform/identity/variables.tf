@@ -1,6 +1,6 @@
 # Purpose: Input variables for the identity / Zero Trust root module.
 # Section: 5 — Zero Trust + Conditional Access
-# Last updated: 2026-05-26
+# Last updated: 2026-07-10
 
 # ---------------------------------------------------------------------------
 # Tenant + subscription targeting
@@ -55,6 +55,24 @@ variable "approved_sign_in_countries" {
   description = "ISO 3166-1 alpha-2 country codes from which sign-ins are allowed. All other countries are blocked by CA-005."
   type        = list(string)
   default     = ["US", "CA", "GB"]
+}
+
+variable "enable_geo_block_ca_policy" {
+  description = <<-EOT
+    Whether to create the CA-005 geo-block Conditional Access policy (and its
+    named-location replication wait). Default false: the policy create fails
+    persistently with Microsoft Graph error 1040 "NamedLocation ... does not
+    exist in the directory" even though the named location exists (verified live
+    via Graph), and it repeatedly blocks the whole platform/identity apply. In run
+    29068343843 the 1040 hit ~1 minute into a ~34-minute apply while the OIDC
+    token was still valid, so it is a genuine named-location reference issue, not
+    token expiry. The policy is report-only and 1 of 8 CA policies, so disabling
+    its creation loses no enforcement. Set true again once the reference bug is
+    fixed. See ADR-030 (geo_block 1040 persists post-fix; gated off pending root
+    cause).
+  EOT
+  type        = bool
+  default     = false
 }
 
 variable "break_glass_group_object_id" {
@@ -152,6 +170,20 @@ variable "identity_vnet_address_space" {
   description = "CIDR block for the identity VNet. Must not overlap the hubs (10.0.0.0/16, 10.1.0.0/16) or the spokes (10.10/16, 10.11/16, 10.20/16). The Entra DS subnet is computed from this block."
   type        = string
   default     = "10.2.0.0/24"
+}
+
+variable "identity_vnet_dns_servers" {
+  description = <<-EOT
+    The AADDS domain-controller IPs that the identity VNet must use as its DNS
+    servers. Pointing the VNet DNS at the managed domain's DCs is a mandatory AADDS
+    post-deploy step; without it clients on the VNet cannot locate the domain
+    (ADR-029). Set these to the managed domain's two DC IPs, in the order Azure
+    stores them, to avoid a reorder diff. Empty list leaves the VNet on Azure-default
+    DNS (dns_servers passed as null to the VNet module). These are private RFC-1918
+    IPs, safe to commit in tfvars.
+  EOT
+  type        = list(string)
+  default     = []
 }
 
 variable "identity_location" {

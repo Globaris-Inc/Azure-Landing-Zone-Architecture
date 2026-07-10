@@ -14,7 +14,7 @@ output "ca_policy_ids" {
     block_legacy_auth          = azuread_conditional_access_policy.block_legacy_auth.id
     require_compliant_device   = azuread_conditional_access_policy.require_compliant_device_portal.id
     phishing_resistant_mfa_pim = azuread_conditional_access_policy.phishing_resistant_mfa_pim.id
-    geo_block                  = azuread_conditional_access_policy.geo_block.id
+    geo_block                  = one(azuread_conditional_access_policy.geo_block[*].id) # null when var.enable_geo_block_ca_policy = false (ADR-029)
     signin_frequency_admins    = azuread_conditional_access_policy.signin_frequency_admins.id
     block_high_user_risk       = azuread_conditional_access_policy.block_high_user_risk.id
     mfa_signin_risk            = azuread_conditional_access_policy.mfa_signin_risk.id
