@@ -1,6 +1,6 @@
-# Purpose: corp-a1 Private DNS VNet links, SQL PE DNS zone group, and NSG flow logs.
-# Section: 4 — Private Endpoints + Private DNS
-# Last updated: 2026-05-21
+# Purpose: corp-a1 Private DNS VNet links, SQL PE DNS zone group, and VNet flow logs.
+# Section: 4 - Private Endpoints + Private DNS
+# Last updated: 2026-07-10
 #
 # Architecture:
 #   - Data source looks up the centralized DNS zone in the Connectivity subscription
@@ -8,11 +8,12 @@
 #   - VNet link registers the corp-a1 spoke VNet with the SQL private DNS zone.
 #   - DNS zone group on the SQL private endpoint resolves private link FQDNs via
 #     the centralized zone.
-#   - NSG flow logs capture all accepted + rejected flows; Traffic Analytics
-#     correlates them in the platform Log Analytics workspace.
+#   - VNet flow log captures all accepted + rejected flows for the whole spoke
+#     VNet (replaces the retired NSG flow log); Traffic Analytics correlates them
+#     in the platform Log Analytics workspace.
 
 # ---------------------------------------------------------------------------
-# Data source — SQL Private DNS zone (Connectivity subscription)
+# Data source - SQL Private DNS zone (Connectivity subscription)
 # ---------------------------------------------------------------------------
 
 data "azurerm_private_dns_zone" "sql" {
@@ -22,7 +23,7 @@ data "azurerm_private_dns_zone" "sql" {
 }
 
 # ---------------------------------------------------------------------------
-# Spoke VNet link — register corp-a1 spoke with the SQL zone
+# Spoke VNet link - register corp-a1 spoke with the SQL zone
 # ---------------------------------------------------------------------------
 
 resource "azurerm_private_dns_zone_virtual_network_link" "corp_a1_to_sql_zone" {
@@ -37,7 +38,7 @@ resource "azurerm_private_dns_zone_virtual_network_link" "corp_a1_to_sql_zone" {
 }
 
 # ---------------------------------------------------------------------------
-# SQL Private Endpoint — DNS zone group
+# SQL Private Endpoint - DNS zone group
 # Registered via the private_dns_zone_group nested block on
 # azurerm_private_endpoint.sql in main.tf (azurerm has no standalone
 # azurerm_private_dns_zone_group resource). The data source and VNet link below
@@ -45,7 +46,7 @@ resource "azurerm_private_dns_zone_virtual_network_link" "corp_a1_to_sql_zone" {
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Storage Account — NSG flow log sink (Standard LRS, minimal retention)
+# Storage Account - NSG flow log sink (Standard LRS, minimal retention)
 # ---------------------------------------------------------------------------
 
 resource "random_id" "flowlog_sa" {
@@ -80,17 +81,20 @@ data "azurerm_network_watcher" "primary" {
 }
 
 # ---------------------------------------------------------------------------
-# NSG flow log — corp-a1 spoke NSG → platform Log Analytics (Traffic Analytics)
+# VNet flow log - corp-a1 spoke VNet -> platform Log Analytics (Traffic Analytics)
+# Migrated from an NSG flow log: Azure retired new NSG flow log creation on
+# June 30, 2025. target_resource_id points at the spoke VNet (whole-VNet coverage);
+# it replaces the removed network_security_group_id argument.
 # ---------------------------------------------------------------------------
 
 resource "azurerm_network_watcher_flow_log" "spoke" {
-  name                      = "flowlog-spoke-corp-a1-${var.org_prefix}-${var.environment}"
-  network_watcher_name      = data.azurerm_network_watcher.primary.name
-  resource_group_name       = data.azurerm_network_watcher.primary.resource_group_name
-  network_security_group_id = azurerm_network_security_group.spoke.id
-  storage_account_id        = azurerm_storage_account.flow_logs.id
-  enabled                   = true
-  version                   = 2
+  name                 = "flowlog-spoke-corp-a1-${var.org_prefix}-${var.environment}"
+  network_watcher_name = data.azurerm_network_watcher.primary.name
+  resource_group_name  = data.azurerm_network_watcher.primary.resource_group_name
+  target_resource_id   = module.spoke_vnet.resource_id
+  storage_account_id   = azurerm_storage_account.flow_logs.id
+  enabled              = true
+  version              = 2
 
   retention_policy {
     enabled = true

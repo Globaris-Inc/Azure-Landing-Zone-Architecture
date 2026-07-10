@@ -1,16 +1,18 @@
-# Purpose: online-p1 Private DNS VNet links and NSG flow logs.
-# Section: 4 — Private Endpoints + Private DNS
-# Last updated: 2026-05-21
+# Purpose: online-p1 Private DNS VNet links and VNet flow log.
+# Section: 4 - Private Endpoints + Private DNS
+# Last updated: 2026-07-10
 #
 # Architecture:
 #   - No private endpoints in online-p1 scope (Static Web App uses public endpoint);
 #     VNet link still registers the spoke so it can resolve any future PEs via the
 #     central DNS zones.
-#   - Two NSG flow logs: one for the App Gateway NSG and one for the workload NSG.
-#     Traffic Analytics enabled for both.
+#   - Single VNet flow log covering the whole spoke VNet (App Gateway + workload
+#     subnets), with Traffic Analytics enabled. This replaces the two retired NSG
+#     flow logs (appgw NSG + workload NSG): Azure ended new NSG flow log creation on
+#     June 30, 2025, and a VNet supports only one flow log, so both collapse into one.
 
 # ---------------------------------------------------------------------------
-# Data source — SQL Private DNS zone (used for general spoke registration)
+# Data source - SQL Private DNS zone (used for general spoke registration)
 # ---------------------------------------------------------------------------
 
 data "azurerm_private_dns_zone" "sql" {
@@ -20,7 +22,7 @@ data "azurerm_private_dns_zone" "sql" {
 }
 
 # ---------------------------------------------------------------------------
-# Spoke VNet link — register online-p1 spoke with the SQL zone
+# Spoke VNet link - register online-p1 spoke with the SQL zone
 # ---------------------------------------------------------------------------
 
 resource "azurerm_private_dns_zone_virtual_network_link" "online_p1_to_sql_zone" {
@@ -35,7 +37,7 @@ resource "azurerm_private_dns_zone_virtual_network_link" "online_p1_to_sql_zone"
 }
 
 # ---------------------------------------------------------------------------
-# Storage Account — NSG flow log sink for both App Gateway and workload NSGs
+# Storage Account - NSG flow log sink for both App Gateway and workload NSGs
 # ---------------------------------------------------------------------------
 
 resource "random_id" "flowlog_sa" {
@@ -60,7 +62,7 @@ resource "azurerm_storage_account" "flow_logs" {
 }
 
 # ---------------------------------------------------------------------------
-# Network Watcher data source (primary region — eastus2)
+# Network Watcher data source (primary region - eastus2)
 # ---------------------------------------------------------------------------
 
 data "azurerm_network_watcher" "primary" {
@@ -69,46 +71,21 @@ data "azurerm_network_watcher" "primary" {
 }
 
 # ---------------------------------------------------------------------------
-# NSG flow log — App Gateway NSG (internet-facing; captures inbound traffic)
+# VNet flow log - online-p1 spoke VNet -> platform Log Analytics (Traffic Analytics)
+# Migrated from two NSG flow logs (App Gateway NSG + workload NSG): Azure retired
+# new NSG flow log creation on June 30, 2025. A VNet supports only one flow log,
+# so the two collapse into a single VNet flow log that covers both subnets.
+# target_resource_id points at the spoke VNet and replaces network_security_group_id.
 # ---------------------------------------------------------------------------
 
-resource "azurerm_network_watcher_flow_log" "appgw" {
-  name                      = "flowlog-appgw-online-p1-${var.org_prefix}-${var.environment}"
-  network_watcher_name      = data.azurerm_network_watcher.primary.name
-  resource_group_name       = data.azurerm_network_watcher.primary.resource_group_name
-  network_security_group_id = azurerm_network_security_group.appgw.id
-  storage_account_id        = azurerm_storage_account.flow_logs.id
-  enabled                   = true
-  version                   = 2
-
-  retention_policy {
-    enabled = true
-    days    = var.flow_log_retention_days
-  }
-
-  traffic_analytics {
-    enabled               = true
-    workspace_id          = var.platform_law_customer_id
-    workspace_region      = var.primary_location
-    workspace_resource_id = var.platform_law_workspace_id
-    interval_in_minutes   = 10
-  }
-
-  tags = local.common_tags
-}
-
-# ---------------------------------------------------------------------------
-# NSG flow log — Workload NSG (internal spoke traffic)
-# ---------------------------------------------------------------------------
-
-resource "azurerm_network_watcher_flow_log" "workload" {
-  name                      = "flowlog-workload-online-p1-${var.org_prefix}-${var.environment}"
-  network_watcher_name      = data.azurerm_network_watcher.primary.name
-  resource_group_name       = data.azurerm_network_watcher.primary.resource_group_name
-  network_security_group_id = azurerm_network_security_group.workload.id
-  storage_account_id        = azurerm_storage_account.flow_logs.id
-  enabled                   = true
-  version                   = 2
+resource "azurerm_network_watcher_flow_log" "spoke" {
+  name                 = "flowlog-spoke-online-p1-${var.org_prefix}-${var.environment}"
+  network_watcher_name = data.azurerm_network_watcher.primary.name
+  resource_group_name  = data.azurerm_network_watcher.primary.resource_group_name
+  target_resource_id   = module.spoke_vnet.resource_id
+  storage_account_id   = azurerm_storage_account.flow_logs.id
+  enabled              = true
+  version              = 2
 
   retention_policy {
     enabled = true
