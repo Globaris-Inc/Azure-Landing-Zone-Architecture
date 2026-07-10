@@ -101,6 +101,37 @@ and modules the root touches. Capture any known collision, ordering constraint, 
 requires-import behavior that applies, with the fix or workaround. This is where community knowledge
 substitutes for another failed run.
 
+### (d) Resource-type lifecycle / deprecation-and-retirement audit
+
+Enumerate every distinct Azure resource type the root creates (from its `.tf` and the module surface),
+then classify each against the Azure product lifecycle before the first apply. This step exists because a
+RETIRED feature (NSG-targeted `azurerm_network_watcher_flow_log`, creation blocked by Azure 2025-06-30)
+reached apply-time undetected: parts (a) to (c) audit policy, prerequisites, and known issues, but none of
+them audit the cloud provider's retirement calendar. Per-diff code review sees the diff, not the retirement
+feed, so this is a separate gate output.
+
+For each distinct resource type (and each meaningful SKU / feature it selects, e.g. Basic vs Standard public
+IP, App Gateway v1 vs v2, VM image, TLS floor), verify it is not deprecated / retiring / retired using:
+
+- the Azure retirements feed and updates (`https://azure.microsoft.com/en-us/updates`),
+- the Learn retirement / migration docs for the specific feature, and
+- the `azurerm` provider docs / CHANGELOG / deprecation guides pinned at the root's provider version.
+
+Classify each: CURRENT / DEPRECATED (still creatable, discouraged) / RETIRING (announced end date) /
+RETIRED (creation blocked). Record the evidence URL and a disposition (no action / migrate to X / gate off /
+version bump). **Any RETIRED type is a BLOCKER** for the first apply and must be dispositioned before it.
+RETIRING-soon types get the end date and a backlog note. Rank RETIRED and RETIRING first.
+
+Watch specifically for the recurring landmines: NSG flow logs (migrate to VNet flow logs), Basic-SKU public
+IPs / Basic load balancers (retired 2025-09-30, use Standard), App Gateway / Load Balancer v1, classic
+Application Insights, the Log Analytics / MMA agent (retired 2024-08-24), Automation Run As accounts (use
+managed identity), retired VM images (e.g. Ubuntu 18.04), TLS 1.0/1.1, and any `azurerm_*` resource or
+argument the pinned provider marks deprecated.
+
+The cross-root output of this step lives in `docs/preclearance/deprecation-audit.md`. Every per-root
+pre-clearance file (existing and future) must carry a lifecycle-audit section that lists the root's types
+with their status and disposition.
+
 ---
 
 ## 4. Standing known items
@@ -123,21 +154,29 @@ pre-clearance mandate and prior ADRs.
   CI SP once Entra DS reaches `Running`.** Granted time-boxed for the AADDS create; they are standing
   privilege that must not persist. Tracked in `docs/preclearance/platform-identity.md` as a mandatory
   post-apply follow-up.
+- **NSG-targeted flow logs are RETIRED and BLOCK all three landing-zone applies.**
+  `azurerm_network_watcher_flow_log` with `network_security_group_id` cannot be created (Azure blocked
+  new NSG flow logs 2025-06-30; full retirement 2027-09-30). Present in `corp-a1`, `corp-a2` (one each)
+  and `online-p1` (two). Migrate to VNet flow logs: set `target_resource_id` = the spoke VNet id, drop
+  `network_security_group_id`. Collapse online-p1's two logs into one VNet-scoped log. Force recreate,
+  do not update in place (provider issue #31136). Full spec + evidence in
+  `docs/preclearance/deprecation-audit.md` section 3 (cloud-engineer lane).
 
 ---
 
 ## 5. Per-root pre-clearance index
 
 Every root gets a file here before its first apply. Future roots are added to this table as they
-enter the deploy chain.
+enter the deploy chain. The cross-root resource-type lifecycle audit (procedure step 3(d)) lives in
+[`preclearance/deprecation-audit.md`](preclearance/deprecation-audit.md) and applies to every root below.
 
 | Root | File | Status | Notes |
 |------|------|--------|-------|
 | platform/identity (re-apply) | [`preclearance/platform-identity.md`](preclearance/platform-identity.md) | **CLEARED** pending the ordered actions | Policy lane cleared by ADR-028 (Deny-Public-IP RG-scoped Waiver exemption + propagation sleep). Ordered actions: implement ADR-028 (cloud-engineer) -> operator deletes the failed domain shell -> plan/apply -> remove the 2 temp directory roles once Running |
 | platform/security (first apply) | [`preclearance/platform-security.md`](preclearance/platform-security.md) | **BLOCKED** on prerequisites | Policy lane clean (no Deny collision). Blocked on: Security Administrator grant for tenant diagnostics + UEBA (or toggle both off), MDATP connector has no tenant license (drop/gate/accept-fail — user decision), `SECURITY_CONTACT_EMAIL` repo Secret unset |
-| landing-zones/corp-a1 (first apply) | [`preclearance/landing-zones.md`](preclearance/landing-zones.md) | **BLOCKED** | Deploy first (pattern). Blockers: (1) `Enable-DDoS-VNET` Modify still ENFORCED at `landingzones` MG — DoNotEnforce it (ADR-026 extension, platform/management-groups lane); (2) corp-MG `Deny-Public-Endpoints` denies flow-log SA + App Service public access (OQ-024); (3) `Deny-Subnet-Without-Nsg` denies `snet-integration` (attach NSG); (4) `SQL_AAD_ADMIN_OBJECT_ID`/`_LOGIN` Secrets MISSING; (5) `Microsoft.RecoveryServices` RP NotRegistered; (6) `NetworkWatcher_eastus2` missing in LZ sub |
-| landing-zones/corp-a2 (first apply) | [`preclearance/landing-zones.md`](preclearance/landing-zones.md) | **BLOCKED** | Deploy second (DR, centralus). Same blockers as corp-a1 EXCEPT NetworkWatcher (`_centralus` exists). SQL Secrets + RecoveryServices RP shared with corp-a1 |
-| landing-zones/online-p1 (first apply) | [`preclearance/landing-zones.md`](preclearance/landing-zones.md) | **BLOCKED** | Deploy third (internet-facing, eastus2). App Gateway PIP CLEAR (no standalone-PIP deny on this chain). Blockers: DDoS DoNotEnforce (shared), flow-log SA public-PaaS deny (OQ-024), `NetworkWatcher_eastus2` (shared). No SQL/RSV — fewer blockers |
+| landing-zones/corp-a1 (first apply) | [`preclearance/landing-zones.md`](preclearance/landing-zones.md) | **BLOCKED** | Deploy first (pattern). Blockers: (1) `Enable-DDoS-VNET` Modify still ENFORCED at `landingzones` MG, DoNotEnforce it (ADR-026 extension, platform/management-groups lane); (2) corp-MG `Deny-Public-Endpoints` denies flow-log SA + App Service public access (OQ-024); (3) `Deny-Subnet-Without-Nsg` denies `snet-integration` (attach NSG); (4) `SQL_AAD_ADMIN_OBJECT_ID`/`_LOGIN` Secrets MISSING; (5) `Microsoft.RecoveryServices` RP NotRegistered; (6) `NetworkWatcher_eastus2` missing in LZ sub; (7) **RETIRED NSG flow log - migrate to VNet flow log (deprecation-audit.md sec 3)** |
+| landing-zones/corp-a2 (first apply) | [`preclearance/landing-zones.md`](preclearance/landing-zones.md) | **BLOCKED** | Deploy second (DR, centralus). Same blockers as corp-a1 EXCEPT NetworkWatcher (`_centralus` exists). SQL Secrets + RecoveryServices RP shared with corp-a1. **RETIRED NSG flow log - migrate to VNet flow log (deprecation-audit.md sec 3)** |
+| landing-zones/online-p1 (first apply) | [`preclearance/landing-zones.md`](preclearance/landing-zones.md) | **BLOCKED** | Deploy third (internet-facing, eastus2). App Gateway PIP CLEAR (no standalone-PIP deny on this chain). Blockers: DDoS DoNotEnforce (shared), flow-log SA public-PaaS deny (OQ-024), `NetworkWatcher_eastus2` (shared), **RETIRED NSG flow log x2 - collapse to one VNet flow log (deprecation-audit.md sec 3)**. No SQL/RSV so fewer blockers |
 
 **Status legend:** CLEARED (may apply once the listed ordered actions are done) · BLOCKED (a
 prerequisite must be resolved before apply) · N/A (no gate needed, e.g. destroy-only).
