@@ -31,6 +31,43 @@
 
 <!-- Newest at the top. -->
 
+### OQ-022: Durable greenfield fix for OIDC token expiry on the identity root's long (1-3h) AADDS create - split the root, or add CI job-level re-auth?
+
+- **Raised:** 2026-07-10 (identity apply run 29055619749 recovery, architect, ADR-029 Part C)
+- **Section:** 8 (Identity) / 5 (azuread Conditional Access) / 10 (Pipeline & Tooling, OIDC auth)
+- **Blocking:** No - ADR-029's config-driven import closes the token-expiry exposure for the CURRENT POC
+  (the domain is built once, then only refreshed, so every future apply is short). This item is the durable
+  fix for a from-scratch greenfield rebuild only.
+- **Priority:** Medium
+
+**Question:**
+The `platform/identity` root co-locates a 1-3h `azurerm_active_directory_domain_service` create (create-only
+wait for both DCs) with azuread Graph / Conditional-Access operations in ONE CI apply. In run 29055619749
+the trailing azuread ops failed `AADSTS700024: Client assertion is not within its valid time range` - the
+GitHub OIDC federated assertion (~5 min) and its derived access tokens (~1h) do not survive a 3h apply.
+Empirically the azurerm/ARM operations survived (the domain was built), so the exposure is specifically the
+azuread provider's tail-end Graph calls after a cold AADDS create. ADR-029's import makes THIS deployment's
+future applies short (import has no create-wait), so the token never expires again for the POC lifetime. But
+a full teardown + greenfield redeploy (the DEPLOYMENT.md path) would again run the 3h create BEFORE the CA
+policies and re-hit AADSTS700024. What is the durable fix?
+
+**Options being considered:**
+- A: **Split the identity root** into Phase 1 (network + NSG + AADDS managed domain) and Phase 2 (azuread
+  named location + Conditional Access policies), each a separate CI apply so neither apply contains both a
+  multi-hour create AND trailing Graph ops. Cleanest separation of ARM vs Graph lifecycles; cost is a
+  non-trivial refactor (new root, state migration, cross-root data passing for the domain/subnet, provider
+  wiring, an extra pipeline stage).
+- B: **CI job-level re-auth / token refresh** before the azuread operations (e.g. re-run the OIDC
+  azure/login step, or fetch a fresh GitHub id-token, immediately before the Graph-touching apply phase).
+  Smaller change, but the identity root is a single apply so a mid-apply re-auth is awkward; likely pairs
+  with some ordering guarantee that Graph ops run last. Keeps platform/identity CI-only.
+- C: **Accept as a documented POC deviation** - import covers the POC; the greenfield-rebuild token-expiry
+  is a known limitation noted in DEPLOYMENT.md, revisited only if a clean-room redeploy is required.
+
+**Recommendation:** For now, ADR-029 import (no code change here) plus **C** as the interim posture; adopt
+**A** if/when a validated greenfield rebuild becomes a requirement. Do NOT build A speculatively during the
+recovery - the priority is getting the identity layer green. Keep `platform/identity` CI-only either way.
+
 ### OQ-021: ALZ diagnostic-settings DINE (`Deploy-Diag-LogsCat`) fails - its central Log Analytics workspace parameter is unwired (resolves to the zero-GUID subscription)
 
 - **Raised:** 2026-07-09 (identity apply run 29055619749 remediation failure, architect)

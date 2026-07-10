@@ -1,60 +1,97 @@
-# Pre-clearance: platform/identity (RE-APPLY)
+# Pre-clearance: platform/identity (RE-APPLY - RECOVERY after run 29055619749)
 
 > Artifact of the deploy pre-clearance gate (see `docs/deploy-preclearance.md`).
-> Prepared by: architect. Date: 2026-07-09. Status: CLEARED once the actions below are done.
-> Evidence: live az CLI enumeration 2026-07-09 + deploy run 28978396902 logs + MS Learn docs.
+> Prepared by: architect. Date: 2026-07-10. Status: CLEARED once the actions below are done.
+> Evidence: live az CLI enumeration 2026-07-09 + 2026-07-10, deploy run 29055619749 logs,
+> MS Learn (alert-nsg + network-considerations), and the azurerm v4.71.0 provider import docs.
+> Governing decision: **ADR-029** (this recovery), building on ADR-028.
 
-## State of the root
+## State of the root (after run 29055619749)
 
-7 of 8 CA policies exist; the named location exists (fresh id, created 2026-07-08). Remaining to
-create: `geo_block` CA policy, the Entra DS managed domain, plus the ADR-028 exemption resources.
-A HOLLOW failed domain object exists in Azure (ARM envelope `Succeeded`, replica set empty) and is
-NOT in Terraform state.
+ADR-028 worked: the exemption admitted the service PIP and the managed domain was BUILT in Azure this run
+(`provisioningState: Succeeded`, replica set `Running`, one DC IP `10.2.0.4`). But the run then failed on a
+CRITICAL AADDS104 network-error health alert, which cascaded into a create timeout and a token-expiry
+failure of the trailing azuread operations. Net position now:
+
+- Managed domain: **exists in Azure, NOT in Terraform state** (the create never returned, so the provider
+  never recorded the ID). A plain rerun hits the azurerm requires-import guard ("already exists").
+- `geo_block` CA policy: still not created (the 8th of 8). 7 of 8 CA policies exist.
+- NSG `nsg-identity-aadds-globaris-poc`: carries a custom `Deny-All-Inbound` @4000 that is the AADDS104
+  root cause (see below).
+- ADR-028 exemption + the two `time_sleep` resources: already applied (they are why the PIP was admitted).
+
+## AADDS104 finding (primary root cause, verified 2026-07-10)
+
+CRITICAL health alert "The managed domain is experiencing a network error" (replica set East US 2 /
+vnet-identity-globaris-poc / snet-aadds). Live evidence: `snet-aadds` has **routeTable = null** (no UDR, so
+the UDR branch of AADDS104 is ruled out), NSG = `nsg-identity-aadds-globaris-poc`. The NSG's custom
+`Deny-All-Inbound` @4000 sits above (numerically below) the Azure default rules `AllVnetInBound` @65000 and
+`AllowAzureLoadBalancerInBound` @65001 and therefore overrides them - blocking intra-VNet DC replication and
+the load-balancer management/health-probe path (168.63.129.16). MS Learn (alert-nsg, network-considerations,
+reviewed 2026-07-10) is explicit that Domain Services relies on those two default rules and that custom rules
+must not block them. Fix in code per ADR-029: remove the `Deny-All-Inbound` @4000 rule; the Azure defaults
+(AllowVnetInBound @65000, AllowAzureLoadBalancerInBound @65001, DenyAllInBound @65500) then govern, which is
+the MS-recommended default managed-domain NSG. Internet inbound stays denied at @65500.
 
 ## Policy collisions (verified live)
 
 | Assignment | Scope | Effect / mode | Fires on | Verdict |
 |---|---|---|---|---|
-| `Deny-Public-IP` (builtin 6c112d4e-5bc7-47ae-a041-ea2d9dccd749, notAllowed = publicIPAddresses) | identity MG | Deny / Default | The service-created Standard PIP the managed domain MUST deploy (MS Learn network-considerations) | **BLOCKER. Fixed by ADR-028 RG-scoped Waiver exemption on rg-identity-aadds-globaris-poc + 300s propagation sleep, ordered before the domain create.** |
-| `Deny-Subnet-Without-Nsg` | identity MG | Deny / Default | Subnet PUTs | PASS: the Entra DS subnet already exists with its NSG (created run 1) |
-| `Deny-MgmtPorts-Internet` | identity MG | Deny / Default | NSG rules allowing mgmt ports from Internet | PASS: AADDS NSG rules use service tags, proven in run 1 |
+| `Deny-Public-IP` (builtin 6c112d4e-..., notAllowed = publicIPAddresses) | identity MG | Deny / Default | The service-created Standard PIP the managed domain MUST deploy | **CLEARED by ADR-028 RG-scoped Waiver exemption + 300s sleep. PROVEN this run: the PIP was admitted and the domain built.** |
+| `Deny-Subnet-Without-Nsg` | identity MG | Deny / Default | Subnet PUTs | PASS: the Entra DS subnet already exists with its NSG. Removing the custom deny-all rule (ADR-029) does NOT remove the NSG, so this stays satisfied. |
+| `Deny-MgmtPorts-Internet` | identity MG | Deny / Default | NSG rules allowing mgmt ports from Internet | PASS: the retained 5986 rule sources the `AzureActiveDirectoryDomainServices` service tag, not Internet. **CORRECTION: the earlier "proven in run 1" claim was false - run 1 only CREATED the NSG; no domain existed then to prove reachability. Reachability is only now being proven, and the run-5 AADDS104 shows the prior rule set was in fact WRONG (the deny-all blocked the DCs). ADR-029 corrects it.** |
 | `Deploy-VM-Backup` | identity MG | DINE / Default | VMs | N/A (no VMs) |
-| `Deploy-Diag-LogsCat` | globaris MG | DINE / Default | aad-domainservices diagnostics to platform LAW | **Does NOT self-heal (correction).** Verified 2026-07-09 (run 29055619749): the DINE fails with `LinkedAuthorizationFailed` because the assignment's central LAW parameter is unwired - the workspace resource ID resolves to the zero-GUID subscription `00000000-...`. Structural defect, fails for EVERY targeted resource tenant-wide, not just AADDS. `az policy remediation create` would re-fail. Does NOT block the identity apply. Fix = wire the real platform LAW resource ID into the assignment in `platform/management-groups`. Tracked in **OQ-021**. |
+| `Deploy-Diag-LogsCat` | globaris MG | DINE / Default | aad-domainservices diagnostics to platform LAW | **Does NOT self-heal.** Structural unwired-LAW-parameter defect (resolves to the zero-GUID subscription -> `LinkedAuthorizationFailed`), fails tenant-wide for every targeted resource. Does NOT block the identity apply. Fix = wire the real platform LAW resource ID into the assignment in `platform/management-groups`. Tracked in **OQ-021**. |
 
-## Tenant / directory prerequisites (all verified in place 2026-07-08 sessions)
+## Tenant / directory prerequisites (verified in place)
 
-- Graph app roles on the CI SP: Policy.Read.All, Policy.ReadWrite.ConditionalAccess, Application.Read.All (admin-consented).
+- Graph app roles on the CI SP: Policy.Read.All, Policy.ReadWrite.ConditionalAccess, Application.Read.All
+  (admin-consented).
 - "Domain Controller Services" publisher SP exists; "AAD DC Administrators" group exists; CI SP is a member.
-- TEMP directory roles on the CI SP: Application Administrator + Groups Administrator. **Remove both after the domain reaches Running (mandatory ADR follow-up).**
+- TEMP directory roles on the CI SP: Application Administrator + Groups Administrator. **Remove both after
+  the domain is healthy (mandatory ADR-028/ADR-029 follow-up).**
 - Entra ID P2 trial active (all 8 CA policies licensed). Watch expiry (30 days from 2026-07-08 activation).
-- Microsoft.AAD RP registered (in state, `azurerm_resource_provider_registration.aad`).
-- **RBAC for the ADR-028 exemption write - CLEARED (verified live 2026-07-09, `az role assignment list`).**
-  The exemption resource needs `Microsoft.Authorization/policyExemptions/write` at
-  `rg-identity-aadds-globaris-poc`. The CI SP holds it TWO independent ways, both inherited to that RG:
-  (a) Owner @ managementGroups/globaris (org root MG), and (b) Resource Policy Contributor @
-  managementGroups/globaris (grants `Microsoft.Authorization/policyExemptions/*`). It will not 403 even
-  after the OQ-008 Owner scope-down, since Resource Policy Contributor @ globaris survives it. This
-  closes the last RBAC uncertainty for the identity re-apply.
+- Microsoft.AAD RP registered (in state).
+- RBAC for the ADR-028 exemption write: CLEARED (Resource Policy Contributor @ globaris, independent of the
+  standing Owner grant that OQ-008 will remove).
 
 ## Known provider/service behaviors in play
 
-- Graph replication lag on FRESHLY created named locations (error 1040): run 4 hit it 1 second after
-  create. For THIS re-apply no action is needed (the location is days old); ADR-028 adds the durable
-  `time_sleep` for greenfield.
-- azurerm v4 requires-import guard: the create GETs the resource first; the leftover hollow domain
-  object WILL fail the create with "already exists". Hence the mandatory delete below.
-- Entra DS create runs ~45-75 min (resource timeout 3h, CI job timeout 360 min - fine).
+- **Config-driven import is the recovery mechanism (ADR-029).** The domain is built but unstated; an
+  `import {}` block brings it into state during the normal CI plan/apply (no local `terraform import`). The
+  import ID is a COMPOSITE: `<domain resource ID>/initialReplicaSetId/<initial replica set GUID>` - a plain
+  resource-ID import fails. The replica set GUID must be read from the live domain (portal or
+  `az resource show --ids <domain-id> --query "properties.replicaSets[0].replicaSetId"`) and handed to the
+  cloud-engineer. Root pins `required_version >= 1.9`, so import blocks are supported.
+- The `azurerm_active_directory_domain_service` create waits for both DCs (create-only, 3h default timeout).
+  After import, the wait is never re-entered; subsequent applies do a Read (seconds).
+- **OIDC token expiry on long applies (ADR-029 Part C):** the GitHub OIDC assertion (~5 min) and derived
+  tokens (~1h) do not survive a 3h apply, which is why the trailing azuread/Graph ops failed with
+  AADSTS700024 in run 5. Import removes the multi-hour long pole, so future applies are short and the token
+  stays valid. `geo_block`'s 1040 was NOT propagation (the named location is days old); it was the expired
+  assertion. Durable greenfield fix (root split or CI re-auth) tracked in **OQ-022**.
 
-## Ordered actions before re-apply
+## Ordered actions before / during re-apply (ADR-029 runbook)
 
-1. Cloud-engineer implements ADR-028 (exemption + time provider + 2x time_sleep + depends_on wiring)
-   in `platform/identity`. Code-reviewer gates the batch.
-2. Operator deletes the failed domain shell (az CLI):
-   `az resource delete --ids /subscriptions/<identity-sub>/resourceGroups/rg-identity-aadds-globaris-poc/providers/Microsoft.AAD/domainServices/aadds-globaris-poc`
-   and waits for completion (verify with `az resource list -g rg-identity-aadds-globaris-poc`).
-3. CI plan: expect 5 to add (exemption, 2 sleeps, domain, geo_block), 0 change, 0 destroy.
-4. CI apply.
-5. Post-apply: domain reaches Running -> remove the 2 temp directory roles. Note: the
-   aad-domainservices diagnostic setting will NOT appear via auto-remediation - `Deploy-Diag-LogsCat`
-   fails structurally on its unwired LAW parameter (see the policy-collisions table and OQ-021).
-   Do not wait on it here; fix is a separate `platform/management-groups` change.
+1. Cloud-engineer (code, `platform/identity`, one batch, code-reviewer gates):
+   (a) remove the `Deny-All-Inbound` @4000 `security_rule` from `azurerm_network_security_group.entra_ds`
+   (keep the 5986 rule; update the NSG header comment to cite the alert-nsg / network-considerations
+   default-rule requirement); (b) add an `import {}` block for
+   `azurerm_active_directory_domain_service.this[0]` with the composite import ID.
+2. Operator supplies the initial replica set GUID (portal or az) for the import ID.
+3. CI plan: expect NSG updated in place (1 rule removed), domain **IMPORTED** (not created), `geo_block`
+   created (1 to add); 0 destroy. Gate the plan: it must show "import" (not "create") for the domain, and the
+   NSG diff must remove only the deny rule.
+4. CI apply: NSG deny rule removed, domain imported, geo_block created. Short apply -> OIDC token stays valid.
+5. Post-apply verification (operator, az): AADDS104 clears and the 2nd DC IP appears. Health auto-updates
+   within ~2h of the NSG fix (alert-nsg article). Verify via `az ad ds show` / the portal health blade.
+6. Post-apply cleanup: remove the two temp directory roles (Application Administrator + Groups Administrator)
+   from the CI SP once the domain is healthy. The `Deploy-Diag-LogsCat` diagnostic setting will NOT appear
+   via auto-remediation (OQ-021, unwired LAW parameter, separate `platform/management-groups` fix).
+7. Confirm steady state: a later CI plan shows 0 changes on the domain (Read-only refresh), proving the
+   token-expiry exposure is closed for the POC.
+
+Sequencing note: NSG fix and the import block MUST ship together. An NSG-only apply would try to CREATE the
+still-unstated domain and fail the requires-import guard. Import has no create-wait, so it succeeds even
+while the 2nd DC is still healing; the heal completes asynchronously afterward (benign computed update).
+Healing before import is not achievable without a local import or -target, both forbidden by the CI-only rule.

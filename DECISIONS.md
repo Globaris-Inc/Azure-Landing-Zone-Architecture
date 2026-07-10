@@ -37,6 +37,170 @@
 
 <!-- Newest at the top. -->
 
+### ADR-029: Entra DS recovery - restore the default NSG inbound rules (AADDS104 fix), config-driven import of the built-but-unstated managed domain, and OIDC-token-expiry-on-long-apply mitigation
+
+- **Date:** 2026-07-10
+- **Section:** 8 (Identity subscription, Entra DS) / 5 (azuread Conditional Access) / 10 (CI auth)
+- **Status:** Accepted
+- **Decision makers:** user (mandated systemic fix after the 4-fail bar), claude (architect)
+
+**Context:**
+The 5th platform/identity apply (run 29055619749) failed after the ADR-028 exemption had already done its
+job. Evidence that ADR-028 worked: the managed domain was actually built in Azure this time (the
+service-created Standard PIP was admitted, `provisioningState: Succeeded`, replica set `Running`, one DC IP
+`10.2.0.4`). The run then produced three errors, with a single primary root cause and two consequences.
+
+Primary root cause - **AADDS104 CRITICAL health alert "The managed domain is experiencing a network
+error"** (raised 2026-07-10 01:25 UTC, replica set East US 2 / vnet-identity-globaris-poc / snet-aadds).
+Live network evidence gathered 2026-07-10 via az: `snet-aadds` has NSG `nsg-identity-aadds-globaris-poc`
+and **routeTable = null** (no UDR, so the UDR branch of AADDS104 is ruled out - it is the NSG). The NSG's
+only two custom rules are `Allow-AADDS-Management-5986` @301 (Allow TCP 5986 from the
+`AzureActiveDirectoryDomainServices` service tag) and `Deny-All-Inbound` @4000 (Deny * / * / *).
+
+The `Deny-All-Inbound` @4000 is the defect, now confirmed against MS Learn (not taken on faith):
+- The AADDS104 troubleshooting article (learn.microsoft.com, entra/identity/domain-services/alert-nsg,
+  reviewed 2026-07-10) lists the default inbound rules the managed domain relies on:
+  `AllowPSRemoting` 5986 @301 (from `AzureActiveDirectoryDomainServices`), optional `AllowRD` 3389 @201
+  (from `CorpNetSaw`), **`AllVnetInBound` Any @65000 (from `VirtualNetwork`)**, **`AllowAzureLoadBalancerInBound`
+  Any @65001 (from `AzureLoadBalancer`)**, and `DenyAllInBound` Any @65500.
+- The network-considerations article (entra/identity/domain-services/network-considerations, reviewed
+  2026-07-10) is explicit: "Domain Services also relies on the Default Security rules AllowVnetInBound and
+  AllowAzureLoadBalancerInBound." AllowVnetInBound lets the two DCs communicate and replicate and lets
+  domain members join. AllowAzureLoadBalancerInBound is "required so that the service can properly
+  communicate over the loadbalancer to manage the DCs." The domain sits behind an internal Standard SKU
+  load balancer, and the platform health probe source is `AzureLoadBalancer` (168.63.129.16).
+- NSG rules evaluate lowest-priority-number first. Our custom `Deny-All-Inbound` @4000 sits ABOVE (numerically
+  below) both required defaults (`AllVnetInBound` @65000 and `AllowAzureLoadBalancerInBound` @65001), so it
+  wins and blocks both intra-VNet DC replication and the load-balancer management/health path. The single
+  5986 management allow is not sufficient. Result: Microsoft cannot reach the DCs, the second DC never
+  becomes reachable, and AADDS104 fires. The network-considerations article warns directly: "Don't create
+  or use an existing network security group with your own custom rules"; the alert-nsg article says to
+  "delete any custom rules that block required traffic."
+
+Consequence 1 - **the domain create timed out (`waiting for both domain controllers to become available ...
+last state 'pending', 2h11m46s`).** This is create-only wait behaviour of
+`azurerm_active_directory_domain_service` (provider docs confirm create defaults to a 3h timeout that
+"accommodates the lengthy provisioning process ... for domain controller infrastructure"). Because
+AADDS104 blocked the 2nd DC, the wait never returned and the create errored during polling. IMPORTANT STATE
+FACT: the domain exists in Azure but is NOT in Terraform state (the provider records the ID only after the
+create's polling returns). A plain rerun hits azurerm's requires-import guard ("already exists") and fails
+again.
+
+Consequence 2 - **`azuread_conditional_access_policy.geo_block` failed 400/1040 (named-location), and the
+run surfaced `AADSTS700024: Client assertion is not within its valid time range`** (assertion valid
+22:49:19Z to 22:54:19Z; the trailing Graph ops ran at 01:55:24Z). The GitHub OIDC federated assertion
+(~5 min) and its derived access tokens (~1h) do not survive a 3h apply. The 1040 "named location not found"
+is NOT propagation lag: the named location has existed since 2026-07-08 (days old, well past the Graph
+replication window that ADR-028's `time_sleep.wait_named_location` guards). The true blocker was the expired
+client assertion - the azuread/Graph operations at the tail of a multi-hour apply could no longer
+authenticate. This is architectural: the identity root co-locates a 1-3h AADDS create with azuread
+Graph/Conditional-Access operations in one CI apply. (The azurerm/ARM operations survived the long apply -
+the domain was built - so the exposure is specifically the azuread provider's tail-end Graph calls.)
+
+**Decision:**
+
+**Part A - NSG: remove the custom `Deny-All-Inbound` rule and fall back to the Azure default rules
+(Option a).** Correct the `azurerm_network_security_group.entra_ds` rule set to:
+- KEEP `Allow-AADDS-Management-5986` @301 (Allow TCP 5986 from `AzureActiveDirectoryDomainServices`). This
+  equals Microsoft's own `AllowPSRemoting` @301.
+- DELETE the `Deny-All-Inbound` @4000 rule entirely.
+- The Azure default rules then govern, exactly as Microsoft requires: `AllowVnetInBound` @65000,
+  `AllowAzureLoadBalancerInBound` @65001, and `DenyAllInBound` @65500. Internet inbound remains denied by the
+  default @65500, so removing our custom deny loses no protection. The resulting NSG reproduces Microsoft's
+  documented default managed-domain NSG (minus the optional `CorpNetSaw` RDP rule, which is deny-by-default
+  and not needed).
+This does not trip policy: `Deny-Subnet-Without-Nsg` is still satisfied (the NSG still exists on the subnet),
+and `Deny-MgmtPorts-Internet` is satisfied (the 5986 rule sources a service tag, not Internet). No ALZ
+policy requires a custom explicit deny-all rule.
+
+**Part B - config-driven import of the built-but-unstated domain.** The domain exists in Azure but not in
+state; a rerun would fail the requires-import guard. Recover it with a Terraform **`import {}` block** (config-
+driven import, supported since Terraform 1.5; the root pins `required_version >= 1.9`, so this is available)
+processed during the normal CI plan/apply - NO local `terraform import`, respecting the CI-only-apply rule.
+CRITICAL FORMAT DETAIL (verified against the provider import docs, v4.71.0): the import ID for
+`azurerm_active_directory_domain_service` is a **composite**, not the plain resource ID -
+`<domain resource ID>/initialReplicaSetId/<initial replica set GUID>`. A plain resource-ID import would fail.
+The initial replica set GUID must be read from the live domain (portal, or
+`az resource show --ids <domain-id> --query "properties.replicaSets[0].replicaSetId"`) and supplied to the
+cloud-engineer; it is implementation detail, not committed prose. After import, the domain is in state; the
+create-wait (a create-only operation) is never re-entered, so subsequent plans do a Read (GET, seconds) and
+show 0 changes on the domain. The 2nd DC IP populating after the NSG heals lands in the computed
+`domain_controller_ip_addresses` of the replica set, so it causes no config diff (benign).
+
+**Part C - OIDC token expiry on long applies: import is the fix for the POC now; a durable greenfield fix
+is tracked, not built.** Once the domain is imported, the identity root has no remaining multi-hour long
+pole, so every future apply is short and the OIDC assertion/token never expires. `geo_block` then succeeds
+on the recovery apply for two independent reasons: the apply is short (valid token) and the named location
+is days old (resolves immediately). Keep `time_sleep.wait_named_location` (ADR-028) - it is harmless and
+keeps the greenfield DEPLOYMENT.md path deterministic. Import ALONE suffices for the POC because the domain
+is created once and thereafter only refreshed. Splitting the identity root into a Phase-1 (network + AADDS)
+and Phase-2 (azuread CA) apply, or adding a CI job-level re-auth for the azuread provider, is the durable
+fix for a from-scratch greenfield rebuild (where the 3h create would again precede the Graph ops), but that
+is a non-trivial refactor (new root, state migration, cross-root data passing) and speculative scope for a
+POC that must go green. Tracked as OQ-022. platform/identity stays CI-only.
+
+**Ordered recovery runbook:**
+1. Cloud-engineer (code, `platform/identity`, one batch, code-reviewer gates):
+   (a) remove the `Deny-All-Inbound` @4000 `security_rule` from `azurerm_network_security_group.entra_ds`
+   and update the NSG header comment to cite the alert-nsg / network-considerations requirement that the
+   default AllowVnetInBound + AllowAzureLoadBalancerInBound rules must remain in effect and that a custom
+   low-priority deny-all breaks AADDS; (b) add an `import {}` block with
+   `to = azurerm_active_directory_domain_service.this[0]` and `id = "<composite import ID>"` (domain
+   resource ID + `/initialReplicaSetId/<replica-set GUID>` obtained from the operator/az).
+2. Operator supplies the initial replica set GUID (portal or az) to the cloud-engineer for the import ID.
+3. CI plan: expect the NSG updated in place (1 rule removed), the domain IMPORTED (plan shows import, not
+   create), and `geo_block` created (1 to add); 0 destroy. Gate: verify the plan shows "import" (not
+   "create") for the domain and the NSG diff removes only the deny rule.
+4. CI apply: NSG deny rule removed, domain imported into state, geo_block created. The apply is short (no
+   multi-hour create-wait), so the OIDC token stays valid.
+5. Post-apply verification (operator, az): AADDS104 clears and the domain health returns to green, and the
+   2nd DC IP appears (replica set shows two DC IPs). Per the alert-nsg article, the managed domain's health
+   auto-updates within ~2 hours of the NSG fix. Verify via `az ad ds show` / the portal health blade.
+6. Post-apply cleanup: once the domain is healthy, REMOVE the two temp directory roles (Application
+   Administrator + Groups Administrator) from the CI SP (standing follow-up from ADR-028 / the 2026-07-08
+   session).
+7. Confirm steady state: a subsequent CI plan shows 0 changes on the domain (Read-only refresh), proving the
+   token-expiry exposure is closed for the POC lifetime.
+
+Sequencing note (why NSG-fix and import ship together, not NSG-first-then-import): an NSG-only apply is not
+viable while the domain is in config but not in state - the domain resource would attempt a CREATE and fail
+the requires-import guard. The `import {}` block must therefore ship in the same change as the NSG fix so
+the domain resolves to import, not create. This is safe: import is a metadata read with no create-wait, so
+it succeeds even while the 2nd DC is still healing, and the heal completes asynchronously afterward (benign
+computed-attribute update). Healing before import is not achievable without a local import or a -target,
+both of which the CI-only rule forbids.
+
+**Alternatives considered:**
+- NSG Option (b): keep a custom `Deny-All-Inbound` and add explicit Allow-inbound rules for `VirtualNetwork`
+  and `AzureLoadBalancer` (plus 5986) above priority 4000 - rejected: it merely reproduces the Azure default
+  rules with two extra self-managed rules, adds maintenance surface, and gives zero additional protection
+  (Internet is already denied at the default @65500). MS guidance names the default rules as the required
+  ones and says to remove custom rules that block them, so Option (a) is both simpler and canonical.
+- Delete the failed domain and redeploy from scratch (the ADR-028 shell-delete pattern) - rejected here: in
+  run 4 the object was a hollow shell (empty replica set); in run 5 the domain is genuinely built (Succeeded,
+  replica set Running, a live DC). Deleting a real, healthy-after-NSG-fix managed domain to recreate it would
+  incur another 1-3h create and re-expose the token-expiry problem. Import preserves the built domain.
+- Split the identity root now (Phase 1 network+AADDS, Phase 2 azuread CA) - deferred (OQ-022): the durable
+  greenfield fix, but a non-trivial refactor and speculative scope for the immediate recovery. Import alone
+  closes the token-expiry for the POC.
+- Blame propagation for geo_block and add more sleep - rejected: the named location is days old, so 1040 was
+  not propagation; the real cause was the expired client assertion, fixed by the short (post-import) apply.
+
+**Consequences:**
+- Positive: AADDS104 is fixed at the IaC layer with the MS-canonical minimal NSG; the built domain is
+  recovered into state without destroying it; every future apply is short, closing the OIDC-token-expiry
+  exposure; geo_block succeeds; the greenfield-reproducibility gap is captured rather than silently carried.
+- Negative / trade-offs: the subnet now relies on the Azure default rules for AllowVnetInBound /
+  AllowAzureLoadBalancerInBound / DenyAllInBound rather than an explicit repo-authored deny (documented and
+  MS-recommended, but the deny-all is now implicit at @65500). The import ID carries a live replica set GUID
+  that must be fetched operationally. A from-scratch greenfield rebuild still hits the 3h create before the
+  Graph ops until OQ-022 is addressed.
+- Follow-ups required: (1) operator supplies the initial replica set GUID for the import ID; (2) post-apply,
+  verify AADDS104 clears and the 2nd DC heals within ~2h; (3) remove the two temp directory roles from the CI
+  SP after the domain is healthy; (4) OQ-022 tracks the durable greenfield token-expiry fix (root split or CI
+  re-auth); (5) OQ-021 (unwired Deploy-Diag-LogsCat LAW parameter) and OQ-008 (standing Owner removal) are
+  unchanged by this ADR.
+
 ### ADR-028: Resource-group-scoped policy exemption for Entra Domain Services vs the ALZ Deny-Public-IP assignment at the Identity MG
 
 - **Date:** 2026-07-09
