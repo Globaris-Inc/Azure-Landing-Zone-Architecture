@@ -227,6 +227,11 @@ module "app_service_plan" {
   os_type   = "Linux"
   sku_name  = var.app_service_sku
 
+  # Basic SKU does not support zone redundancy (ARM 52050); the module defaults
+  # zone_balancing_enabled to true, so disable it explicitly for the POC. Zone
+  # redundancy is not required here and would force a costlier Premium tier.
+  zone_balancing_enabled = false
+
   tags = local.common_tags
 }
 
