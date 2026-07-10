@@ -110,8 +110,10 @@ pre-clearance mandate and prior ADRs.
 
 - **Enable-DDoS-VNET at the `landingzones` MG must be set to `DoNotEnforce` BEFORE any spoke applies**
   (ADR-026 follow-up). The Modify assignment's placeholder DDoS-plan parameter breaks VNet creates
-  under it; the spoke roots create VNets under `landingzones`. Clear this in the spoke pre-clearance
-  files before their first apply.
+  under it; the spoke roots create VNets under `landingzones`. **CONFIRMED STILL ENFORCED live
+  2026-07-10** (`az policy assignment show`: `enforcementMode=Default`, `effect=Modify`, `ddosPlan`
+  = the zero-GUID placeholder). Fix spec + exact `policy_assignments_to_modify` diff is in
+  `preclearance/landing-zones.md` section 6 (platform/management-groups lane). Not yet applied.
 - **Check `Deny-Public-IP` at the `corp` / `online` MGs vs the `online-p1` Application Gateway PIP.**
   Same collision class as ADR-028 (Entra DS PIP at the identity MG). App Gateway v2 mandates a public
   IP; if `Deny-Public-IP` is assigned on the archetype MG above the online spoke, the App Gateway PIP
@@ -133,6 +135,9 @@ enter the deploy chain.
 |------|------|--------|-------|
 | platform/identity (re-apply) | [`preclearance/platform-identity.md`](preclearance/platform-identity.md) | **CLEARED** pending the ordered actions | Policy lane cleared by ADR-028 (Deny-Public-IP RG-scoped Waiver exemption + propagation sleep). Ordered actions: implement ADR-028 (cloud-engineer) -> operator deletes the failed domain shell -> plan/apply -> remove the 2 temp directory roles once Running |
 | platform/security (first apply) | [`preclearance/platform-security.md`](preclearance/platform-security.md) | **BLOCKED** on prerequisites | Policy lane clean (no Deny collision). Blocked on: Security Administrator grant for tenant diagnostics + UEBA (or toggle both off), MDATP connector has no tenant license (drop/gate/accept-fail — user decision), `SECURITY_CONTACT_EMAIL` repo Secret unset |
+| landing-zones/corp-a1 (first apply) | [`preclearance/landing-zones.md`](preclearance/landing-zones.md) | **BLOCKED** | Deploy first (pattern). Blockers: (1) `Enable-DDoS-VNET` Modify still ENFORCED at `landingzones` MG — DoNotEnforce it (ADR-026 extension, platform/management-groups lane); (2) corp-MG `Deny-Public-Endpoints` denies flow-log SA + App Service public access (OQ-024); (3) `Deny-Subnet-Without-Nsg` denies `snet-integration` (attach NSG); (4) `SQL_AAD_ADMIN_OBJECT_ID`/`_LOGIN` Secrets MISSING; (5) `Microsoft.RecoveryServices` RP NotRegistered; (6) `NetworkWatcher_eastus2` missing in LZ sub |
+| landing-zones/corp-a2 (first apply) | [`preclearance/landing-zones.md`](preclearance/landing-zones.md) | **BLOCKED** | Deploy second (DR, centralus). Same blockers as corp-a1 EXCEPT NetworkWatcher (`_centralus` exists). SQL Secrets + RecoveryServices RP shared with corp-a1 |
+| landing-zones/online-p1 (first apply) | [`preclearance/landing-zones.md`](preclearance/landing-zones.md) | **BLOCKED** | Deploy third (internet-facing, eastus2). App Gateway PIP CLEAR (no standalone-PIP deny on this chain). Blockers: DDoS DoNotEnforce (shared), flow-log SA public-PaaS deny (OQ-024), `NetworkWatcher_eastus2` (shared). No SQL/RSV — fewer blockers |
 
 **Status legend:** CLEARED (may apply once the listed ordered actions are done) · BLOCKED (a
 prerequisite must be resolved before apply) · N/A (no gate needed, e.g. destroy-only).

@@ -31,6 +31,41 @@
 
 <!-- Newest at the top. -->
 
+### OQ-024: corp-MG `Deny-Public-Endpoints` (+ `Deny-Subnet-Without-Nsg`) collide with the spoke public-PaaS resources - exempt, redesign, or downgrade?
+
+- **Raised:** 2026-07-10 (landing-zones deploy pre-clearance, architect)
+- **Section:** 9 (Landing Zone Spokes) / 2 (policy)
+- **Blocking:** Yes - blocks the flow-log storage account create on all three spokes, and the App Service
+  create on corp-a1/corp-a2, and the `snet-integration` subnet on corp-a1/corp-a2.
+- **Priority:** High
+
+**Question:**
+The `landingzones` subscription sits under the **`corp`** MG (the `online` MG is empty), so all three spokes
+inherit the corp archetype `Deny-Public-Endpoints` (Deny-PublicPaaSEndpoints) initiative, which is **enforced
+with default effect = Deny**. Live-verified members that fire:
+`StorageDenyPaasPublicIP` denies the flow-log storage accounts (public network access Enabled, all 3 spokes)
+and `AsDenyPublicIP` denies the App Services (public inbound not disabled, corp-a1/a2). Separately,
+`Deny-Subnet-Without-Nsg` (landingzones MG, Deny) denies corp `snet-integration` (no NSG). How do we admit
+the required POC resources without gutting the corp archetype governance?
+
+**Options being considered:**
+- **A (recommended): RG-scoped Waiver policy exemptions + attach the NSG.** Per the ADR-028 precedent, add
+  `azurerm_resource_group_policy_exemption` (Waiver) in each spoke root scoped to the specific RG for the
+  specific member ref: `rg-<spoke>-network-*` for `StorageDenyPaasPublicIP`, `rg-<spoke>-workload-*` for
+  `AsDenyPublicIP`. Keeps `SqlServerDenyPaasPublicIP` fully enforced (spoke SQL is already private). For the
+  subnet, attach the existing spoke NSG to `snet-integration` in code (App Service delegated subnets support
+  NSGs) - no exemption needed. Narrowest blast radius, auditable, IaC-managed.
+- **B: Disable public network access on the flow-log SAs and App Services.** Rejected as default - can break
+  NSG flow-log delivery (Network Watcher service reachability) and changes the App Service reachability model
+  without validation.
+- **C: Downgrade the initiative Storage/AppService effect params to `Audit`/`Disabled` at the corp
+  assignment (platform/management-groups).** Rejected - weakens governance for the whole corp archetype to
+  admit three POC resources.
+
+Also parks a topology observation: an "online" archetype workload (`online-p1`) deploying under the `corp` MG
+is a placement mismatch (the `online` MG has no subscription). Non-blocking; note for a later hierarchy
+decision.
+
 ### OQ-023: Root-cause the geo_block Conditional Access 1040 named-location reference failure (bounded diagnosis, then re-enable)
 
 - **Raised:** 2026-07-10 (identity recovery apply run 29068343843, architect, ADR-030)
