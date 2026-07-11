@@ -1,6 +1,6 @@
-# Purpose: Management platform root module — FinOps governance, tag policy, budgets,
+# Purpose: Management platform root module - FinOps governance, tag policy, budgets,
 #          cost exports, anomaly alerts, and Carbon Optimization workbook.
-# Section: 7 — FinOps: Tagging & Budgets
+# Section: 7 - FinOps: Tagging & Budgets
 # Last updated: 2026-07-08
 #
 # Apply order: depends on platform/management-groups (policy assignments scope to MGs).
@@ -27,7 +27,7 @@ locals {
     var.tags
   )
 
-  # Deterministic MG resource IDs — no data source needed; IDs follow the known pattern
+  # Deterministic MG resource IDs - no data source needed; IDs follow the known pattern
   # set in platform/management-groups/lib/globaris.alz_architecture_definition.json.
   globaris_mg_id     = "/providers/Microsoft.Management/managementGroups/globaris"
   platform_mg_id     = "/providers/Microsoft.Management/managementGroups/platform"
@@ -105,7 +105,7 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# Resource Group — FinOps resources in the management subscription
+# Resource Group - FinOps resources in the management subscription
 # ---------------------------------------------------------------------------
 
 resource "azurerm_resource_group" "finops" {
@@ -115,7 +115,7 @@ resource "azurerm_resource_group" "finops" {
 }
 
 # ---------------------------------------------------------------------------
-# Storage Account — dedicated cost export sink
+# Storage Account - dedicated cost export sink
 # ---------------------------------------------------------------------------
 
 # Globally-unique suffix for the storage account name (3-24 chars, alphanumeric only).
@@ -153,7 +153,7 @@ resource "azurerm_storage_container" "cost_exports" {
 # by the pipeline against this account (Section 4 PE validation, export inspection)
 # needs an explicit data role. Mirrors bootstrap/identity.tf on the tfstate SA.
 #
-# NOTE — refresh does NOT depend on this assignment existing first: with
+# NOTE - refresh does NOT depend on this assignment existing first: with
 # storage_use_azuread = true (providers.tf), the provider's refresh reads (Get Blob/
 # Queue Service Properties) authorize via the control-plane actions
 # Microsoft.Storage/storageAccounts/{blobServices,queueServices}/read, already held
@@ -161,7 +161,7 @@ resource "azurerm_storage_container" "cost_exports" {
 # queue_properties are managed here and Get Queue Service Properties needs no
 # queue dataAction (per MS REST auth docs, verified 2026-07-07).
 #
-# Contingency only — if a refresh still returns 403 AuthorizationPermissionMismatch,
+# Contingency only - if a refresh still returns 403 AuthorizationPermissionMismatch,
 # the operator can pre-grant out-of-band, then import to avoid a 409 duplicate:
 #   az role assignment create \
 #     --assignee-object-id $TERRAFORM_SP_OBJECT_ID \
@@ -177,7 +177,7 @@ resource "azurerm_role_assignment" "terraform_sp_cost_exports_blob" {
 }
 
 # ---------------------------------------------------------------------------
-# Tag Governance — custom initiative using built-in Azure Policy definitions
+# Tag Governance - custom initiative using built-in Azure Policy definitions
 # ---------------------------------------------------------------------------
 #
 # see tag-churn fix (2026-07-10): the initiative previously used
@@ -223,7 +223,7 @@ resource "azurerm_role_assignment" "terraform_sp_cost_exports_blob" {
 resource "azurerm_policy_set_definition" "tag_governance" {
   name         = "tag-governance-${var.org_prefix}"
   policy_type  = "Custom"
-  display_name = "${title(var.org_prefix)} — Tag Governance Initiative"
+  display_name = "${title(var.org_prefix)} - Tag Governance Initiative"
   description  = "Adds 8 mandatory tags to every resource group when missing (Modify, if-missing) and propagates them to child resources when missing (Modify, if-missing). Never overwrites an existing tag value - see tag-churn fix. Assigned at the Globaris root management group."
 
   # DEVIATION: management_group_id is marked deprecated in azurerm ~>4.71 with no documented
@@ -268,7 +268,7 @@ resource "azurerm_management_group_policy_assignment" "tag_governance" {
   name                 = "tag-governance-${var.org_prefix}"
   management_group_id  = local.globaris_mg_id
   policy_definition_id = azurerm_policy_set_definition.tag_governance.id
-  display_name         = "Tag Governance — All ${title(var.org_prefix)} Resources"
+  display_name         = "Tag Governance - All ${title(var.org_prefix)} Resources"
   description          = "Fills in missing tags (never overwrites existing values) for all 8 required tags on resource groups and resources under the Globaris hierarchy. See tag-churn fix."
   location             = var.primary_location
 
@@ -344,7 +344,7 @@ module "finops" {
   export_start_date         = var.budget_start_date
   export_end_date           = var.export_end_date
 
-  # No VMs exist yet — auto-shutdown schedules added from Section 8 onwards.
+  # No VMs exist yet - auto-shutdown schedules added from Section 8 onwards.
   vm_shutdown_schedules = {}
 
   tags = local.common_tags
@@ -385,7 +385,7 @@ resource "azurerm_consumption_budget_management_group" "this" {
 }
 
 # ---------------------------------------------------------------------------
-# Cost anomaly alert — management subscription scope
+# Cost anomaly alert - management subscription scope
 # ---------------------------------------------------------------------------
 
 # DEVIATION: No AVM module for azurerm_cost_anomaly_alert.
@@ -396,7 +396,7 @@ resource "azurerm_cost_anomaly_alert" "management" {
   name            = "anomaly-alert-management-${var.org_prefix}"
   display_name    = "Cost Anomaly Alert - ${title(var.org_prefix)} Mgmt"
   subscription_id = "/subscriptions/${var.management_subscription_id}"
-  email_subject   = "[${upper(var.environment)}] Azure Cost Anomaly Detected — ${title(var.org_prefix)}"
+  email_subject   = "[${upper(var.environment)}] Azure Cost Anomaly Detected - ${title(var.org_prefix)}"
   email_addresses = var.budget_alert_contact_emails
 }
 
@@ -408,13 +408,13 @@ resource "azurerm_cost_anomaly_alert" "management" {
 # This is a placeholder workbook. Replace data_json with the full Microsoft FinOps
 # Toolkit Carbon Optimization workbook JSON from:
 # https://github.com/microsoft/finops-toolkit/tree/main/src/workbooks
-# The azurerm resource name must be a lowercase UUID — uuidv5 produces a
+# The azurerm resource name must be a lowercase UUID - uuidv5 produces a
 # deterministic GUID from the org prefix, avoiding random resource replacement.
 resource "azurerm_application_insights_workbook" "carbon_optimization" {
   name                = local.carbon_workbook_id
   resource_group_name = azurerm_resource_group.finops.name
   location            = var.primary_location
-  display_name        = "Carbon Optimization — ${title(var.org_prefix)}"
+  display_name        = "Carbon Optimization - ${title(var.org_prefix)}"
 
   data_json = jsonencode({
     version = "Notebook/1.0"
@@ -435,11 +435,11 @@ resource "azurerm_application_insights_workbook" "carbon_optimization" {
 }
 
 # ===========================================================================
-# Section 8 — Standard Platform Components: Management sub additions
+# Section 8 - Standard Platform Components: Management sub additions
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Resource Group — management platform monitoring/compute
+# Resource Group - management platform monitoring/compute
 # ---------------------------------------------------------------------------
 
 resource "azurerm_resource_group" "management" {
@@ -449,7 +449,7 @@ resource "azurerm_resource_group" "management" {
 }
 
 # ---------------------------------------------------------------------------
-# Platform Log Analytics Workspace — PerGB2018, 90-day retention
+# Platform Log Analytics Workspace - PerGB2018, 90-day retention
 # ---------------------------------------------------------------------------
 
 module "platform_law" {
@@ -468,7 +468,7 @@ module "platform_law" {
 }
 
 # ---------------------------------------------------------------------------
-# Automation Account — Basic SKU; system-assigned identity for Update Manager
+# Automation Account - Basic SKU; system-assigned identity for Update Manager
 # ---------------------------------------------------------------------------
 
 # DEVIATION: Using native azurerm_automation_account instead of
@@ -500,7 +500,7 @@ resource "azurerm_monitor_diagnostic_setting" "automation_account" {
 }
 
 # ---------------------------------------------------------------------------
-# Monitor Action Group — platform alert notifications
+# Monitor Action Group - platform alert notifications
 # ---------------------------------------------------------------------------
 
 resource "azurerm_monitor_action_group" "platform" {
@@ -528,7 +528,7 @@ resource "azurerm_application_insights_workbook" "platform_overview" {
   name                = local.platform_workbook_id
   resource_group_name = azurerm_resource_group.management.name
   location            = var.primary_location
-  display_name        = "Platform Overview — ${title(var.org_prefix)}"
+  display_name        = "Platform Overview - ${title(var.org_prefix)}"
 
   data_json = jsonencode({
     version = "Notebook/1.0"
@@ -549,7 +549,7 @@ resource "azurerm_application_insights_workbook" "platform_overview" {
 }
 
 # ---------------------------------------------------------------------------
-# Shared Portal Dashboard — platform summary
+# Shared Portal Dashboard - platform summary
 # ---------------------------------------------------------------------------
 
 resource "azurerm_portal_dashboard" "platform" {
@@ -572,7 +572,7 @@ resource "azurerm_portal_dashboard" "platform" {
                   settings = {
                     content  = "## ${title(var.org_prefix)} Platform Overview\n\nReplace with metric tiles for Log Analytics ingestion, Automation job status, and cost alerts."
                     title    = "Platform Overview"
-                    subtitle = "${upper(var.environment)} — ${title(var.org_prefix)} ALZ POC"
+                    subtitle = "${upper(var.environment)} - ${title(var.org_prefix)} ALZ POC"
                   }
                 }
               }
@@ -595,7 +595,7 @@ resource "azurerm_portal_dashboard" "platform" {
 }
 
 # ===========================================================================
-# Section 4 — Private Endpoints + Private DNS: Deny public network access
+# Section 4 - Private Endpoints + Private DNS: Deny public network access
 # ===========================================================================
 #
 # Custom policy initiative assigned at the Landing Zones management group.
@@ -604,12 +604,12 @@ resource "azurerm_portal_dashboard" "platform" {
 # note below); the "deny" name is retained for the intended future enforcement pass.
 #
 # Built-in policy definition IDs (VERIFIED live via `az policy definition show`
-# 2026-07-06 — all three return the expected built-ins):
+# 2026-07-06 - all three return the expected built-ins):
 #   1b8ca024-1d5c-4dec-8995-b1a932b41780  "Public network access on Azure SQL Database should be disabled"
 #   405c5871-3e91-4644-8a63-58e19d68ff5b  "Azure Key Vault should disable public network access"
 #   34c877ad-507e-4c82-993e-3452a6e0ad3c  "Storage accounts should restrict network access"
 #
-# NOTE (OQ-016): the previously pinned KV GUID (...-58ad8008cbe8) was WRONG —
+# NOTE (OQ-016): the previously pinned KV GUID (...-58ad8008cbe8) was WRONG -
 # `az policy definition show` returned PolicyDefinitionNotFound, which would have
 # hard-failed this set-definition PUT on the management apply. Corrected above.
 #
@@ -617,21 +617,21 @@ resource "azurerm_portal_dashboard" "platform" {
 # (allowedValues [Audit, Deny, Disabled], default Audit). We pass `effect`
 # EXPLICITLY as "Audit" (OQ-016: never rely on a built-in's implicit default).
 #
-# EFFECT DECISION — Audit, not Deny (code-review 2026-07-07): a Deny at the
-# `landingzones` MG would hard-block legitimate POC resources that live under it —
+# EFFECT DECISION - Audit, not Deny (code-review 2026-07-07): a Deny at the
+# `landingzones` MG would hard-block legitimate POC resources that live under it -
 # the spoke NSG flow-log Storage Accounts (corp-a1/a2, online-p1; no `network_acls`,
 # so defaultAction=Allow) and the entire synthetic layer (Section 13 storage + the
 # red-team Key Vault, which need public access by design). Deny would fail every
 # landing-zone and synthetic apply with RequestDisallowedByPolicy. Audit governs and
 # reports public-network-access without blocking those workloads. The state SA is
-# unaffected either way — it sits under `platform` > `management`, a sibling of
+# unaffected either way - it sits under `platform` > `management`, a sibling of
 # `landingzones`, not a descendant. To enforce (Deny) later: add policy exemptions
 # for the flow-log/synthetic RGs first, then flip. Tracked under OQ-016.
 
 resource "azurerm_policy_set_definition" "deny_public_network_access" {
   name         = "deny-public-network-access-${var.org_prefix}"
   policy_type  = "Custom"
-  display_name = "${title(var.org_prefix)} — Deny Public Network Access"
+  display_name = "${title(var.org_prefix)} - Deny Public Network Access"
   description  = "Denies enabling public network access on Azure SQL, Key Vault, and Storage in the Landing Zones management group. Enforces private-endpoint-only connectivity."
 
   management_group_id = local.landingzones_mg_id
@@ -640,7 +640,7 @@ resource "azurerm_policy_set_definition" "deny_public_network_access" {
     policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/1b8ca024-1d5c-4dec-8995-b1a932b41780"
     reference_id         = "deny-public-access-sql"
     # Explicit Audit for the POC (OQ-016: set effect explicitly, never rely on the
-    # built-in default). NOT Deny — a Deny at the landingzones MG blocks legit
+    # built-in default). NOT Deny - a Deny at the landingzones MG blocks legit
     # public-access resources under it (spoke flow-log SAs, synthetic). See note above.
     parameter_values = jsonencode({
       effect = { value = "Audit" }
@@ -651,7 +651,7 @@ resource "azurerm_policy_set_definition" "deny_public_network_access" {
     policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/405c5871-3e91-4644-8a63-58e19d68ff5b"
     reference_id         = "deny-public-access-keyvault"
     # Explicit Audit for the POC (OQ-016: set effect explicitly, never rely on the
-    # built-in default). NOT Deny — a Deny at the landingzones MG blocks legit
+    # built-in default). NOT Deny - a Deny at the landingzones MG blocks legit
     # public-access resources under it (spoke flow-log SAs, synthetic). See note above.
     parameter_values = jsonencode({
       effect = { value = "Audit" }
@@ -662,7 +662,7 @@ resource "azurerm_policy_set_definition" "deny_public_network_access" {
     policy_definition_id = "/providers/Microsoft.Authorization/policyDefinitions/34c877ad-507e-4c82-993e-3452a6e0ad3c"
     reference_id         = "deny-public-access-storage"
     # Explicit Audit for the POC (OQ-016: set effect explicitly, never rely on the
-    # built-in default). NOT Deny — a Deny at the landingzones MG blocks legit
+    # built-in default). NOT Deny - a Deny at the landingzones MG blocks legit
     # public-access resources under it (spoke flow-log SAs, synthetic). See note above.
     parameter_values = jsonencode({
       effect = { value = "Audit" }
@@ -674,7 +674,7 @@ resource "azurerm_management_group_policy_assignment" "deny_public_network_acces
   name                 = "deny-pub-net-${var.org_prefix}"
   management_group_id  = local.landingzones_mg_id
   policy_definition_id = azurerm_policy_set_definition.deny_public_network_access.id
-  display_name         = "Deny Public Network Access — ${title(var.org_prefix)} Landing Zones"
+  display_name         = "Deny Public Network Access - ${title(var.org_prefix)} Landing Zones"
   description          = "Enforces private-endpoint-only access for SQL, Key Vault, and Storage in all landing zone subscriptions."
 
   depends_on = [azurerm_policy_set_definition.deny_public_network_access]
