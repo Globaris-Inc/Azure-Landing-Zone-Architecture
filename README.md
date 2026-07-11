@@ -1,6 +1,6 @@
 # Azure Landing Zone POC
 
-> **Status:** 🚧 In progress — See [WORKLOG.md](WORKLOG.md) for current state.
+> **Status:** 🚧 In progress - See [WORKLOG.md](WORKLOG.md) for current state.
 
 Portfolio-grade Proof of Concept implementing the **Microsoft Cloud Adoption Framework Azure Landing Zone (Hub & Spoke)** architecture using Terraform with Azure Verified Modules (AVM).
 
@@ -8,12 +8,12 @@ Portfolio-grade Proof of Concept implementing the **Microsoft Cloud Adoption Fra
 
 ## Prerequisites
 
-<!-- Populated in Section 11 -->
-
-- Terraform >= 1.9
-- Azure CLI >= 2.x
-- GitHub Actions with OIDC federated credential (see `bootstrap/`)
-- Permissions: Owner on target subscriptions, Global Administrator on tenant (for MG + Entra configuration)
+- Terraform **1.15.6** (pinned in CI) + Azure CLI >= 2.x
+- **5 Azure subscriptions** (management, connectivity, identity, security, landing zones) in one Entra tenant
+- GitHub Actions with **OIDC** federated credentials - no stored client secrets (see [`bootstrap/`](bootstrap/))
+- Permissions to run bootstrap: **Global Administrator** on the tenant (MG + Entra) with elevated access; the CI
+  service principal then runs on the scoped role matrix in [ADR-021](DECISIONS.md)
+- Full prerequisite list (Variables/Secrets, Environments, Entra DS pre-step) is in [DEPLOYMENT.md](DEPLOYMENT.md)
 
 ## Repository Layout
 
@@ -49,63 +49,65 @@ Portfolio-grade Proof of Concept implementing the **Microsoft Cloud Adoption Fra
 
 ## Quick Deploy
 
-<!-- Populated in Section 11 -->
+**Bootstrap is the only local step; every other root deploys via CI** (GitHub Actions, OIDC, gated). Full
+ordered runbook with per-step validation and the Secrets each root needs: **[DEPLOYMENT.md](DEPLOYMENT.md)**.
 
 ```bash
-# 1. Bootstrap remote state and OIDC
+# 1. Bootstrap remote state + OIDC (local, one-time) - creates the backend the CI needs
 cd bootstrap && terraform init && terraform apply
-
-# 2. Deploy platform layer (order matters)
-cd platform/management  && terraform init && terraform apply
-cd platform/connectivity && terraform init && terraform apply
-cd platform/identity    && terraform init && terraform apply
-cd platform/security    && terraform init && terraform apply
-
-# 3. Deploy landing zones
-cd landing-zones/corp-a1  && terraform init && terraform apply
-cd landing-zones/corp-a2  && terraform init && terraform apply
-cd landing-zones/online-p1 && terraform init && terraform apply
 ```
+
+Then set the GitHub Variables/Secrets and Environments, and deploy each root via the
+`Deploy (manual)` workflow ([`deploy.yml`](.github/workflows/deploy.yml)) - `action=plan`, then `action=apply`
+(gated by the `production` environment) - in dependency order:
+
+```
+management-groups -> management -> {connectivity, security, identity} -> spokes (corp-a1, corp-a2, online-p1)
+```
+
+`target=all` runs the whole graph in order once the cross-root output Secrets exist. The `synthetic` root is
+**deferred** and not deployed (ADR-036 / ADR-037). See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact procedure and
+[`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md) for pipeline mechanics.
 
 ## Cost Estimate
 
-<!-- Populated in Section 11 / COST.md -->
+As deployed and gated today (DDoS off, corp App Service + SQL gated, Bastion on-demand, synthetic deferred), the
+estate is estimated at **~$3,600 to $4,800 per month** (list prices, POC scale, not billed actuals). The two
+**Azure Firewall Premium** instances (~$2,555/mo fixed, ~55-65% of the bill) plus the **Defender for Cloud**
+plans are the dominant levers.
 
 | Component | Monthly (USD) | Notes |
 |-----------|--------------|-------|
-| Azure Firewall Premium (x2) | ~$900 | Primary + DR hub |
-| VPN Gateways (x2) | ~$280 | VpnGw1 active-active primary, standby DR |
-| Log Analytics | ~$120 | Platform + Security workspaces |
-| Other | TBD | See [COST.md](COST.md) |
-| **Estimated total** | **~$1,400–1,800/mo** | Varies by traffic |
+| Azure Firewall Premium (x2) | ~$2,555 | Primary + DR hub, fixed hourly (biggest line) |
+| VPN Gateway (VpnGw1AZ, primary only) | ~$260 | DR hub transits via peering (no 2nd gateway) |
+| DNS Private Resolver + App Gateway WAF_v2 | ~$695 | inbound/outbound endpoints + WAF cap 1 |
+| Log Analytics x2 + Defender for Cloud plans | ~$135 - $400 | scales with traffic + resource count |
+| Entra DS, Event Hub, RSVs, Static Web App, DNS zones, storage, IPs | ~$220 | per COST.md |
+| **Estimated total** | **~$3,600 - $4,800/mo** | Varies by traffic; full breakdown in [COST.md](COST.md) |
 
-> Run `terraform destroy` and `enable_synthetic_workload=false` when not actively demoing to minimise cost.
+> Biggest saving already applied: DDoS off (~$2,944/mo avoided). Run teardown (`teardown.yml`) and keep
+> `enable_synthetic_workload=false` / Bastion off when not demoing. See [COST.md](COST.md) for FinOps levers.
 
 ## Teardown
 
-```bash
-# Disable synthetic workload first (fast, <5 min)
-terraform apply -var='enable_synthetic_workload=false'
+Teardown is **CI-driven** via the `teardown.yml` workflow (uniform `terraform destroy` in reverse dependency
+order, `production-destroy` gate + typed `confirm=destroy`, ADR-020). `include_bootstrap` defaults to **false**
+(keeps the state backend + OIDC so redeploy is immediate); set `true` only for full decommission. Single-root
+teardown (`target=<one root>`) is the cheap "cut cost on one spoke" path.
 
-# Then destroy all landing zones before platform
-cd landing-zones/corp-a1 && terraform destroy
-# ... repeat per landing zone ...
-
-# Then destroy platform in reverse dependency order
-cd platform/security    && terraform destroy
-cd platform/identity    && terraform destroy
-cd platform/connectivity && terraform destroy
-cd platform/management  && terraform destroy
-cd bootstrap            && terraform destroy
-```
+Full procedure and the scorched-earth fallback: [`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md)
+§5-§6 and [DEPLOYMENT.md](DEPLOYMENT.md) §6.
 
 ---
 
 ## Further Reading
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Mermaid diagrams, RTO/RPO, decisions
-- [SECURITY.md](SECURITY.md) — Threat model, Zero Trust mapping, compliance posture
-- [RUNBOOK.md](RUNBOOK.md) — Failover drill, incident triage, cost spike response
-- [COST.md](COST.md) — Per-component cost breakdown and FinOps levers
-- [DECISIONS.md](DECISIONS.md) — Architectural decision records
-- [landing-zone-kit/](landing-zone-kit/README.md) — reusable LZ build kit: live-apply lessons, decision framework, role process
+- [DEPLOYMENT.md](DEPLOYMENT.md) - greenfield end-to-end deploy runbook (ordered, per-root, with validation)
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Mermaid diagrams, RTO/RPO, decisions, ALZ fidelity map
+- [COST.md](COST.md) - per-component monthly estimate and FinOps levers
+- [SECURITY.md](SECURITY.md) - threat model, Zero Trust mapping, compliance posture
+- [RUNBOOK.md](RUNBOOK.md) - failover drill, incident triage, cost spike response
+- [DECISIONS.md](DECISIONS.md) - architectural decision records
+- [`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md) - CI/CD deploy + teardown pipeline reference
+- [`docs/operations-monitoring-design.md`](docs/operations-monitoring-design.md) - Day-2 Operations and Monitoring target architecture (ADR-037)
+- [landing-zone-kit/](landing-zone-kit/README.md) - reusable LZ build kit: live-apply lessons, decision framework, role process
