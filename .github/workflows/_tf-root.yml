@@ -31,7 +31,7 @@ on:
         required: true
         type: string
       action:
-        description: "plan | apply | destroy | untaint"
+        description: "plan | apply | destroy | untaint | force-unlock"
         required: true
         type: string
       resource_address:
@@ -40,6 +40,16 @@ on:
         # Ignored by plan/apply/destroy. Passed via env into the untaint step (never
         # interpolated straight into a shell) to avoid run-step injection.
         description: "action=untaint only: resource address to untaint. Empty otherwise."
+        required: false
+        type: string
+        default: ""
+      lock_id:
+        # Stuck-lock recovery. Only read by action=force-unlock: the ID of the orphaned
+        # azurerm backend state lease to release (a pure lock release, no state content
+        # change and no Azure infrastructure mutation). Ignored by plan/apply/destroy/untaint.
+        # Passed via env into the force-unlock step (never interpolated straight into a
+        # shell) to avoid run-step injection.
+        description: "action=force-unlock only: the stuck lock ID to release. Empty otherwise."
         required: false
         type: string
         default: ""
@@ -263,6 +273,32 @@ jobs:
           fi
           echo "Untainting '$RESOURCE_ADDRESS' in root '${{ inputs.root }}' (pure state write, no Azure mutation)."
           terraform untaint "$RESOURCE_ADDRESS"
+
+      # Stuck-lock recovery. `terraform force-unlock` releases an orphaned azurerm backend
+      # state lease so a following plan/apply can acquire it again. It is a PURE LOCK
+      # RELEASE: no state content changes and no Azure infrastructure mutation. -force
+      # skips the interactive confirmation prompt (this is a non-interactive runner). No
+      # gh_environment gate (reuses the plan-path OIDC federated credential, same as
+      # untaint). Reaching the firewalled state SA requires manage_runner_ip=true, so run
+      # this single-target (deploy.yml sets manage_runner_ip = target != 'all', and its
+      # guard-force-unlock-target job rejects target=all outright). Init has already run
+      # above, which is what actually needs the lock to be free - a stuck lock can make
+      # Init itself hang/fail, so this step only proceeds if Init succeeded despite the
+      # lock (azurerm backend inits do not always take a lock; force-unlock is the
+      # explicit release regardless).
+      - name: Terraform Force-Unlock (stuck state lock recovery)
+        if: ${{ inputs.action == 'force-unlock' }}
+        working-directory: ${{ inputs.root }}
+        env:
+          LOCK_ID: ${{ inputs.lock_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$LOCK_ID" ]; then
+            echo "::error::action=force-unlock requires a non-empty lock_id (single lock, single target)."
+            exit 1
+          fi
+          echo "Releasing lock '$LOCK_ID' in root '${{ inputs.root }}' (pure lock release, no state content change, no Azure mutation)."
+          terraform force-unlock -force "$LOCK_ID"
 
       # Always restore default_action=Deny — even if a prior step failed — so the state SA
       # never stays publicly reachable past the run. Guarded on env.SA_OPENED being set by

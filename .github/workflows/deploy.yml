@@ -15,6 +15,12 @@
 # Single-target mechanics: upstream `needs:` jobs are skipped when target!=all; the
 # `!failure() && !cancelled()` status check lets the selected job run anyway. For
 # action=apply on a single root, the root's upstream state must already exist.
+#
+# action=force-unlock: pure state-lock release (no Azure mutation, no state content
+# change), for a stuck azurerm backend lease (e.g. a local session's IP rotated out of
+# the state-SA firewall allowlist before it could release cleanly). Same shape as
+# untaint: single target only, ungated (reuses the plan-path OIDC credential), and it
+# still runs manage_runner_ip so the runner can reach the firewalled state SA.
 name: Deploy (manual)
 
 on:
@@ -36,13 +42,14 @@ on:
           - landing-zones/online-p1
           - synthetic
       action:
-        description: "plan (dry-run, ungated) | apply (gated by production) | untaint (state op, single target + resource_address)"
+        description: "plan (dry-run, ungated) | apply (gated by production) | untaint (state op, single target + resource_address) | force-unlock (state op, single target + lock_id)"
         type: choice
         default: plan
         options:
           - plan
           - apply
           - untaint
+          - force-unlock
       resource_address:
         # ADR-029 recovery. Only read by action=untaint. Terraform resource address to
         # clear the taint marker on (e.g. azurerm_active_directory_domain_service.this[0]).
@@ -50,6 +57,18 @@ on:
         # Single target only (target != all) so the address resolves in exactly one root's
         # state. Leave blank for plan/apply.
         description: "action=untaint only: Terraform resource address to untaint (single target). Blank otherwise."
+        type: string
+        default: ""
+        required: false
+      lock_id:
+        # Recovery for a stuck azurerm backend state lease (orphaned lock, e.g. the
+        # holder's IP rotated out of the state-SA firewall allowlist before it could
+        # release cleanly). Only read by action=force-unlock. Pure lock release, no state
+        # content change and no Azure infrastructure mutation. Single target only (target
+        # != all) so the lock ID resolves against exactly one root's state. Get the lock
+        # ID from the failed run's "Error acquiring the state lock" message (field "ID").
+        # Leave blank for plan/apply/untaint.
+        description: "action=force-unlock only: the stuck lock's ID (GUID, single target). Blank otherwise."
         type: string
         default: ""
         required: false
@@ -76,13 +95,27 @@ jobs:
           echo "::error::action=untaint requires a single target (target != 'all'). resource_address resolves per-root state and target=all would fan it into every root. Re-run with a specific target."
           exit 1
 
+  # Same single-target rule as guard-untaint-target above: force-unlock's lock_id is a
+  # per-root state lease ID. target=all would try the same lock_id against every root's
+  # state, which is meaningless (a lock ID only ever matches the ONE root whose lease it
+  # is) and would fail loudly per-root anyway - reject it up front instead.
+  guard-force-unlock-target:
+    if: ${{ inputs.action == 'force-unlock' && inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject force-unlock with target=all
+        run: |
+          echo "::error::action=force-unlock requires a single target (target != 'all'). lock_id resolves against exactly one root's state lease. Re-run with a specific target."
+          exit 1
+
   management-groups:
-    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/management-groups') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'platform/management-groups') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/management-groups
       action: ${{ inputs.action }}
       resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -92,12 +125,13 @@ jobs:
 
   management:
     needs: [management-groups]
-    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/management') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'platform/management') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/management
       action: ${{ inputs.action }}
       resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -107,12 +141,13 @@ jobs:
 
   connectivity:
     needs: [management]
-    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/connectivity') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'platform/connectivity') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/connectivity
       action: ${{ inputs.action }}
       resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -122,12 +157,13 @@ jobs:
 
   identity:
     needs: [management-groups]
-    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/identity') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'platform/identity') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/identity
       action: ${{ inputs.action }}
       resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -137,12 +173,13 @@ jobs:
 
   security:
     needs: [management]
-    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'platform/security') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'platform/security') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/security
       action: ${{ inputs.action }}
       resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -152,12 +189,13 @@ jobs:
 
   corp-a1:
     needs: [connectivity, security]
-    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'landing-zones/corp-a1') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'landing-zones/corp-a1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/corp-a1
       action: ${{ inputs.action }}
       resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -167,12 +205,13 @@ jobs:
 
   corp-a2:
     needs: [connectivity, security]
-    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'landing-zones/corp-a2') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'landing-zones/corp-a2') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/corp-a2
       action: ${{ inputs.action }}
       resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -182,12 +221,13 @@ jobs:
 
   online-p1:
     needs: [connectivity, security]
-    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'landing-zones/online-p1') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'landing-zones/online-p1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/online-p1
       action: ${{ inputs.action }}
       resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
       backend_rel: "../../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
@@ -197,12 +237,13 @@ jobs:
 
   synthetic:
     needs: [corp-a1, corp-a2, online-p1]
-    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint') || inputs.target == 'synthetic') }}
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'synthetic') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: synthetic
       action: ${{ inputs.action }}
       resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
       backend_rel: "../"
       gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
