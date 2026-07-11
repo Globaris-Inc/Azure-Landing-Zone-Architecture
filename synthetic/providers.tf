@@ -36,6 +36,12 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.1.0"
     }
+    # Added for the OQ-029 policy-exemption propagation wait (policy_exemptions.tf).
+    # Same pin used by bootstrap / platform/identity / landing-zones/* (ADR-028).
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.13.1"
+    }
   }
   backend "azurerm" {}
 }

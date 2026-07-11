@@ -1,50 +1,33 @@
-# Purpose: corp-a1 synthetic workload — Express REST API stub deployed onto the
-#          App Service provisioned in Section 9. Satisfies PROMPT.md §13.1
-#          (workload targets: /api/products, /api/login, /api/checkout).
-# Section: 13.1 — Workload Targets
-# Last updated: 2026-06-02
+# Purpose: Shared synthetic resource group + storage account for the workload
+#          layer. Hosts the Azure File shares that k6 (13.2) and the red-team
+#          simulator (13.3) mount for their scripts, and the blob/queue targets
+#          the other sub-layers reuse.
+# Section: 13.1 - Workload Targets
+# Last updated: 2026-07-10
 #
 # Architecture:
-#   - Data sources resolve the existing corp-a1 workload RG + App Service by
-#     deterministic name (matches landing-zones/corp-a1 naming).
-#   - A dedicated synthetic resource group hosts the code-staging storage account.
-#   - `archive_file` packages synthetic/apps/corp-a1-api/ into a zip.
-#   - `azurerm_storage_blob` uploads the zip.
-#   - A read-only SAS URL is minted on the container.
-#   - `null_resource` shells out to `az webapp deploy` to land the zip on the
-#     App Service whenever the zip checksum changes.
+#   - A dedicated synthetic resource group in the primary region.
+#   - A general-purpose v2 storage account (public network, shared-key auth) that
+#     the k6 and red-team file shares live on.
 #
-# DEVIATIONS:
-#   - Imperative `az` deploy via null_resource: Terraform has no first-class
-#     resource for "deploy a zip to an existing App Service" without taking
-#     ownership of source_control / app_settings (both already owned by the
-#     corp-a1 AVM module). The az invocation only touches /home/site/wwwroot
-#     and the existing `WEBSITE_RUN_FROM_PACKAGE=1` app setting (owned by
-#     corp-a1) makes that zip the source of truth at runtime. Production path:
-#     replace with a GitHub Actions deploy job downstream of `apply-synthetic`.
-#   - SQL connectivity not wired: the REST API stub returns in-memory data so
-#     /api/products has something to demo. Wiring the SQL Private Endpoint +
-#     System-Assigned Managed Identity → DB role grant is deferred to 13.x
-#     refinement once the demo flow is locked in.
+# RETARGET (OQ-030 decision B, 2026-07-10):
+#   The original design deployed an Express REST API stub onto the corp-a1 App
+#   Service and pointed k6 at it. That App Service was gated off at deploy time
+#   (enable_app_service=false, ADR-032; the LZ-sub dedicated-compute quota ticket
+#   is still open), so data.azurerm_linux_web_app.corp_a1 was a dead reference
+#   that failed at plan with a 404. Per the user decision we do NOT re-enable
+#   corp-a1 and do NOT gate the layer: the k6 load test is retargeted at the LIVE
+#   online-p1 Application Gateway public endpoint (see online_p1.tf +
+#   data.azurerm_public_ip.online_p1_appgw and k6.tf TARGET_BASE_URL). The
+#   corp-a1 App Service data source, the zip-staging container, the archive_file
+#   package, the container SAS, and the `az webapp deploy` null_resource are
+#   removed because there is no App Service to deploy to and online-p1 already
+#   serves a live app. The storage account below stays because k6 and the
+#   red-team simulator mount file shares on it.
 
 # ---------------------------------------------------------------------------
-# Data sources — existing corp-a1 resources from Section 9
-# ---------------------------------------------------------------------------
-
-data "azurerm_resource_group" "corp_a1_workload" {
-  count = local.enabled
-  name  = local.corp_a1_workload_rg_name
-}
-
-data "azurerm_linux_web_app" "corp_a1" {
-  count               = local.enabled
-  name                = local.corp_a1_app_service_name
-  resource_group_name = data.azurerm_resource_group.corp_a1_workload[0].name
-}
-
-# ---------------------------------------------------------------------------
-# Synthetic resource group — holds code-staging storage and (in 13.3/13.4)
-# the red-team simulator and cost-pattern targets.
+# Synthetic resource group - holds the shared storage account below (and, via
+# other files, the k6 Container Apps environment/jobs and red-team shares).
 # ---------------------------------------------------------------------------
 
 resource "azurerm_resource_group" "corp_a1_synthetic" {
@@ -55,7 +38,9 @@ resource "azurerm_resource_group" "corp_a1_synthetic" {
 }
 
 # ---------------------------------------------------------------------------
-# Storage account — code zip staging + (later) blob-anomaly target for 13.3
+# Storage account - Azure File shares for the k6 (13.2) and red-team (13.3)
+# scripts mount onto this account. Shared-key auth is enabled so the Container
+# Apps environment-storage links can use the account key.
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_account" "corp_a1_synthetic" {
@@ -68,14 +53,13 @@ resource "azurerm_storage_account" "corp_a1_synthetic" {
   account_kind             = "StorageV2"
   min_tls_version          = "TLS1_2"
 
-  # Public access stays on — the App Service fetches the deployment zip via SAS URL
-  # over the internet. Defender for Storage (Section 6) covers anomaly detection.
+  # Public access stays on so the Container Apps environments can mount the file
+  # shares. Defender for Storage (Section 6) covers anomaly detection.
   public_network_access_enabled   = true
   allow_nested_items_to_be_public = false
 
-  # Shared keys enabled so Terraform can mint a container SAS for the SCM deploy
-  # call. Entra-only auth would force us to use a User-Assigned MI + the data
-  # plane, which is heavier than this POC's scope.
+  # Shared keys enabled so the Container Apps environment-storage links can
+  # authenticate to the file shares with the account key.
   shared_access_key_enabled = true
 
   blob_properties {
@@ -83,88 +67,9 @@ resource "azurerm_storage_account" "corp_a1_synthetic" {
   }
 
   tags = local.common_tags
-}
 
-resource "azurerm_storage_container" "corp_a1_code" {
-  count                 = local.enabled
-  name                  = "code"
-  storage_account_id    = azurerm_storage_account.corp_a1_synthetic[0].id
-  container_access_type = "private"
-}
-
-# ---------------------------------------------------------------------------
-# Build + upload the deployment zip
-# ---------------------------------------------------------------------------
-
-data "archive_file" "corp_a1_api" {
-  count       = local.enabled
-  type        = "zip"
-  source_dir  = "${path.module}/apps/corp-a1-api"
-  output_path = "${path.module}/.build/corp-a1-api.zip"
-}
-
-resource "azurerm_storage_blob" "corp_a1_api" {
-  count                  = local.enabled
-  name                   = "corp-a1-api-${data.archive_file.corp_a1_api[0].output_md5}.zip"
-  storage_account_name   = azurerm_storage_account.corp_a1_synthetic[0].name
-  storage_container_name = azurerm_storage_container.corp_a1_code[0].name
-  type                   = "Block"
-  content_md5            = data.archive_file.corp_a1_api[0].output_md5
-  source                 = data.archive_file.corp_a1_api[0].output_path
-}
-
-# Read-only SAS URL — App Service Kudu fetches the zip from this URL.
-# 1-hour validity is enough for the `az webapp deploy` call to complete.
-#
-# Note: start/expiry recompute on every plan via timestamp(). The data source
-# re-reads silently (no apply-time diff) and the null_resource only re-runs
-# when its `triggers` (zip md5) change, so plan noise is bounded.
-data "azurerm_storage_account_blob_container_sas" "corp_a1_code" {
-  count             = local.enabled
-  connection_string = azurerm_storage_account.corp_a1_synthetic[0].primary_connection_string
-  container_name    = azurerm_storage_container.corp_a1_code[0].name
-  https_only        = true
-
-  start  = timestamp()
-  expiry = timeadd(timestamp(), "1h")
-
-  permissions {
-    read   = true
-    add    = false
-    create = false
-    write  = false
-    delete = false
-    list   = false
-  }
-}
-
-# ---------------------------------------------------------------------------
-# Deploy the zip onto the existing App Service
-#
-# Triggers re-execution only when the zip content changes (md5 hash). The
-# `WEBSITE_RUN_FROM_PACKAGE=1` app setting owned by the corp-a1 module makes
-# the deployed zip the runtime source of truth.
-# ---------------------------------------------------------------------------
-
-resource "null_resource" "corp_a1_deploy" {
-  count = local.enabled
-
-  triggers = {
-    zip_md5     = data.archive_file.corp_a1_api[0].output_md5
-    app_service = data.azurerm_linux_web_app.corp_a1[0].id
-  }
-
-  provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
-    command     = <<-EOT
-      az webapp deploy \
-        --resource-group "${data.azurerm_resource_group.corp_a1_workload[0].name}" \
-        --name "${data.azurerm_linux_web_app.corp_a1[0].name}" \
-        --src-url "https://${azurerm_storage_account.corp_a1_synthetic[0].name}.blob.core.windows.net/${azurerm_storage_container.corp_a1_code[0].name}/${azurerm_storage_blob.corp_a1_api[0].name}${data.azurerm_storage_account_blob_container_sas.corp_a1_code[0].sas}" \
-        --type zip \
-        --async false
-    EOT
-  }
-
-  depends_on = [azurerm_storage_blob.corp_a1_api]
+  # Wait for the OQ-029 Waiver exemption to propagate before creating this public
+  # SA, else the Deny-Public-Endpoints PUT races propagation and is denied
+  # (ADR-028 race). No-op ordering when the exemptions are disabled.
+  depends_on = [time_sleep.wait_synthetic_policy_exemptions]
 }

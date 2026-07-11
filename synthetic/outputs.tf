@@ -11,9 +11,9 @@ output "enabled" {
 # corp-a1
 # ---------------------------------------------------------------------------
 
-output "corp_a1_api_default_hostname" {
-  description = "Default hostname of the corp-a1 App Service that hosts the REST API stub. Append /api/products, /api/login, /api/checkout to exercise the endpoints. Empty string when synthetic workload is disabled."
-  value       = local.enabled == 1 ? data.azurerm_linux_web_app.corp_a1[0].default_hostname : ""
+output "k6_target_base_url" {
+  description = "Base URL the k6 load test targets: the LIVE online-p1 Application Gateway WAF_v2 public HTTP endpoint (OQ-030 decision B - retargeted off the gated-off corp-a1 App Service). Empty string when synthetic workload is disabled."
+  value       = local.enabled == 1 ? "http://${data.azurerm_public_ip.online_p1_appgw[0].ip_address}" : ""
 }
 
 output "corp_a1_synthetic_storage_account_name" {

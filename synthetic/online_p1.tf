@@ -27,6 +27,19 @@ data "azurerm_resource_group" "online_p1_shared" {
   name  = local.online_p1_shared_rg_name
 }
 
+# Live online-p1 Application Gateway WAF_v2 public IP (internet-facing front
+# door of the online-p1 spoke). This is the k6 load-test / synthetic app-traffic
+# target after retargeting off the gated-off corp-a1 App Service (OQ-030
+# decision B). The App Gateway listener is HTTP:80 and its access + WAF logs
+# already flow to the platform LAW, so k6 traffic surfaces there as the
+# app-traffic signal. Resolved by deterministic name, consistent with the other
+# cross-root lookups in this root (no remote_state).
+data "azurerm_public_ip" "online_p1_appgw" {
+  count               = local.enabled
+  name                = local.online_p1_appgw_pip_name
+  resource_group_name = local.online_p1_network_rg_name
+}
+
 # ---------------------------------------------------------------------------
 # Synthetic resource group + storage account + queue
 # ---------------------------------------------------------------------------
@@ -39,8 +52,11 @@ resource "azurerm_resource_group" "online_p1_synthetic" {
 }
 
 resource "azurerm_storage_account" "online_p1_synthetic" {
-  count                    = local.enabled
-  name                     = "stsynop1${var.org_prefix}${var.environment}${random_string.sa_suffix[0].result}"
+  count = local.enabled
+  # Role token kept to 2 chars ("o1" = online-p1) so the rendered name stays
+  # within the 24-char storage limit: stsyn(5) + o1(2) + globaris(8) + poc(3) +
+  # 6-char suffix = 24. Matches the corp_a1 "a1" token convention.
+  name                     = "stsyno1${var.org_prefix}${var.environment}${random_string.sa_suffix[0].result}"
   resource_group_name      = azurerm_resource_group.online_p1_synthetic[0].name
   location                 = var.primary_location
   account_tier             = "Standard"
@@ -67,6 +83,11 @@ resource "azurerm_storage_account" "online_p1_synthetic" {
   }
 
   tags = local.common_tags
+
+  # Wait for the OQ-029 Waiver exemption to propagate before creating this public
+  # SA, else the Deny-Public-Endpoints PUT races propagation and is denied
+  # (ADR-028 race). No-op ordering when the exemptions are disabled.
+  depends_on = [time_sleep.wait_synthetic_policy_exemptions]
 }
 
 resource "azurerm_storage_queue" "contact_form" {

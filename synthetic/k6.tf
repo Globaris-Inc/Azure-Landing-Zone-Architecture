@@ -29,6 +29,12 @@
 locals {
   k6_enabled = local.enabled == 1 && var.platform_law_workspace_id != "" ? 1 : 0
 
+  # k6 targets the LIVE online-p1 Application Gateway public endpoint (HTTP:80)
+  # instead of the gated-off corp-a1 App Service (OQ-030 decision B). k6_enabled
+  # implies local.enabled==1, so data.azurerm_public_ip.online_p1_appgw[0] is
+  # always present when this URL is non-empty.
+  k6_target_base_url = local.k6_enabled == 1 ? "http://${data.azurerm_public_ip.online_p1_appgw[0].ip_address}" : ""
+
   k6_jobs = {
     baseline = {
       script           = "baseline.js"
@@ -143,7 +149,7 @@ resource "azurerm_container_app_job" "k6" {
 
       env {
         name  = "TARGET_BASE_URL"
-        value = "https://${data.azurerm_linux_web_app.corp_a1[0].default_hostname}"
+        value = local.k6_target_base_url
       }
 
       env {

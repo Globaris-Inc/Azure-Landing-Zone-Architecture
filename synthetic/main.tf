@@ -36,10 +36,17 @@ locals {
 
   # Deterministic name fragments mirroring landing-zones/* so data sources resolve
   # without needing remote_state lookups.
-  corp_a1_workload_rg_name   = "rg-corp-a1-workload-${var.org_prefix}-${var.environment}"
-  corp_a1_app_service_name   = "app-corp-a1-${var.org_prefix}-${var.environment}"
+  #
+  # The corp-a1 App Service (app-corp-a1-...) was gated off at deploy time
+  # (enable_app_service=false, ADR-032), so the synthetic k6 load test targets
+  # the LIVE online-p1 Application Gateway WAF_v2 public endpoint instead
+  # (OQ-030 decision B). online-p1 is the internet-facing spoke; its App Gateway
+  # access + WAF logs already flow to the platform LAW, giving the app-traffic
+  # signal. The App Gateway public IP lives in the online-p1 network RG.
   online_p1_shared_rg_name   = "rg-online-p1-shared-${var.org_prefix}-${var.environment}"
   online_p1_workload_rg_name = "rg-online-p1-workload-${var.org_prefix}-${var.environment}"
+  online_p1_network_rg_name  = "rg-online-p1-network-${var.org_prefix}-${var.environment}"
+  online_p1_appgw_pip_name   = "pip-appgw-online-p1-${var.org_prefix}-${var.environment}"
 }
 
 # ---------------------------------------------------------------------------

@@ -114,6 +114,16 @@ variable "cost_guardrails_alert_emails" {
 }
 
 # ---------------------------------------------------------------------------
+# Policy exemptions (OQ-029)
+# ---------------------------------------------------------------------------
+
+variable "enable_synthetic_policy_exemptions" {
+  description = "Create the RG-scoped Waiver policy exemptions for the corp-MG Deny-Public-Endpoints initiative members (StorageDenyPaasPublicIP on the four public synthetic storage accounts, KeyVaultDenyPaasPublicIP on the red-team decoy Key Vault) that cannot be made compliant without breaking the honeypot/security-signal design (OQ-029). Default true; set false only if the synthetic RGs are moved out from under the corp MG or the resources are made private."
+  type        = bool
+  default     = true
+}
+
+# ---------------------------------------------------------------------------
 # Tags
 # ---------------------------------------------------------------------------
 

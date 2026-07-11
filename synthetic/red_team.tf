@@ -163,8 +163,11 @@ resource "azurerm_resource_group" "red_team_secondary" {
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_account" "red_team_decoy" {
-  count                    = local.red_team_enabled
-  name                     = "stsynrtdc${var.org_prefix}${var.environment}${random_string.sa_suffix[0].result}"
+  count = local.red_team_enabled
+  # Role token kept to 2 chars ("rt" = red-team) so the rendered name stays
+  # within the 24-char storage limit: stsyn(5) + rt(2) + globaris(8) + poc(3) +
+  # 6-char suffix = 24. Matches the corp_a1 "a1" token convention.
+  name                     = "stsynrt${var.org_prefix}${var.environment}${random_string.sa_suffix[0].result}"
   resource_group_name      = azurerm_resource_group.red_team_primary[0].name
   location                 = var.primary_location
   account_tier             = "Standard"
@@ -188,6 +191,11 @@ resource "azurerm_storage_account" "red_team_decoy" {
   }
 
   tags = local.red_team_tags
+
+  # Wait for the OQ-029 Waiver exemption to propagate before creating this public
+  # decoy SA, else the Deny-Public-Endpoints PUT races propagation and is denied
+  # (ADR-028 race). No-op ordering when the exemptions are disabled.
+  depends_on = [time_sleep.wait_synthetic_policy_exemptions]
 }
 
 resource "azurerm_storage_container" "decoy" {
@@ -229,6 +237,11 @@ resource "azurerm_key_vault" "red_team_decoy" {
   }
 
   tags = local.red_team_tags
+
+  # Wait for the OQ-029 Waiver exemption to propagate before creating this public
+  # decoy KV, else the Deny-Public-Endpoints PUT races propagation and is denied
+  # (ADR-028 race). No-op ordering when the exemptions are disabled.
+  depends_on = [time_sleep.wait_synthetic_policy_exemptions]
 }
 
 # Diagnostic settings — KV → Platform LAW so probing attempts surface in KQL.

@@ -103,6 +103,40 @@ resource "azurerm_subnet" "cost_patterns" {
   address_prefixes     = [local.cost_patterns_subnet_cidr]
 }
 
+# NSG for the isolated cost-pattern subnet. The landingzones-MG
+# Deny-Subnet-Without-Nsg policy denies any subnet create with no NSG attached
+# (pre-clearance row 5, same policy that denied corp snet-integration), so this
+# subnet needs one. The subnet is isolated (no peering, no public IP on the VM
+# NIC; break-glass is via Bastion / Serial Console), so the single explicit
+# deny documents intent on top of the platform default DenyAllInBound.
+resource "azurerm_network_security_group" "cost_patterns" {
+  count               = local.cost_patterns_enabled
+  name                = "nsg-synthetic-cost-patterns-${var.org_prefix}-${var.environment}"
+  resource_group_name = azurerm_resource_group.cost_patterns[0].name
+  location            = var.primary_location
+
+  security_rule {
+    name                       = "Deny-Internet-Inbound"
+    priority                   = 4000
+    direction                  = "Inbound"
+    access                     = "Deny"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "Internet"
+    destination_address_prefix = "VirtualNetwork"
+    description                = "Isolated cost-pattern subnet needs no internet inbound; access is via Bastion / Serial Console."
+  }
+
+  tags = local.cost_patterns_tags
+}
+
+resource "azurerm_subnet_network_security_group_association" "cost_patterns" {
+  count                     = local.cost_patterns_enabled
+  subnet_id                 = azurerm_subnet.cost_patterns[0].id
+  network_security_group_id = azurerm_network_security_group.cost_patterns[0].id
+}
+
 resource "azurerm_network_interface" "oversized_vm" {
   count               = local.cost_patterns_enabled
   name                = "nic-oversized-${var.org_prefix}-${var.environment}"
@@ -194,8 +228,11 @@ resource "azurerm_managed_disk" "unattached" {
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_account" "cost_pattern_hot" {
-  count                    = local.cost_patterns_enabled
-  name                     = "stsynchot${var.org_prefix}${var.environment}${random_string.sa_suffix[0].result}"
+  count = local.cost_patterns_enabled
+  # Role token kept to 2 chars ("ch" = cost-hot) so the rendered name stays
+  # within the 24-char storage limit: stsyn(5) + ch(2) + globaris(8) + poc(3) +
+  # 6-char suffix = 24. Matches the corp_a1 "a1" token convention.
+  name                     = "stsynch${var.org_prefix}${var.environment}${random_string.sa_suffix[0].result}"
   resource_group_name      = azurerm_resource_group.cost_patterns[0].name
   location                 = var.primary_location
   account_tier             = "Standard"
@@ -214,6 +251,11 @@ resource "azurerm_storage_account" "cost_pattern_hot" {
       AntiPattern = "hot-tier-stale"
     },
   )
+
+  # Wait for the OQ-029 Waiver exemption to propagate before creating this public
+  # SA, else the Deny-Public-Endpoints PUT races propagation and is denied
+  # (ADR-028 race). No-op ordering when the exemptions are disabled.
+  depends_on = [time_sleep.wait_synthetic_policy_exemptions]
 }
 
 resource "azurerm_storage_container" "stale" {
