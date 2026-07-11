@@ -31,6 +31,22 @@
 
 <!-- Newest at the top. -->
 
+### OQ-032: Estate-wide perpetual tag drift - tag-governance Modify policy injects CreatedDate="1970-01-01" that Terraform strips every plan
+
+- **Raised:** 2026-07-10 (Section 6 deploy QA)
+- **Section:** 7 (FinOps tagging) / affects all roots
+- **Blocking:** No (cosmetic; applies succeed)
+- **Priority:** Low
+
+**Question:**
+Every root shows a perpetual, non-converging in-place diff: the `tag-governance-globaris` Modify policy (`platform/management/main.tf:52`) injects `CreatedDate = "1970-01-01"` (static placeholder - the Modify effect cannot compute a dynamic date) plus tag-inheritance to child resources; Terraform config does not declare `CreatedDate`, so every plan wants to strip it and the policy re-adds it. Confirmed on `platform/security` post-deploy (9 resources, plan run 29137108266: `0 to add, 9 to change, 0 to destroy`, all `- "CreatedDate" = "1970-01-01" -> null`). It is estate-wide, cosmetic, zero functional/posture impact, and by design of the tag policy.
+
+**Options being considered:**
+- A: Accept as known benign drift (POC, teardown imminent) - CHOSEN.
+- B (post-POC): add `CreatedDate` to each root's declared tags so config == state, OR `ignore_changes = [tags["CreatedDate"]]` on affected resources/modules, OR make the Modify policy stop setting a placeholder date. All are estate-wide touches, not worth doing pre-teardown.
+
+**RESOLVED 2026-07-10:** User accepted the drift ("I don't see them being a major issue, let's just accept the drift"). No code change; documented as a known cosmetic non-convergence. Deferred fix (option B) is a post-POC cleanup item.
+
 ### OQ-031: Synthetic telemetry lands in the platform LAW, but Sentinel is onboarded on the security LAW - will Section 6 analytics rules ever see the synthetic signals?
 
 - **Raised:** 2026-07-10 (synthetic first-apply pre-clearance, architect)
