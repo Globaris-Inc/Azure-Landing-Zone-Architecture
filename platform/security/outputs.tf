@@ -20,11 +20,13 @@ output "security_law_workspace_id" {
 output "security_law_workspace_name" {
   description = "Name of the Security Log Analytics workspace."
   value       = module.security_law.resource.name
+  sensitive   = true # AVM module marks resource.name sensitive; consumer must propagate the flag.
 }
 
 output "security_law_customer_id" {
   description = "Workspace GUID (customer_id) of the Security Log Analytics workspace. Required for Sentinel data connector configuration."
   value       = module.security_law.resource.workspace_id
+  sensitive   = true # AVM module marks resource.workspace_id sensitive; consumer must propagate the flag.
 }
 
 output "sentinel_workspace_id" {

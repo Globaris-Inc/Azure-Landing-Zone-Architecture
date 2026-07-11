@@ -204,7 +204,7 @@ resource "azurerm_security_center_automation" "mdc_export" {
 resource "azurerm_management_group_policy_assignment" "regulatory_compliance" {
   for_each = var.enable_regulatory_compliance ? local.regulatory_compliance_initiatives : {}
 
-  name                 = "compliance-${each.key}"
+  name                 = "reg-${each.key}" # <= 24 chars: reg-nist_sp_800_53_r5 (21), reg-cis_azure_2_0_0 (19)
   display_name         = each.value.display_name
   description          = "Regulatory compliance initiative assigned at Globaris root MG for the Defender for Cloud compliance dashboard (Section 6)."
   management_group_id  = var.root_management_group_id
