@@ -31,6 +31,43 @@
 
 <!-- Newest at the top. -->
 
+### OQ-033: Scope for the future Day-2 Operations and Monitoring capability (the repositioned Section 13) - platform-anchored, DINE-propagated, AMBA-based
+
+- **Raised:** 2026-07-10 (Section 13 reposition, architect - see ADR-036)
+- **Section:** 13 (repositioned) / Manage (CAF Day-2 Operations)
+- **Blocking:** No - this is forward design guidance for a future build, not a current-window task. The estate
+  is complete and QA-passed; teardown is imminent.
+- **Priority:** Low (build later)
+
+**Question:**
+ADR-036 repositions Section 13 from a synthetic load / security-signal demo device to a Day-2 Operations and
+Monitoring capability for CAF landing zones (the CAF "Manage" methodology). It is NOT a new standalone
+layer/spoke. What is the bounded scope, and where does it land?
+
+**Target shape (forward design guidance, NOT a build now):**
+- **Platform-anchored:** extend the existing `platform/management` landing zone (already hosts the platform
+  LAW and action group) with the monitoring baseline. Operational monitoring is a platform capability in
+  canonical ALZ, not a workload tier - so no new root or spoke.
+- **Policy-propagated:** deliver per-landing-zone monitoring via DeployIfNotExists (DINE) policy so every
+  current and future spoke inherits it automatically (guardrail model), not hand-placed per spoke.
+- **AMBA-based:** anchor to Azure Monitor Baseline Alerts (AMBA) for Azure Landing Zones - Microsoft's named,
+  endorsed policy-driven alert library for ALZ (platform-level + resource-health alerts) - plus Service Health
+  and Resource Health alerts wired to the existing platform action group. AMBA bounds the build and keeps it
+  credible rather than a bespoke reinvention.
+- **Scope discipline:** the bounded high-value slice is the AMBA baseline + Service/Resource Health alerts +
+  action-group routing. Dashboards-for-everything is explicitly OUT of the bounded scope.
+- **Optional recycling** within this model: the cost-pattern signals could feed a FinOps / cost-anomaly
+  monitoring view; the app-traffic idea becomes real synthetic-transaction availability probes (Application
+  Insights availability tests or the Azure Monitor equivalent) rather than red-team load.
+
+**Open sub-decisions for build time (not now):**
+- Which AMBA delivery form - the AMBA-for-ALZ policy initiatives/pattern assigned at the appropriate MG
+  scopes, versus a lighter subset - given the estate size.
+- The exact MG scope(s) for the DINE assignments (platform vs landingzones vs per-archetype) so alert
+  coverage matches each spoke's resource types without over-alerting.
+- The synthetic `.tf` stays a reusable idea source only; it is NOT repurposed as a monitoring spoke - the
+  capability lands in `platform/management` + policy.
+
 ### OQ-032: Estate-wide perpetual tag drift - tag-governance Modify policy injects CreatedDate="1970-01-01" that Terraform strips every plan
 
 - **Raised:** 2026-07-10 (Section 6 deploy QA)

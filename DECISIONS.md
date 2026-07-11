@@ -37,6 +37,86 @@
 
 <!-- Newest at the top. -->
 
+### ADR-036: Reposition Section 13 from a synthetic load / security-signal demo device to a future Day-2 Operations and Monitoring layer for CAF landing zones; defer deploy (designed-now, built-later)
+
+- **Date:** 2026-07-10
+- **Section:** 13 (Synthetic Workload, being repositioned)
+- **Status:** Accepted.
+- **Decision makers:** user (direction + reframe), claude (architect, recording)
+
+**Context:**
+Section 13 was built as a "Synthetic Workload + Security Signals" layer: a k6 load generator, a red-team
+simulator (honeypot sign-ins, decoy storage/Key Vault, impossible-travel, resource/storage/KV probing), and
+five cost-generating anti-patterns - a demo device whose job was to manufacture attack and load traffic so
+Section 6 Sentinel/Defender analytics rules would fire during the POC window. The layer was pre-cleared for
+its first apply (`docs/preclearance/synthetic.md`: NO-GO as written, then dispositioned), the fix batch was
+implemented, reviewed, and committed (`36f5044`), a gate-off plan-scan passed, and the final gate flip
+(`enable_synthetic_workload = true`) was reviewer-approved. The user paused before the apply and reframed the
+whole layer: the synthetic load-generation + red-team-decoy concept is not the right long-term scope for a
+CAF landing-zone reference build. The user wants to drive this layer toward a Day-2 Operations and Monitoring
+baseline (the CAF "Manage" methodology) - operational health and availability alerting, operational baselines,
+monitoring workbooks/dashboards, and operational signals into the platform Log Analytics workspace - rather
+than synthetic attack/load traffic. Teardown of the estate is imminent this week and the core estate is
+complete and QA-passed, so deploy is deferred.
+
+**Decision:**
+Reposition Section 13. The synthetic load / honeypot / red-team-decoy / cost-pattern layer is retired as the
+target scope and replaced, for a future build, by a Day-2 Operations and Monitoring layer for CAF landing
+zones. The synthetic Terraform stays designed, reviewed, and committed but is NOT deployed:
+`enable_synthetic_workload` remains `false`. Nothing is removed from the deployed architecture, because the
+synthetic layer was never part of the canonical CAF Azure Landing Zone reference architecture - it was a demo
+add-on. The canonical CAF ALZ layers (management-groups, management, connectivity, identity, security, and
+the landing-zone spokes) ARE the reference architecture and ARE deployed, so deferring Section 13 subtracts
+nothing from the architecture itself.
+
+This mirrors the designed-now / built-later pattern already used for brownfield adoption (ADR-022 / OQ-014):
+the design and code exist and are review-clean, but the build is intentionally deferred to a later, separate
+effort with its own scope.
+
+**Alternatives considered:**
+- Deploy the synthetic layer as-is before teardown - rejected: the user judged the synthetic load / red-team
+  demo device to be the wrong long-term scope, and there is no value in applying a to-be-repositioned layer
+  hours before a teardown.
+- Delete the synthetic Terraform - rejected: the code is review-clean and committed, some of it is reusable
+  input for the future Ops and Monitoring layer, and deleting it discards work for no benefit. Keep it in the
+  repo, gated off.
+- Keep Section 13 as "Synthetic Workload" and add a separate Section for Ops and Monitoring - rejected: the
+  user's intent is to REPOSITION this layer, not to run two parallel synthetic concepts.
+
+**Consequences:**
+- Positive: the architecture-as-deployed is the clean canonical CAF ALZ (no demo device baked in); the
+  repositioned scope (Day-2 Manage baseline) is a more defensible, portfolio-grade landing-zone concern than
+  synthetic attack traffic; no code is lost; the failure-budget exposure of a first-ever synthetic apply
+  right before teardown is avoided.
+- Negative / trade-offs: with Section 13 undeployed, Section 6 Sentinel and Defender for Cloud are correctly
+  configured but will have NO live synthetic signals firing during the POC window (no manufactured incidents,
+  no load telemetry). This is an accepted trade-off - the security posture and configuration are demonstrable
+  from the deployed config, dashboards, and analytics-rule definitions rather than from live synthetic
+  detections.
+- Follow-ups required:
+  - Target scope for the future Day-2 Operations and Monitoring capability (forward design guidance, NOT a
+    build now). It is deliberately NOT a new standalone layer/spoke. Frame it as:
+    - **Platform-anchored:** extend the existing `platform/management` landing zone (which already hosts the
+      platform LAW and action group) with the monitoring baseline, rather than a new root or workload tier.
+      Operational monitoring is a platform capability in canonical ALZ, not a workload.
+    - **Policy-propagated:** deliver the per-landing-zone monitoring via DeployIfNotExists (DINE) policy so
+      every current and future spoke inherits it automatically (the guardrail model), rather than hand-placing
+      alerts per spoke.
+    - **AMBA-based:** anchor to Azure Monitor Baseline Alerts (AMBA) for Azure Landing Zones - Microsoft's
+      named, endorsed policy-driven alert library for ALZ (platform-level and resource-health alerts) - plus
+      Service Health and Resource Health alerts wired to the existing platform action group. Citing AMBA keeps
+      the future build bounded and credible rather than a bespoke reinvention.
+    - **Scope discipline:** the bounded, high-value slice is the AMBA baseline + Service/Resource Health alerts
+      + action-group routing. Building dashboards-for-everything is explicitly OUT of the bounded scope.
+    - Optionally, recycle the useful synthetic ideas within this model: the cost-pattern signals could feed a
+      FinOps / cost-anomaly monitoring view, and the k6 / app-traffic idea could become real
+      synthetic-transaction availability probes (Application Insights availability tests or an Azure Monitor
+      equivalent) rather than red-team load.
+    Tracked in OQ-033.
+  - `enable_synthetic_workload` stays `false`; the synthetic root is not applied. The synthetic `.tf` is kept
+    as reusable input, but the future capability lands in `platform/management` + policy, not a repurposed
+    synthetic spoke.
+
 ### ADR-035: Pin the basic Defender plan subplans to their Azure-assigned state values (stop a ForceNew destroy/recreate of the deprecated KeyVaults + Arm plans), and import the drifted SqlServerVirtualMachines plan via a config-driven import block
 
 - **Date:** 2026-07-10
