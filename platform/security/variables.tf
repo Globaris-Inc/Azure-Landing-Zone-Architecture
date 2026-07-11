@@ -117,6 +117,18 @@ variable "enable_mde_connector" {
   default     = false
 }
 
+variable "enable_aad_connector" {
+  description = "If true, create the Microsoft Entra ID (Azure Active Directory) Sentinel data connector streaming SigninLogs/AuditLogs into the Security LA workspace. Requires the OIDC SP to hold the Security Administrator (or Global Administrator) Entra directory role, which it does not hold in the POC. Default false: the tenant-scoped connector PUT returns 401 Access denied without that role. Same permission class as enable_aad_diagnostics and enable_ueba. Re-enable once the role is granted."
+  type        = bool
+  default     = false
+}
+
+variable "enable_ti_connector" {
+  description = "If true, create the Microsoft Threat Intelligence Sentinel data connector ingesting the ThreatIntelligenceIndicator feed into the Security LA workspace. Requires the OIDC SP to hold the Security Administrator (or Global Administrator) Entra directory role, which it does not hold in the POC. Default false: the tenant-scoped connector PUT returns 401 Access denied without that role. Re-enable once the role is granted."
+  type        = bool
+  default     = false
+}
+
 variable "sentinel_owner_group_object_id" {
   description = "Entra ID group object ID that becomes the default owner for newly-created Sentinel incidents via an automation rule. Leave empty to skip the auto-assign automation rule."
   type        = string

@@ -37,6 +37,92 @@
 
 <!-- Newest at the top. -->
 
+### ADR-033: Gate the tenant-scoped Sentinel data connectors (Entra ID + Threat Intelligence) off - both need a Security Administrator directory role the CI SP lacks
+
+- **Date:** 2026-07-10
+- **Section:** 6 (Defender for Cloud + Sentinel)
+- **Status:** Accepted. Extends the same tenant-permission gating rationale already applied to
+  `enable_aad_diagnostics` and `enable_ueba` (recorded in `envs/poc.tfvars` and
+  `docs/preclearance/platform-security.md` prereq 1) to the two tenant-scoped Sentinel data connectors.
+- **Decision makers:** user, claude (architect)
+
+**Context:**
+The `platform/security` apply (run 29133588369) partially applied. LAW, Key Vault, Event Hub, Defender
+pricing plans, and regulatory compliance landed. Among the failures were the two **tenant-scoped** Sentinel
+data connectors:
+- `azurerm_sentinel_data_connector_azure_active_directory.this` (dc-aad) failed **401 Access denied**.
+- `azurerm_sentinel_data_connector_threat_intelligence.this` (dc-ti) failed **401 Access denied**.
+
+Verified facts this session:
+- Both failing connectors carry `tenant_id` and enable a **tenant-level** data source (Entra
+  Sign-in/Audit logs for dc-aad; the Microsoft Threat Intelligence indicator feed for dc-ti). The
+  **subscription-scoped** connector `azurerm_sentinel_data_connector_azure_security_center.this` (dc-mdc,
+  carries `subscription_id`) **succeeded** in the same apply. The clean split is: sub-scoped connector works
+  under the SP's Contributor; tenant-scoped connectors need an Entra directory role the SP does not hold.
+- This is the **same permission class** already gated for `enable_aad_diagnostics`
+  (`azurerm_monitor_aad_diagnostic_setting`) and `enable_ueba` (the azapi Sentinel settings writes): all need
+  **Security Administrator** (or Global Administrator) in Entra, which the CI OIDC SP does not hold. See
+  `docs/preclearance/platform-security.md` prereq 1.
+- A **401 is an authorization failure, not a propagation lag.** A rerun does not clear a standing
+  directory-role gap, so dc-aad and dc-ti will fail identically on every retry until the role is granted.
+
+**Decision:**
+Gate both tenant-scoped Sentinel data connectors behind two new default-`false` feature flags in
+`platform/security`:
+- `var.enable_aad_connector` (bool, default `false`) gates `azurerm_sentinel_data_connector_azure_active_directory.this`.
+- `var.enable_ti_connector` (bool, default `false`) gates `azurerm_sentinel_data_connector_threat_intelligence.this`.
+
+Each connector takes `count = var.<flag> ? 1 : 0`. The two `outputs.tf` entries that reference them
+(`aad`, `ti` in `sentinel_data_connector_ids`) convert to the `one(...[*].id)` pattern already used for the
+count-gated MDE connector. Two separate flags (not one combined flag) because the connectors represent
+different data sources and different downstream re-enable triggers; they may be turned on independently. The
+sub-scoped dc-mdc connector stays ungated and is unaffected.
+
+The two Sentinel resources that got **400-class** errors in the same apply -
+`azurerm_sentinel_alert_rule_scheduled.this["firewall_threat_intel_hit"]` (400 "Could not locate all the
+workspaces in your query") and `azurerm_sentinel_automation_rule.ti_enrichment_tag` (400 "Workspace not
+onboarded to Microsoft Sentinel") - are **NOT gated**. Neither reads the ThreatIntelligenceIndicator table
+that dc-ti populates: the firewall rule cross-workspace-queries the platform LAW for Azure Firewall
+threat-intel block logs, and the automation rule only tags incidents by severity. They have no data
+dependency on dc-ti, so gating dc-ti does not force gating them. Their 400s are onboarding-propagation /
+cross-workspace-validation timing, not permission or code faults (see Consequences for the retry rationale).
+
+**Alternatives considered:**
+- Grant a time-boxed Security Administrator directory role to the CI SP and keep both connectors enabled -
+  rejected for this retry: same operator-action deferral already chosen for `enable_aad_diagnostics` and
+  `enable_ueba`; enabling only these two connectors would be inconsistent, and the directory-role grant is a
+  standing follow-up, not a blocker for landing the rest of the root. The flags make the connectors a
+  one-variable flip once the role exists.
+- One combined flag for both connectors - rejected: dc-aad (Entra sign-in/audit, needs Entra ID P1/P2) and
+  dc-ti (Microsoft TI feed) have different licensing and different re-enable triggers; a shared flag would
+  couple two unrelated re-enable decisions.
+- Rerun dc-ti as-is (treat the 401 as transient) - rejected: a 401 is authorization, not propagation; a
+  rerun cannot clear a missing directory role and would just burn a retry.
+- Also gate the firewall_threat_intel_hit alert rule and ti_enrichment_tag automation rule - rejected:
+  neither consumes dc-ti data, so they are not blocked by the connector being off; their failures are timing,
+  and gating working detections that a retry is expected to clear would remove security value for no reason.
+
+**Consequences:**
+- Positive: the retry's Sentinel lane reduces to resources the SP is actually authorized to create. The two
+  tenant-scoped connectors are captured as scoped, documented gates consistent with the existing
+  `enable_aad_diagnostics` / `enable_ueba` pattern, not blind retries against a permission the SP lacks. The
+  MDE connector, the sub-scoped MDC connector, the 10 scheduled analytics rules, watchlists, and the MDC
+  high-severity incident rule are unaffected.
+- Negative / trade-offs: no Entra ID sign-in/audit ingestion and no Microsoft TI indicator feed into the
+  Security workspace until the Security Administrator role is granted and the flags are flipped. Two more
+  default-false feature flags now live in `platform/security`. Detections that would benefit from TI
+  enrichment (the ti_enrichment_tag automation rule still tags, but no TI indicators are ingested to enrich
+  against) run without that feed until re-enable.
+- Follow-ups required: (1) When the time-boxed Security Administrator grant is arranged (the same operator
+  action that unblocks `enable_aad_diagnostics` and `enable_ueba`), flip `enable_aad_connector`,
+  `enable_ti_connector`, `enable_aad_diagnostics`, and `enable_ueba` to `true` in one later pass and re-apply.
+  Tracked in `docs/preclearance/platform-security.md` (apply-time findings, Class B). (2) Contingency for the
+  firewall_threat_intel_hit rule: if it fails a SECOND time on the retry with the same "Could not locate all
+  the workspaces" error, the root cause is name-only cross-workspace resolution
+  (`workspace('law-platform-globaris-poc')`), not timing; the durable fix is to switch that KQL reference to
+  the fully-qualified platform LAW ARM resource ID (which requires threading the platform LAW resource ID
+  into this root as a new input). Do not blind-retry that rule more than once.
+
 ### ADR-032: Gate the corp-spoke App Service tier off - `landingzones` subscription dedicated App Service compute quota is 0 (offer cap)
 
 - **Date:** 2026-07-10

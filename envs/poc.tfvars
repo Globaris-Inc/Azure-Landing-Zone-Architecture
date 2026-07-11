@@ -214,6 +214,16 @@ enable_ueba = false
 # MDE license so the connector create fails. Pre-staged for a later pass.
 enable_mde_connector = false
 
+# Entra ID (Azure AD) Sentinel data connector gated OFF: the tenant-scoped connector
+# PUT needs a Security Administrator directory role the CI SP does not hold (401 Access
+# denied, same class as enable_aad_diagnostics / enable_ueba). Re-enable once granted.
+enable_aad_connector = false
+
+# Microsoft Threat Intelligence Sentinel data connector gated OFF: same Security
+# Administrator directory-role requirement; the connector PUT returns 401 without it.
+# Re-enable once the role is granted.
+enable_ti_connector = false
+
 # Default scheduled-rule cadence. Per-rule overrides live in sentinel.tf.
 analytics_rule_lookback_minutes        = 60
 analytics_rule_query_frequency_minutes = 60

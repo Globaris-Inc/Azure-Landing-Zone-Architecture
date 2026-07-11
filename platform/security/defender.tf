@@ -173,7 +173,7 @@ resource "azurerm_security_center_automation" "mdc_export" {
   }
 
   action {
-    type        = "LogAnalytics"
+    type        = "Workspace"
     resource_id = module.security_law.resource_id
   }
 

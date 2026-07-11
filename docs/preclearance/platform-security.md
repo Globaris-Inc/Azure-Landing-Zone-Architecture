@@ -60,3 +60,77 @@ No Deny-class collision fires on this root. The policy lane is clean.
 2. Decide the MDATP connector (drop/gate vs accept-fail) - surfaced to user.
 3. Grant time-boxed Security Administrator to the CI SP (operator) OR flip the two toggles off.
 4. CI plan -> review -> apply. 5. Remove the directory role after apply (if granted).
+
+## Apply-time findings - run 29133588369 (partial apply) and go/no-go for RETRY
+
+> Added by: architect. Date: 2026-07-10. Status of retry: GO after the code fixes below land (ADR-033 gates
+> + the mdc_export action-type fix). See ADR-033.
+> What already landed and persists in state (retry will treat as no-op refresh): LAW, Key Vault, Event Hub
+> namespace/hub/auth rule, Defender pricing plans that succeeded, regulatory compliance assignments, security
+> contact, and the Sentinel workspace onboarding (`azurerm_sentinel_log_analytics_workspace_onboarding.this`).
+> The workspace is therefore ALREADY onboarded going into the retry - this is central to the Class B 400
+> assessment below.
+
+Five failures across three classes.
+
+### CLASS A - code bug (fix required before retry): mdc_export action type
+
+`azurerm_security_center_automation.mdc_export` at `platform/security/defender.tf:176` sets the first action
+block `type = "LogAnalytics"`. The provider rejects it: valid values are `EventHub`, `LogicApp`, `Workspace`
+(plus lowercase aliases). VERIFIED 2026-07-10 against the current azurerm docs for
+`azurerm_security_center_automation` (provider source `website/docs/r/security_center_automation.html.markdown`):
+for a Log Analytics workspace destination the correct value is **`Workspace`** (`resource_id` stays the LAW
+resource ID). This is a deterministic code bug, not transient - it fails every apply until fixed. Fix: change
+`type = "LogAnalytics"` to `type = "Workspace"`. Verdict: MUST FIX before retry.
+
+### CLASS B - tenant permission / Sentinel
+
+- **dc-aad** (`azurerm_sentinel_data_connector_azure_active_directory.this`): 401 Access denied. Tenant-scoped
+  connector; needs Security Administrator (or Global Admin) in Entra - the SAME class already gated for
+  `enable_aad_diagnostics` and `enable_ueba`. The CI SP does not hold it. DECISION: gate off behind new
+  `enable_aad_connector` (default false). See **ADR-033**. A 401 is authorization, not propagation - a rerun
+  cannot clear it.
+- **dc-ti** (`azurerm_sentinel_data_connector_threat_intelligence.this`): 401 Access denied. Same tenant-scope
+  permission class as dc-aad (contrast the sub-scoped dc-mdc connector, which SUCCEEDED under the SP's
+  Contributor). ASSESSMENT: this is a standing directory-role gap, NOT eventual-consistency - a 401 is
+  authorization, and a rerun will fail identically. RECOMMENDATION: gate off behind new `enable_ti_connector`
+  (default false), not rerun-as-is. See **ADR-033**.
+- **firewall_threat_intel_hit** (`azurerm_sentinel_alert_rule_scheduled.this["firewall_threat_intel_hit"]`):
+  400 "Could not locate all the workspaces in your query". This is a cross-workspace KQL resolution failure on
+  `workspace('law-platform-globaris-poc')`, NOT a permission failure and NOT a dc-ti dependency (the rule
+  reads Azure Firewall threat-intel block logs from the platform LAW; it does not read the
+  ThreatIntelligenceIndicator table dc-ti populates). ASSESSMENT: most likely validation/propagation timing.
+  Because the platform LAW exists (platform/management is green) and the SP has read access to it via
+  Contributor, and because the Sentinel workspace onboarding ALREADY landed in this partial apply and
+  persists, the retry starts from a fully-onboarded, resolvable state. RECOMMENDATION: rerun-as-is, do NOT
+  gate. CONTINGENCY: if it fails a SECOND time with the same "Could not locate all the workspaces" error, the
+  cause is name-only cross-workspace resolution, not timing - switch the KQL to the fully-qualified platform
+  LAW ARM resource ID (needs the platform LAW ID threaded into this root). Do not blind-retry more than once.
+- **ti_enrichment_tag** (`azurerm_sentinel_automation_rule.ti_enrichment_tag`): 400 "Workspace not onboarded
+  to Microsoft Sentinel". Classic onboarding-propagation lag: the automation rule create raced ahead of
+  Sentinel's control plane finishing onboarding in the FIRST apply. Not a dc-ti dependency (it only tags
+  incidents by severity). ASSESSMENT: onboarding succeeded and persists in state, so on the retry the
+  workspace has been onboarded since the prior run and is fully settled. RECOMMENDATION: rerun-as-is, do NOT
+  gate - high confidence it creates cleanly on the retry.
+
+Net Class B: gate dc-aad and dc-ti (ADR-033); rerun the two rules unchanged. Neither rule depends on the TI
+connector's data, so gating dc-ti does not force gating them.
+
+### CLASS C - transient concurrency (no code change): Defender pricing plans
+
+Five `azurerm_security_center_subscription_pricing` plans (AppServices, SqlServerVirtualMachines, CloudPosture,
+Dns, VirtualMachines) failed 409 "Another update operation is in progress. Please retry in a few minutes."
+CONFIRMED transient: the Defender subscription-pricing controller serialises writes at the subscription level,
+so the parallel PUTs Terraform issues from `for_each` collide. A rerun clears it - the plans that already
+landed become no-op refreshes, leaving fewer concurrent writes. No code change. Optional de-risk if 409s
+recur on the retry: run this root's apply with reduced parallelism (for example `terraform apply
+-parallelism=2`) so the pricing PUTs do not contend. Operator/CI apply-arg only, not a code change.
+
+### Retry verdict: GO
+
+Land the Class A fix and the ADR-033 gates (Class B), then rerun. Class C clears on rerun (optional reduced
+parallelism). No new policy collision is introduced: the changes gate resources off and correct one argument
+value; they add no new resource and no new policy interaction, so the policy matrix above still holds. This
+retry does not touch the tenant-permission blocker - dc-aad, dc-ti, enable_aad_diagnostics, and enable_ueba
+all stay off until the time-boxed Security Administrator grant is arranged, at which point all four flip on in
+one later pass.

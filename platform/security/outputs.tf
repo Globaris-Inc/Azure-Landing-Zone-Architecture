@@ -90,10 +90,10 @@ output "regulatory_compliance_assignment_ids" {
 output "sentinel_data_connector_ids" {
   description = "Map of Sentinel data connector ARM IDs keyed by short name."
   value = {
-    aad = azurerm_sentinel_data_connector_azure_active_directory.this.id
+    aad = one(azurerm_sentinel_data_connector_azure_active_directory.this[*].id)
     mdc = azurerm_sentinel_data_connector_azure_security_center.this.id
     mde = one(azurerm_sentinel_data_connector_microsoft_defender_advanced_threat_protection.this[*].id)
-    ti  = azurerm_sentinel_data_connector_threat_intelligence.this.id
+    ti  = one(azurerm_sentinel_data_connector_threat_intelligence.this[*].id)
   }
 }
 

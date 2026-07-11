@@ -19,6 +19,8 @@
 # preferred for POC since it avoids duplicate log ingestion costs (~$2.3/GB).
 
 resource "azurerm_sentinel_data_connector_azure_active_directory" "this" {
+  count = var.enable_aad_connector ? 1 : 0
+
   name                       = "dc-aad-${var.org_prefix}-${var.environment}"
   log_analytics_workspace_id = module.security_law.resource_id
   tenant_id                  = var.tenant_id
@@ -54,6 +56,8 @@ resource "azurerm_sentinel_data_connector_microsoft_defender_advanced_threat_pro
 # Microsoft Threat Intelligence connector — feeds ThreatIntelligenceIndicator
 # table from the Microsoft TI feed (free tier of MS Threat Intel for Sentinel).
 resource "azurerm_sentinel_data_connector_threat_intelligence" "this" {
+  count = var.enable_ti_connector ? 1 : 0
+
   name                       = "dc-ti-${var.org_prefix}-${var.environment}"
   log_analytics_workspace_id = module.security_law.resource_id
   tenant_id                  = var.tenant_id
