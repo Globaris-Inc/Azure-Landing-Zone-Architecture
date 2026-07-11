@@ -37,6 +37,48 @@
 
 <!-- Newest at the top. -->
 
+### ADR-038: Consume Azure Verified Modules directly in the composition roots; do not build a bespoke local-module abstraction layer (remove the unused Section-1 scaffold dirs)
+
+- **Date:** 2026-07-11
+- **Section:** 11.6 (per-module documentation) / 1 (repo structure)
+- **Status:** Accepted.
+- **Decision makers:** user, claude (architect)
+
+**Context:**
+Section 1 scaffolded a `modules/` directory with roughly 10 placeholder subdirectories (hub-network,
+spoke-network, policy-baseline, private-dns, monitoring, security-sentinel, identity, synthetic-workload, and
+others) under ADR-002, on the assumption the estate might wrap Azure Verified Modules (AVM) in bespoke local
+modules. In practice only `modules/finops/` was ever populated. Every other capability consumes AVM modules
+(`Azure/avm-ptn-*`, `Azure/avm-res-*`) **directly** in the composition roots (`platform/*`,
+`landing-zones/*`), pinned per call. Completing Section 11.6 (per-module docs) surfaced that the 9 empty
+scaffold dirs are dead structure and that "per-module documentation" is really per-root documentation.
+
+**Decision:**
+Consume AVM modules directly in the composition roots. Do NOT build a custom local-module abstraction layer
+over AVM. The single exception is `modules/finops/`, a bespoke wrapper retained because no suitable AVM module
+existed for the subscription/MG budget + azapi cost-export pattern it implements (ADR-027). The 9 unused
+Section-1 scaffold directories are removed. Per-module documentation for Section 11.6 is therefore delivered
+as per-ROOT `terraform-docs` READMEs (each composition root documents the AVM modules it calls) plus the
+`modules/finops/` README, not as docs for empty scaffolds.
+
+**Alternatives considered:**
+- Keep the scaffold and build local wrapper modules over AVM - rejected: adds an indirection layer with no
+  benefit and a real maintenance cost, and fights the AVM versioning/pinning model (each wrapper would have to
+  re-expose and re-pin AVM inputs/outputs). Calling AVM directly in roots is the idiomatic ALZ-with-AVM
+  pattern.
+- Keep the empty dirs "just in case" - rejected: dead structure misleads readers and implies an abstraction
+  layer that does not exist.
+
+**Consequences:**
+- Positive: the repo reflects reality (AVM-direct composition); documentation lives at the root level where
+  the module calls actually are; no phantom abstraction layer to maintain.
+- Negative / trade-offs: none material. If a genuine bespoke need arises later (as with finops), a new local
+  module can be added deliberately at that point.
+- Follow-ups / guidance: anyone extending the estate adds AVM module calls in a composition root, not a new
+  local module, unless a genuine bespoke need (like `modules/finops/`) arises. Lineage: refines ADR-002
+  (Section 1 scaffold) by removing its unused `modules/` placeholders; ADR-027 governs the retained
+  `modules/finops/` azapi cost-export pattern.
+
 ### ADR-037: Anchor the Day-2 Operations and Monitoring target architecture - platform-anchored, policy-propagated (DINE), AMBA-based, MVP-bounded; accepted as the target, build deferred
 
 - **Date:** 2026-07-11
