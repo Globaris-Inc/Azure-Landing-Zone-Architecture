@@ -156,40 +156,6 @@ resource "azurerm_active_directory_domain_service" "this" {
 }
 
 # ---------------------------------------------------------------------------
-# ADR-029: config-driven import of the built-but-unstated managed domain
-#
-# Run 29055619749 built the managed domain in Azure (provisioningState Succeeded,
-# replica set Running) but the create timed out waiting for the 2nd DC (blocked by
-# the NSG deny-all, now removed - see identity-network.tf), so the provider never
-# recorded the ID and the domain is NOT in Terraform state. A plain apply would hit
-# azurerm's requires-import guard ("already exists"). This block brings it into state
-# during the normal CI plan/apply - NO local `terraform import` (CI-only-apply rule).
-#
-# COMPOSITE import ID (verified against the azurerm v4.71 provider import docs): the
-# ID for azurerm_active_directory_domain_service is
-#   <domain resource ID>/initialReplicaSetId/<initial replica set GUID>
-# NOT the plain resource ID. Construction rules (ADR-029):
-#   - The domain resource ID is built from the RG resource's .id (so the subscription
-#     GUID comes from in-config state, never a committed literal) plus the same
-#     name expression the resource uses. Keep this name in lockstep with
-#     azurerm_active_directory_domain_service.this.name above.
-#   - The replica set GUID is supplied at apply time via var.aadds_import_replica_set_id
-#     (TF_VAR_aadds_import_replica_set_id in CI) - not baked into committed HCL.
-# GATING: for_each over a 0-or-1-element set makes the import a NO-OP when the variable
-# is empty (greenfield redeploy has no domain to import), and a single import when the
-# recovery GUID is set. The `to` resolves to the count-index-0 domain instance; with at
-# most one set element it maps uniquely. Import is a metadata read (no create-wait), so
-# it succeeds even while the 2nd DC is still healing; subsequent plans show 0 changes.
-# NOTE: validate cannot confirm the import ID resolves against real state - the CI plan
-# is the real gate (it must show "import", not "create", for the domain).
-import {
-  for_each = var.aadds_import_replica_set_id != "" ? toset([var.aadds_import_replica_set_id]) : []
-
-  to = azurerm_active_directory_domain_service.this[0]
-  id = "${azurerm_resource_group.identity_aadds[0].id}/providers/Microsoft.AAD/domainServices/aadds-${var.org_prefix}-${var.environment}/initialReplicaSetId/${each.value}"
-}
-
-# ---------------------------------------------------------------------------
 # Recovery Services Vault — identity subscription
 # Module: Azure/avm-res-recoveryservices-vault/azurerm v1.1.3
 # Same module + pin as G4/corp-a1 (avoid version skew). For future DC/management
