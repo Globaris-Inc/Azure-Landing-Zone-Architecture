@@ -61,6 +61,14 @@ locals {
 # Defender for Cloud — extended plans (workload + CSPM)
 # ---------------------------------------------------------------------------
 
+# One-shot config-driven import (ADR-035): reconcile run-1 state drift where the raced
+# pricing PUT set SqlServerVirtualMachines=Standard in Azure but the state write did not
+# persist. Remove in a cleanup commit after the apply lands.
+import {
+  to = azurerm_security_center_subscription_pricing.extended["SqlServerVirtualMachines"]
+  id = "/subscriptions/${var.security_subscription_id}/providers/Microsoft.Security/pricings/SqlServerVirtualMachines"
+}
+
 resource "azurerm_security_center_subscription_pricing" "extended" {
   for_each      = local.defender_extended_plans
   tier          = "Standard"

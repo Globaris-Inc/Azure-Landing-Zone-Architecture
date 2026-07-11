@@ -32,11 +32,21 @@ locals {
   # VirtualMachines uses subplan "P2" (Defender for Servers Plan 2 — includes MDE + VA).
   # Other types are added directly below via for_each.
   #
+  # Map of resource_type => subplan. The subplan is pinned to the exact value
+  # Azure assigned and the provider already holds in state (verified 2026-07-10):
+  # leaving subplan unset made config null vs state <value> on a ForceNew field,
+  # which forced a destroy/recreate of all three plans (ref ADR-035).
+  #
   # KeyVaults and Arm are both deprecated for NEW enablement as of 2026-07-05,
   # but they are held here as-is on purpose: both are already live-Standard and
   # in Terraform state (ref ADR-034 / OQ-028). They must NOT be re-PUT or
-  # recreated - removing or re-enabling them would fail. Leave them in place.
-  defender_basic_plans = toset(["StorageAccounts", "KeyVaults", "Arm"])
+  # recreated - removing or re-enabling them would fail. Pinning the subplan
+  # keeps config == state so the plan is a no-op. Leave them in place.
+  defender_basic_plans = {
+    StorageAccounts = "DefenderForStorageV2"
+    KeyVaults       = "PerKeyVault"
+    Arm             = "PerSubscription"
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -139,7 +149,8 @@ resource "azurerm_security_center_subscription_pricing" "servers" {
 resource "azurerm_security_center_subscription_pricing" "this" {
   for_each      = local.defender_basic_plans
   tier          = "Standard"
-  resource_type = each.value
+  resource_type = each.key
+  subplan       = each.value
 }
 
 # ---------------------------------------------------------------------------

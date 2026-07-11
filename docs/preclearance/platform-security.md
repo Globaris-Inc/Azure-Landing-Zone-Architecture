@@ -217,3 +217,45 @@ lane. No new policy collision: the changes gate one rule off, drop one plan, and
 and no new policy interaction, so the policy matrix at the top still holds. KeyVaults + Arm stay live-Standard
 and are non-blocking (new-enablement block only). Tenant-permission gates (dc-aad, dc-ti, enable_aad_diagnostics,
 enable_ueba) remain off pending the Security Administrator grant.
+
+## Plan-scan finding - run 29135838771 (clean plan, pre-apply guard) and go/no-go
+
+> Added by: architect. Date: 2026-07-10. Status: HOLD, then GO after the ADR-035 subplan-pinning + import block
+> land and a re-plan shows 0 to destroy. The ADR-034 step-6 plan-scan guard caught a posture-degrading landmine
+> on a clean plan BEFORE apply - working exactly as designed. See ADR-035.
+
+The clean plan reported `6 to add, 9 to change, 3 to destroy`. The three destroys were FORCED REPLACEMENTS of
+the basic Defender plans:
+```
+azurerm_security_center_subscription_pricing.this["Arm"]            -/+ subplan "PerSubscription"      -> null # ForceNew
+azurerm_security_center_subscription_pricing.this["KeyVaults"]      -/+ subplan "PerKeyVault"          -> null # ForceNew
+azurerm_security_center_subscription_pricing.this["StorageAccounts"] -/+ subplan "DefenderForStorageV2" -> null # ForceNew
+```
+
+Root cause: `this` (main.tf) sets only `resource_type`, never `subplan`. Azure auto-assigned default subplans on
+the original apply and the provider stored them; config `subplan = null` vs state value on a ForceNew field
+forces destroy+recreate. Post 2026-07-05, the KeyVaults and Arm recreate PUTs are blocked (deprecated), so the
+recreate would leave both at Free (Defender for Key Vault + Resource Manager protection OFF, a posture
+regression) and fail the apply. StorageAccounts is not deprecated so it would recreate successfully, but
+destroy/recreate of a live plan is still unwanted churn. Not seen in run-1/run-2 because those failed earlier
+(connectors / Dns) before reaching these replacements.
+
+The rest of the plan is benign: `mdc_export` in-place (the type=Workspace fix), Key Vault / LAW tag drift
+in-place, and the legit creates (AppServices, SqlServerVirtualMachines, VirtualMachines/servers). The `extended`
+plans do NOT replace (subplan-less resource types, no drift).
+
+FIX (ADR-035):
+- Pin the three basic-plan subplans to their exact state values so config matches state and the ForceNew diff
+  disappears. Cloud-engineer lane.
+- Import the drifted SqlServerVirtualMachines plan via a config-driven import block (interpolated id, no
+  hardcoded GUID - proven by the ADR-029 import precedent). Cloud-engineer lane (import block in code; no
+  separate devsecops import action needed).
+
+### Go/no-go: HOLD until re-plan is clean, then GO
+
+Do NOT apply the current plan (it destroys the two deprecated plans). After ADR-035 lands, devsecops re-plans
+and confirms `0 to destroy` and no `-/+` on the three basic plans. Expected post-fix plan: 2 pricing creates
+(AppServices, VirtualMachines/servers) + the SqlServerVirtualMachines import + benign in-place changes, 0
+destroy. Keep the `-parallelism=1` recommendation for the apply (the 2 remaining pricing creates still contend
+on the sub-level controller). Watch item (non-blocking): pinning DefenderForStorageV2 may surface an in-place
+StorageAccounts `extension` diff; benign, do not block on it.

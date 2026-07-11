@@ -37,6 +37,86 @@
 
 <!-- Newest at the top. -->
 
+### ADR-035: Pin the basic Defender plan subplans to their Azure-assigned state values (stop a ForceNew destroy/recreate of the deprecated KeyVaults + Arm plans), and import the drifted SqlServerVirtualMachines plan via a config-driven import block
+
+- **Date:** 2026-07-10
+- **Section:** 6 / 8 (Defender for Cloud plans)
+- **Status:** Accepted. Follows the ADR-034 deprecation finding; triggered by the ADR-034 step-6 plan-scan
+  guard catching the issue on a clean plan before apply.
+- **Decision makers:** user, claude (architect)
+
+**Context:**
+The run-3 clean plan (run 29135838771) reported `6 to add, 9 to change, 3 to destroy`. The three destroys were
+FORCED REPLACEMENTS of `azurerm_security_center_subscription_pricing.this["Arm"]`, `["KeyVaults"]`, and
+`["StorageAccounts"]`, each because `subplan` was going from its Azure-assigned state value to `null`
+(`PerSubscription -> null`, `PerKeyVault -> null`, `DefenderForStorageV2 -> null`) and `subplan` is a ForceNew
+attribute.
+
+Verified facts this session:
+- Root cause: `azurerm_security_center_subscription_pricing.this` (main.tf) uses
+  `for_each = local.defender_basic_plans` (a `toset` of bare resource-type strings) and sets only
+  `resource_type = each.value`, never `subplan`. The original apply let Azure auto-assign default subplans, and
+  the provider stored them in state. Config `subplan = null` vs state `subplan = <value>` on a ForceNew field
+  forces destroy plus recreate.
+- Why it is dangerous now (not before): post 2026-07-05, KeyVaults and Arm are blocked for NEW enablement
+  (ADR-034 audit). The recreate would DESTROY the plan (revert to Free, turning Defender for Key Vault and
+  Resource Manager protection OFF, a real posture regression) and then attempt a re-enable PUT that now 400s -
+  failing the apply and leaving both plans at Free. StorageAccounts is not deprecated, so it would recreate
+  successfully, but destroy/recreate of a live plan is still unwanted churn.
+- Why run-1 and run-2 did not hit it: both failed earlier (connectors / Dns) before reaching the `this`
+  replacements. It only surfaced once those blockers were cleared.
+- Scope confirmation: the `extended` plans (defender.tf) also never set `subplan` but do NOT force-replace -
+  those resource types (AppServices, SqlServers, SqlServerVirtualMachines, Containers,
+  OpenSourceRelationalDatabases, CloudPosture) are subplan-less, so Azure assigns no subplan and there is no
+  drift. `servers` (VirtualMachines) already pins `subplan = "P2"` explicitly. So only the three basic plans
+  with Azure-assigned subplans drift.
+- Subplan values VERIFIED 2026-07-10: the pinned strings are the exact values already in state (which is what
+  Azure assigned and the provider read), and are documented current subplan identifiers for their resource
+  types (`PerSubscription` for Arm, `PerKeyVault` for KeyVaults, `DefenderForStorageV2` for StorageAccounts;
+  azurerm docs also list alternates such as `PerApiCall` / `PerTransaction` that we deliberately do NOT switch
+  to, since switching would itself be a change). Pinning config to the state value yields a zero-diff, not an
+  update.
+- Import mechanism VERIFIED against in-repo precedent: `platform/identity/domain-services.tf:185-190` (ADR-029)
+  uses a config-driven `import` block whose `id` interpolates input variables, `each.value`, and even a managed
+  resource attribute. So the project's Terraform version fully supports interpolation in an import `id`; a
+  literal subscription GUID is not required.
+
+**Decision:**
+1. Restructure `local.defender_basic_plans` from a `toset` of resource-type strings to a MAP of
+   `resource_type => subplan`, pinned to the exact state values: `StorageAccounts = "DefenderForStorageV2"`,
+   `KeyVaults = "PerKeyVault"`, `Arm = "PerSubscription"`. Change
+   `azurerm_security_center_subscription_pricing.this` to `resource_type = each.key` and `subplan = each.value`.
+   The instance keys are unchanged (map keys equal the old set elements), so there is no address churn; config
+   now matches state on `subplan`, so the ForceNew diff disappears and the three destroys vanish.
+2. Import the drifted SqlServerVirtualMachines plan with a config-driven `import` block using an interpolated
+   `id` built from the existing `var.security_subscription_id` (no hardcoded GUID). Remove the block in a
+   cleanup commit after the successful apply.
+3. Do NOT pin subplans on the `extended` plans (subplan-less resource types, no drift) and do NOT change
+   `servers` (already pinned to P2). No speculative treatment.
+
+**Alternatives considered:**
+- `lifecycle { ignore_changes = [subplan] }` on `this` - rejected: masks the drift instead of resolving it,
+  leaves config semantically wrong (subplan unset), hides the real subplan from readers, and a future provider
+  change could resurface it.
+- Remove KeyVaults + Arm from config to avoid the recreate - rejected (per ADR-034 / OQ-028): a DELETE
+  downgrades security posture; they are held as-is until the migration decision.
+- Hardcode the SqlServerVirtualMachines import `id` with a literal subscription GUID - rejected: commits a real
+  subscription ID; interpolation via `var.security_subscription_id` avoids it and is proven by ADR-029.
+
+**Consequences:**
+- Positive: the three forced replacements disappear; KeyVaults and Arm stay live-Standard with no re-PUT
+  (posture preserved); StorageAccounts stops churning; config now honestly reflects the live subplans. The
+  ADR-034 plan-scan guard is validated - it caught a posture-degrading landmine on a clean plan before apply.
+- Negative / trade-offs: `defender_basic_plans` changes shape (toset to map); the three subplan strings are now
+  hardcoded and must track any future Microsoft subplan rename (low risk; these are stable identifiers).
+  Pinning `DefenderForStorageV2` may surface a benign in-place `extension` diff on StorageAccounts (known
+  provider behavior) - a watch item, not a blocker (in-place, not a replace, and StorageAccounts is not
+  deprecated).
+- Follow-ups required: (1) devsecops re-plans after the change and confirms `0 to destroy` and no replace on
+  the three basic plans BEFORE apply. (2) Remove the SqlServerVirtualMachines import block in a cleanup commit
+  after the apply lands. (3) Watch the StorageAccounts extension diff; if it becomes persistent noise, track
+  separately (do not block this apply on it).
+
 ### ADR-034: Gate the cross-workspace firewall_threat_intel_hit analytics rule off, remove the deprecated Dns Defender plan, and hold the (now also deprecated) KeyVaults + Arm plans as latent debt
 
 - **Date:** 2026-07-10
