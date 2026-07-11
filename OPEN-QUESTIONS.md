@@ -31,6 +31,56 @@
 
 <!-- Newest at the top. -->
 
+### OQ-028: Migrate the deprecated KeyVaults + Arm Defender plans off the plan-enablement API (or keep until Microsoft enforces retirement)?
+
+- **Raised:** 2026-07-10 (platform/security run-2 deprecation audit, architect)
+- **Section:** 6 (Defender for Cloud + Sentinel)
+- **Blocking:** No - both plans are live-Standard and in Terraform state; the July 5 2026 block applies to new
+  enablement only, so they do not block the next apply. Held as-is per ADR-034.
+- **Priority:** Medium
+
+**Question:**
+The Defender for Cloud release notes (July 5, 2026) list five pricing plans blocked for new enablement:
+KubernetesService, ContainerRegistry, KeyVaults, Dns, Arm. This root uses `KeyVaults` and `Arm` in
+`defender_basic_plans` (main.tf). Both are already enabled (live-Standard, in state), so they keep working, but
+they are on deprecated plans and any future re-PUT would be blocked. What is the migration path?
+
+**Options being considered:**
+- A (recommended): Hold as-is until teardown. The environment is scheduled for teardown by end of week, so the
+  latent re-PUT risk is very likely moot. Code comments mark both plans deprecated; the pre-clearance plan-scan
+  guard catches any drift (import, never re-create). Revisit only for a persistent environment.
+- B: Remove KeyVaults and Arm from IaC and let Terraform set them to Free - clean config, but this DISABLES
+  Defender for Key Vault and Resource Manager protection (a security-posture downgrade) and the "fixed pricing
+  model" successor may leave them protected differently. Only sensible if the posture change is intended.
+- C: Keep them enabled but move management out of `azurerm_security_center_subscription_pricing` to whatever the
+  "fixed pricing model" successor path is once Microsoft documents the IaC-supported form - deferred until that
+  path exists.
+
+### OQ-027: Re-enable path for the firewall_threat_intel_hit cross-workspace analytics rule (fully-qualified reference + Sentinel cross-workspace RBAC)?
+
+- **Raised:** 2026-07-10 (platform/security run-2, architect)
+- **Section:** 6 (Defender for Cloud + Sentinel)
+- **Blocking:** No - the rule is pre-staged off behind `enable_firewall_ti_rule = false` (ADR-034); the other
+  10 scheduled rules and the MDC incident rule stand.
+- **Priority:** Low
+
+**Question:**
+firewall_threat_intel_hit is the only cross-workspace analytics rule: it reads hub Azure Firewall diagnostics
+from the platform LAW (management subscription) while the rule is created against the security workspace
+(security subscription). Its name-only `workspace('law-platform-<org>-<env>')` reference does not resolve
+cross-subscription at rule-create time, so it failed twice and is now gated off. What does re-enabling it
+require in a persistent environment?
+
+**Options being considered:**
+- A (recommended for a persistent env): Thread the platform LAW ARM resource ID into `platform/security` as a
+  new input and rewrite the KQL to the fully-qualified `workspace('<platform-LAW-resource-id>')` form, AND
+  grant the security Sentinel workspace's query identity Log Analytics Reader on the platform LAW so the rule
+  resolves at create time and actually returns data at runtime. Then flip `enable_firewall_ti_rule = true`.
+- B: Ingest the hub firewall diagnostics directly into the security workspace and make the rule
+  single-workspace - rejected in design for the POC (duplicate ingestion cost) but simplest operationally.
+- C: Leave gated off - acceptable for the POC; the firewall threat-intel signal is still visible in the
+  platform workspace and Defender for Cloud.
+
 ### OQ-026: Corp-spoke workload tier (App Service + SQL) is fully offer-capped off - for a persistent environment, request quota / relocate, or redesign to serverless?
 
 - **Raised:** 2026-07-10 (landing-zones deploy, architect)

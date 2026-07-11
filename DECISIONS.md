@@ -37,6 +37,106 @@
 
 <!-- Newest at the top. -->
 
+### ADR-034: Gate the cross-workspace firewall_threat_intel_hit analytics rule off, remove the deprecated Dns Defender plan, and hold the (now also deprecated) KeyVaults + Arm plans as latent debt
+
+- **Date:** 2026-07-10
+- **Section:** 6 (Defender for Cloud + Sentinel)
+- **Status:** Accepted. Resolves the ADR-033 firewall_threat_intel_hit contingency (the rule failed a second
+  time on run 29134695521 with the same cross-workspace error, exactly as ADR-033 predicted) and records the
+  Defender-plan deprecation audit that the run-2 failures forced.
+- **Decision makers:** user, claude (architect)
+
+**Context:**
+The `platform/security` retry (run 29134695521) applied the ADR-033 fixes cleanly: the connector 401s are
+gone (dc-aad and dc-ti gated off), and the "workspace not onboarded" automation-rule 400 cleared because
+onboarding propagated from the partial apply. Four issues remained. Two require design decisions (this ADR);
+two are execution mechanics recorded in `docs/preclearance/platform-security.md` (the SqlServerVirtualMachines
+state import and the pricing-write parallelism).
+
+Verified facts this session:
+- **firewall_threat_intel_hit (second failure, same error):** 400 "Could not locate all the workspaces in
+  your query." This is the only one of the 11 analytics rules that uses a cross-workspace reference. Its KQL
+  (via `local.platform_law_workspace_function`) is
+  `workspace('law-platform-<org>-<env>').AzureDiagnostics | ...` - a **name-only** reference to the platform
+  LAW, which lives in the **management** subscription while the Sentinel rule is created against the security
+  workspace in the **security** subscription. Name-only `workspace('name')` resolution does not resolve
+  cross-subscription at rule-create validation time, so the create fails deterministically. The design reason
+  the rule is cross-workspace is intentional (sentinel.tf DEVIATION header): hub Azure Firewall diagnostics
+  land in the platform LAW, and the rule reads them from there to avoid duplicate ingestion cost. The other 10
+  scheduled rules reference tables in their own (security) workspace with no `workspace()` prefix and create
+  fine even where the source table has no data yet.
+- **Dns Defender plan deprecated:** `azurerm_security_center_subscription_pricing.extended["Dns"]` failed 400
+  "The 'Dns' plan is deprecated and can no longer be enabled." Dns is live-Free on the security sub (it never
+  landed), so removing it from config is a no-op against live state.
+- **Defender-plan deprecation audit (done now, this session):** VERIFIED 2026-07-10 against the Defender for
+  Cloud release notes ("Plan enablement API now blocks onboarding to five deprecated Defender plans,"
+  July 5, 2026). The five plans blocked for **new** enablement are: Azure Kubernetes Service
+  (`KubernetesService`), Azure Container Registry (`ContainerRegistry`), Key Vault (`KeyVaults`), DNS (`Dns`),
+  and Azure Resource Manager (`Arm`). Mapping to this root:
+  - `Dns` (in `defender_extended_plans`, defender.tf) - deprecated AND live-Free -> actively failing -> remove.
+  - `KeyVaults` and `Arm` (in `defender_basic_plans`, main.tf) - **also deprecated**, but both are live-Standard
+    and already reconciled in Terraform state (they were created in the run-1 partial apply before the block
+    matters to us; run 2 reported no error on them). The block applies to **new enablement only**; existing
+    enabled plans keep working, so they do **not** block the next apply. They are latent debt: any future
+    re-PUT (config change, or a state drift that makes Terraform try to re-create them like
+    SqlServerVirtualMachines drifted) would hit the same deprecation block.
+  - `KubernetesService` and `ContainerRegistry` - deprecated but **not used** here (we use `Containers`,
+    which supersedes them). No action.
+  - `AppServices`, `SqlServers`, `SqlServerVirtualMachines`, `Containers`, `OpenSourceRelationalDatabases`,
+    `CloudPosture`, `VirtualMachines`, `StorageAccounts` - current/supported. No action.
+  This is a process gap: the pre-clearance deprecation audit (step 3d) was run for the policy/module lane but
+  the Defender-plan list was not re-audited against the release notes before run 1.
+
+**Decision:**
+1. **Gate firewall_threat_intel_hit off** behind a new `var.enable_firewall_ti_rule` (bool, default `false`)
+   in `platform/security`. Rather than gate a whole resource, filter the single map key out of the
+   `azurerm_sentinel_alert_rule_scheduled.this` `for_each` when the flag is false. The
+   `firewall_threat_intel_hit` entry stays in `local.analytics_rules` (pre-staged), so re-enabling is a flag
+   flip **plus** the two follow-ups below. The other 10 scheduled rules and the MDC incident rule are
+   unaffected.
+2. **Remove `Dns`** from the `defender_extended_plans` set in defender.tf. Dns is live-Free and never entered
+   state, so the removal is a no-op against live and state (no destroy).
+3. **Hold `KeyVaults` and `Arm` as-is** (do not remove, do not re-PUT). They are live-Standard, in state, and
+   do not block the next apply. Removing them from config would issue a DELETE that disables Defender for Key
+   Vault / Resource Manager protection - a real security-posture downgrade, out of scope for this retry. Add a
+   code comment marking both deprecated so no one re-triggers a PUT, and track the migration decision as an
+   open question (OQ-028).
+
+**Alternatives considered:**
+- **firewall_threat_intel_hit: fully-qualify the cross-workspace reference** to the platform LAW ARM resource
+  ID (the ADR-033 contingency) - rejected for this retry: it requires threading the management-sub platform
+  LAW resource ID into a root that is deliberately isolated from the platform workspace (main.tf), AND the
+  scheduled rule needs the Sentinel workspace's query identity to hold Log Analytics Reader on the platform
+  LAW or it creates but fails at runtime. Two new moving parts (cross-root input + cross-workspace RBAC) on a
+  tight retry budget is the riskiest path; parked as the re-enable design in OQ-027.
+- **firewall_threat_intel_hit: rewrite to single-workspace** - rejected: the firewall logs are not in the
+  security workspace by design (cost), so there is nothing single-workspace to query.
+- **firewall_threat_intel_hit: delete the rule** - rejected: loses a pre-staged detection; gating keeps it for
+  a persistent environment, consistent with the ADR-031/032/033 pre-staged-behind-a-flag pattern.
+- **KeyVaults + Arm: remove from config now** - rejected: issues a DELETE that downgrades security posture and
+  is out of scope for the retry; they are not blocking. Deferred to OQ-028.
+- **KeyVaults + Arm: add `lifecycle { ignore_changes }` or similar to freeze them** - rejected as unnecessary:
+  state matches live (tier Standard), so no PUT is planned; the real risk is drift, which is handled by the
+  pre-apply plan-scan guard in the pre-clearance doc (import, never re-create, any drifted deprecated plan).
+
+**Consequences:**
+- Positive: the third apply's Sentinel and Defender lanes reduce to resources that create cleanly. The
+  recurring cross-workspace 400 is removed deterministically; the deprecated Dns PUT is gone; the newly found
+  KeyVaults/Arm deprecation is documented before it can bite. 10 of 11 scheduled rules, the MDC incident rule,
+  watchlists, and all supported Defender plans stand.
+- Negative / trade-offs: no firewall threat-intel cross-workspace detection until it is re-enabled with a
+  fully-qualified reference plus cross-workspace RBAC (OQ-027). A third default-false feature flag now lives in
+  `platform/security`. KeyVaults and Arm remain on deprecated plans (latent debt, OQ-028). The Defender-plan
+  deprecation audit is now a required pre-clearance step for any root that sets pricing plans.
+- Follow-ups required: (1) **OQ-027** - re-enable firewall_threat_intel_hit (fully-qualified platform LAW
+  reference + Sentinel cross-workspace RBAC) for a persistent environment. (2) **OQ-028** - migrate KeyVaults
+  and Arm off the deprecated plans (remove from IaC vs keep until Microsoft enforces retirement). (3)
+  Execution mechanics in `docs/preclearance/platform-security.md` run-2 section: import
+  `azurerm_security_center_subscription_pricing.extended["SqlServerVirtualMachines"]` (devsecops) and reduce
+  pricing-write parallelism on the security apply (devsecops). (4) Add "re-audit the Defender pricing-plan list
+  against the current release notes" to the pre-clearance deprecation-audit step for any root that enables
+  Defender plans.
+
 ### ADR-033: Gate the tenant-scoped Sentinel data connectors (Entra ID + Threat Intelligence) off - both need a Security Administrator directory role the CI SP lacks
 
 - **Date:** 2026-07-10

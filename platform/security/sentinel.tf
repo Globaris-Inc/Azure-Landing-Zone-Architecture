@@ -410,7 +410,10 @@ locals {
 }
 
 resource "azurerm_sentinel_alert_rule_scheduled" "this" {
-  for_each = local.analytics_rules
+  for_each = {
+    for k, v in local.analytics_rules : k => v
+    if k != "firewall_threat_intel_hit" || var.enable_firewall_ti_rule
+  }
 
   name                       = "ar-${each.key}-${var.org_prefix}-${var.environment}"
   log_analytics_workspace_id = module.security_law.resource_id

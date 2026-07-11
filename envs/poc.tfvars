@@ -224,6 +224,12 @@ enable_aad_connector = false
 # Re-enable once the role is granted.
 enable_ti_connector = false
 
+# firewall_threat_intel_hit cross-workspace analytics rule gated OFF: its name-only
+# workspace('law-platform-...') reference does not resolve cross-subscription at rule
+# create (400 Could not locate all the workspaces). Re-enable needs a fully-qualified
+# platform LAW reference plus cross-workspace RBAC - see OQ-027.
+enable_firewall_ti_rule = false
+
 # Default scheduled-rule cadence. Per-rule overrides live in sentinel.tf.
 analytics_rule_lookback_minutes        = 60
 analytics_rule_query_frequency_minutes = 60

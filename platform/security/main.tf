@@ -31,6 +31,11 @@ locals {
   # Defender for Cloud resource types enabled on the Security subscription.
   # VirtualMachines uses subplan "P2" (Defender for Servers Plan 2 — includes MDE + VA).
   # Other types are added directly below via for_each.
+  #
+  # KeyVaults and Arm are both deprecated for NEW enablement as of 2026-07-05,
+  # but they are held here as-is on purpose: both are already live-Standard and
+  # in Terraform state (ref ADR-034 / OQ-028). They must NOT be re-PUT or
+  # recreated - removing or re-enabling them would fail. Leave them in place.
   defender_basic_plans = toset(["StorageAccounts", "KeyVaults", "Arm"])
 }
 

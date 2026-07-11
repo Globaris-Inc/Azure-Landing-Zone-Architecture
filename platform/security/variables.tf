@@ -129,6 +129,12 @@ variable "enable_ti_connector" {
   default     = false
 }
 
+variable "enable_firewall_ti_rule" {
+  description = "If true, create the firewall_threat_intel_hit scheduled analytics rule. Default false: it is the only cross-workspace rule and its name-only workspace('law-platform-...') reference does not resolve cross-subscription at rule-create time (400 Could not locate all the workspaces). Re-enable needs a fully-qualified platform LAW reference plus cross-workspace RBAC - see OQ-027."
+  type        = bool
+  default     = false
+}
+
 variable "sentinel_owner_group_object_id" {
   description = "Entra ID group object ID that becomes the default owner for newly-created Sentinel incidents via an automation rule. Leave empty to skip the auto-assign automation rule."
   type        = string

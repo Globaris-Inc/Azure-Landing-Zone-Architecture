@@ -134,3 +134,86 @@ value; they add no new resource and no new policy interaction, so the policy mat
 retry does not touch the tenant-permission blocker - dc-aad, dc-ti, enable_aad_diagnostics, and enable_ueba
 all stay off until the time-boxed Security Administrator grant is arranged, at which point all four flip on in
 one later pass.
+
+## Apply-time findings - run 29134695521 (run 2, ADR-033 fixes applied) and go/no-go for a 3rd apply
+
+> Added by: architect. Date: 2026-07-10. Status of 3rd apply: GO after the fixes below (ADR-034 gate + Dns
+> removal + SqlServerVirtualMachines import + reduced pricing parallelism). See ADR-034, OQ-027, OQ-028.
+> What run 2 fixed: the dc-aad/dc-ti 401s are gone (both gated off), the mdc_export action type=Workspace was
+> accepted, and the ti_enrichment_tag automation-rule 400 "not onboarded" cleared (onboarding propagated from
+> the run-1 partial apply, as predicted). Four issues remained.
+
+Live ground truth (`az security pricing list`, security sub, 2026-07-10):
+- Standard (live, in state): SqlServers, StorageAccounts, KeyVaults, Arm, OpenSourceRelationalDatabases,
+  Containers, CloudPosture, plus auto-derived Discovery and FoundationalCspm (not managed by this root).
+- Standard (live) but NOT in state: SqlServerVirtualMachines (run-1 raced PUT landed in Azure, state write did
+  not persist) -> needs import.
+- Free (not applied): VirtualMachines (the `servers` P2 resource, main.tf), AppServices (extended), Dns
+  (extended, deprecated), and the rest (KubernetesService, ContainerRegistry, CosmosDbs, Api, AI - none in
+  config).
+
+### Issue 1 - firewall_threat_intel_hit, SECOND failure (cross-workspace resolution): GATE OFF
+
+400 "Could not locate all the workspaces in your query" again - the ADR-033 contingency. Root cause confirmed:
+the rule's KQL uses a name-only cross-subscription reference `workspace('law-platform-<org>-<env>')` (platform
+LAW is in the management sub; the rule is created in the security sub), which does not resolve at rule-create
+time. It is the only cross-workspace rule; the other 10 create fine. DECISION (ADR-034): gate it off behind new
+`enable_firewall_ti_rule` (default false) by filtering the one map key out of the scheduled-rule `for_each`;
+keep the entry pre-staged. Re-enable needs a fully-qualified reference + cross-workspace RBAC (OQ-027), not just
+a flag flip. Cloud-engineer lane.
+
+### Issue 2 - Dns Defender plan deprecated: REMOVE + deprecation audit
+
+400 "The 'Dns' plan is deprecated and can no longer be enabled." Confirmed removal is the fix: Dns is live-Free
+and never entered state, so dropping it from `defender_extended_plans` (defender.tf) is a no-op against live and
+state. Process gap: the Defender-plan list was not re-audited against the release notes before run 1.
+Deprecation audit done now (VERIFIED 2026-07-10 vs Defender for Cloud release notes, "Plan enablement API now
+blocks onboarding to five deprecated Defender plans," July 5 2026). The five blocked plans: KubernetesService,
+ContainerRegistry, KeyVaults, Dns, Arm. Mapping to this root:
+- `Dns` (extended) - deprecated + Free-live -> REMOVE (this issue).
+- `KeyVaults` and `Arm` (defender_basic_plans, main.tf) - ALSO deprecated, but live-Standard + in state; the
+  block is new-enablement only, so they do NOT block the 3rd apply. Held as latent debt (ADR-034, OQ-028); do
+  not remove (removing = posture downgrade), do not re-PUT. Add code comments marking them deprecated.
+- `KubernetesService`, `ContainerRegistry` - deprecated but NOT used (we use `Containers`). No action.
+- All other plans in config (AppServices, SqlServers, SqlServerVirtualMachines, Containers,
+  OpenSourceRelationalDatabases, CloudPosture, VirtualMachines, StorageAccounts) - current/supported.
+Cloud-engineer lane (Dns removal + comments). New standing pre-clearance step: re-audit the Defender pricing
+plan list against the current release notes for any root that sets plans.
+
+### Issue 3 - SqlServerVirtualMachines state drift: IMPORT
+
+`azurerm_security_center_subscription_pricing.extended["SqlServerVirtualMachines"]` failed "already exists -
+needs to be imported." It is live-Standard but absent from state. SqlServerVirtualMachines is NOT deprecated, so
+import-then-apply is clean (no PUT block). Import target:
+- Address: `azurerm_security_center_subscription_pricing.extended["SqlServerVirtualMachines"]`
+- ID: `/subscriptions/<SECURITY-SUB>/providers/Microsoft.Security/pricings/SqlServerVirtualMachines`
+Drift scan for other plans: run 2 flagged ONLY SqlServerVirtualMachines as "already exists," which confirms the
+other live-Standard plans are reconciled in state (independent pricing resources would each surface their own
+"already exists" error otherwise). Guard for the 3rd apply: devsecops runs `terraform plan` first and confirms
+NO pricing resource other than VirtualMachines/AppServices shows "to create/replace." If any deprecated plan
+(KeyVaults/Arm) unexpectedly shows "to create" (drift), it must be IMPORTED, never re-created - a re-PUT would
+hit the deprecation block. Devsecops lane (state op via the workflow, before apply).
+
+### Issue 4 - AppServices + VirtualMachines 409 Conflict: SERIALIZE the pricing writes
+
+Both are Free-live; their parallel pricing PUTs collided on the sub-level pricing controller and never landed.
+After removing Dns (no write) and importing SqlServerVirtualMachines (becomes no-op), the remaining pricing
+writes on the 3rd apply are exactly two: VirtualMachines (`servers`, P2) and AppServices (`extended`).
+ASSESSMENT: two concurrent PUTs to the same subscription pricing controller CAN still 409 - the controller
+serializes all pricing writes at the sub level, so "only two writes" is lower risk but not zero.
+RECOMMENDATION: do NOT gamble on a plain rerun given the failure budget. Serialize the pricing writes on the
+security apply. Preferred: devsecops runs this root's apply step with `-parallelism=1` (the retry plan is tiny -
+a handful of creates - so full serialization costs almost nothing and removes the 409 risk entirely).
+`-parallelism=2` is NOT sufficient because two in-flight pricing PUTs still contend. Devsecops lane (apply-arg /
+workflow). Alternative durable code fix (cloud-engineer, optional): add
+`depends_on = [azurerm_security_center_subscription_pricing.servers]` to the `extended` resource to chain
+AppServices behind VirtualMachines; leave global parallelism unchanged.
+
+### 3rd-apply verdict: GO
+
+Land the ADR-034 changes (gate firewall_threat_intel_hit, remove Dns, comment KeyVaults/Arm) in the
+cloud-engineer lane; run the SqlServerVirtualMachines import and apply with reduced parallelism in the devsecops
+lane. No new policy collision: the changes gate one rule off, drop one plan, and correct state - no new resource
+and no new policy interaction, so the policy matrix at the top still holds. KeyVaults + Arm stay live-Standard
+and are non-blocking (new-enablement block only). Tenant-permission gates (dc-aad, dc-ti, enable_aad_diagnostics,
+enable_ueba) remain off pending the Security Administrator grant.

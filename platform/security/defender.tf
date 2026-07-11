@@ -29,7 +29,6 @@ locals {
     "SqlServers",
     "SqlServerVirtualMachines",
     "Containers",
-    "Dns",
     "OpenSourceRelationalDatabases",
     "CloudPosture",
   ])
@@ -66,6 +65,13 @@ resource "azurerm_security_center_subscription_pricing" "extended" {
   for_each      = local.defender_extended_plans
   tier          = "Standard"
   resource_type = each.value
+
+  # Serialize the remaining pricing PUTs to avoid the 409 concurrency error seen
+  # in the 2nd apply: VirtualMachines (the servers resource) and AppServices
+  # (in this extended set) were the two still needing a PUT. Ordering the whole
+  # extended set after servers keeps only one pricing PUT in flight at a time
+  # (code-side serialization, ref ADR-034).
+  depends_on = [azurerm_security_center_subscription_pricing.servers]
 }
 
 # ---------------------------------------------------------------------------
