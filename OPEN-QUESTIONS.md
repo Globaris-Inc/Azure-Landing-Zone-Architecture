@@ -68,6 +68,15 @@ layer/spoke. What is the bounded scope, and where does it land?
 - The synthetic `.tf` stays a reusable idea source only; it is NOT repurposed as a monitoring spoke - the
   capability lands in `platform/management` + policy.
 
+**RESOLVED 2026-07-11 (ADR-037):** The scope and placement are anchored. The O&M target architecture is
+accepted (build deferred) in **ADR-037**, with the authoritative design in
+`docs/operations-monitoring-design.md`: platform-anchored (extend `platform/management`), policy-propagated via
+DeployIfNotExists at MG scope through `avm-ptn-alz`, AMBA-based, with an MVP-bounded Phase-1 slice
+(diagnostic-settings-at-scale + AMBA baseline + Service/Resource Health + action-group extension + Sev0-4
+taxonomy). It is NOT a new standalone layer/spoke, and the synthetic root is not the vehicle. The two
+build-time sub-decisions above (AMBA delivery form; exact DINE MG scopes) are retained as deferred
+implementation detail for the eventual Phase-1 build, not open blockers.
+
 ### OQ-032: Estate-wide perpetual tag drift - tag-governance Modify policy injects CreatedDate="1970-01-01" that Terraform strips every plan
 
 - **Raised:** 2026-07-10 (Section 6 deploy QA)

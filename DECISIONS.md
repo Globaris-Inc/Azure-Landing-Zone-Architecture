@@ -37,6 +37,90 @@
 
 <!-- Newest at the top. -->
 
+### ADR-037: Anchor the Day-2 Operations and Monitoring target architecture - platform-anchored, policy-propagated (DINE), AMBA-based, MVP-bounded; accepted as the target, build deferred
+
+- **Date:** 2026-07-11
+- **Section:** 13 (repositioned) / CAF "Manage"
+- **Status:** Accepted as the TARGET architecture. BUILD DEFERRED (designed-now / built-later, same posture as
+  ADR-036 and ADR-022). Nothing is deployed by this ADR. Refines and supersedes ONLY the brief future-scope
+  bullets in ADR-036; ADR-036's reposition decision and its designed-now/built-later status stand unchanged.
+- **Decision makers:** user (approved the anchoring), claude (architect, design + recording)
+
+**Context:**
+ADR-036 repositioned Section 13 away from a synthetic load / red-team demo device toward a Day-2 Operations
+and Monitoring (O&M) capability, and sketched the forward scope as a few bullets (platform-anchored,
+DINE-propagated, AMBA-based). Those bullets were forward-sketch only, not an anchored decision. The architect
+then produced a comprehensive, estate-grounded O&M design in `docs/operations-monitoring-design.md` covering
+the full CAF "Manage" picture (monitoring data plane, alerting, routing, availability, visualization, platform
+automation, DR/backup, FinOps overlap, RBAC, placement/propagation, phased roadmap, and an exists-vs-net-new
+reuse table). The user approved making that design the accepted target architecture so the O&M layer is a
+first-class decision rather than a sketch. This ADR anchors it. It does not deploy anything: the estate is
+complete and QA-passed and teardown is imminent, so the build stays deferred.
+
+Verified facts the design rests on (from the deployed estate, WORKLOG Section Status Tracker 2026-07-10 and
+the `platform/management` + `platform/security` roots):
+- The **platform LAW** (management sub) already exists as the operations hub and already receives hub Azure
+  Firewall diagnostics, spoke VNet flow logs + Traffic Analytics, and Automation Account diagnostics.
+- The **platform action group** and **Automation Account** exist in the management sub.
+- A **separate Sentinel/security LAW** (security sub) is onboarded to Sentinel; cross-workspace query between
+  the two is already proven (the security root's firewall threat-intel rule reads the platform LAW).
+- The **`avm-ptn-alz` policy engine** (management-groups root) already delivers DINE/Modify initiatives at MG
+  scope (tag governance, deny-public-network), so it is the ready vehicle for O&M policy propagation.
+- Budgets, cost exports, a cost anomaly alert, Recovery Services Vaults, placeholder workbooks, and a
+  hand-placed diagnostic-settings pattern already exist and are reusable.
+
+**Decision:**
+Adopt `docs/operations-monitoring-design.md` as the authoritative O&M target architecture, with these anchored
+properties:
+1. **Platform-anchored.** O&M assets extend the existing `platform/management` landing zone (the platform LAW,
+   the platform action group, the Automation Account). No new root and no new spoke. Operational monitoring is
+   a platform capability in canonical ALZ, not a workload tier.
+2. **Policy-propagated.** Diagnostic settings and alerts are delivered by DeployIfNotExists initiatives at
+   management-group scope through the deployed `avm-ptn-alz` engine, so every current and future landing zone
+   inherits coverage automatically (the guardrail model), rather than hand-placed per spoke.
+3. **AMBA-based.** Azure Monitor Baseline Alerts (AMBA) for Azure Landing Zones is the named alert library
+   (platform-level + resource-health alerts), assigned as policy at MG scope, plus Service Health and Resource
+   Health alerts routed to the existing platform action group.
+4. **MVP-bounded.** The accepted first increment (Phase 1) is exactly: diagnostic-settings-at-scale (DINE) +
+   the AMBA baseline + Service/Resource Health alerts + extending the platform action group + the Sev0-4
+   severity/routing taxonomy. Phase 2 (availability probes, workbooks, DR/backup alerts, Network Insights,
+   alert-processing rules) and Phase 3 (Update Manager, guest config, ITSM, Managed Grafana, auto-remediation)
+   are explicitly OUT of the committed baseline and are optional later increments.
+5. **Two-workspace split preserved.** The platform LAW stays the operations workspace; the security LAW stays
+   the Sentinel/SecOps workspace. O&M targets the platform LAW and does not relocate or duplicate Sentinel.
+
+**Alternatives considered:**
+- A new standalone `operations/` or `platform/monitoring` root/spoke - rejected: O&M is a platform capability;
+  a new tier fragments ownership and contradicts the canonical ALZ placement. The capability belongs in
+  `platform/management` + policy.
+- A bespoke, hand-authored alert set - rejected: AMBA is Microsoft's named, endorsed, maintained library for
+  ALZ; anchoring to it bounds the build and keeps it credible rather than a reinvention.
+- Per-spoke hand-placed diagnostics and alerts - rejected: does not scale and drifts; DINE at MG scope makes
+  coverage a guardrail that new spokes inherit for free.
+- Repurposing the synthetic root as the O&M vehicle - rejected: the synthetic `.tf` is a reusable idea source
+  (notably its availability-probe potential), but the capability lands in `platform/management` + policy, not
+  a renamed synthetic spoke. `enable_synthetic_workload` is irrelevant to this ADR (synthetic is not the
+  vehicle; the design doc is).
+
+**Consequences:**
+- Positive: the O&M layer is now a first-class, accepted target architecture with a bounded MVP, an explicit
+  placement/propagation model, and a documented reuse table; net-new Phase-1 work is small and almost entirely
+  policy + existing assets; the design is CAF "Manage" aligned and portfolio-credible.
+- Negative / trade-offs: nothing is deployed by this ADR (build deferred), so the estate carries no live O&M
+  alerting today; the ADR-036 demo trade-off persists (Sentinel/Defender configured but no live operational
+  signal stream) until Phase 1 is built.
+- Relationship to existing records: **ADR-037 supersedes ONLY the future-scope bullets in ADR-036.** ADR-036
+  stays **Accepted** - its reposition decision (Section 13 synthetic -> deferred O&M) and its
+  designed-now/built-later status are untouched. ADR-037 refines that forward scope into an anchored target
+  architecture.
+- Follow-ups required:
+  - Authoritative design: `docs/operations-monitoring-design.md`.
+  - Build-time implementation detail (deferred, NOT open blockers): the exact AMBA-for-ALZ delivery form
+    (which initiatives / how much of the library) and the precise MG scope(s) for the DINE assignments
+    (platform vs landingzones vs per-archetype). Recorded against the now-resolved OQ-033.
+  - When/if the estate becomes persistent, build Phase 1 first (the bounded MVP), in the cloud-engineer /
+    devsecops lanes, under the normal code-review + pre-clearance gates.
+
 ### ADR-036: Reposition Section 13 from a synthetic load / security-signal demo device to a future Day-2 Operations and Monitoring layer for CAF landing zones; defer deploy (designed-now, built-later)
 
 - **Date:** 2026-07-10
