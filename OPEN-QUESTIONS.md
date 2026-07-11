@@ -31,6 +31,85 @@
 
 <!-- Newest at the top. -->
 
+### OQ-031: Synthetic telemetry lands in the platform LAW, but Sentinel is onboarded on the security LAW - will Section 6 analytics rules ever see the synthetic signals?
+
+- **Raised:** 2026-07-10 (synthetic first-apply pre-clearance, architect)
+- **Section:** 13 (Synthetic Workload) / 6 (Sentinel)
+- **Blocking:** No - does not block the synthetic apply. Blocks the demo story "synthetic signal produces a
+  Sentinel incident."
+- **Priority:** Medium
+
+**Question:**
+`synthetic` sends all its diagnostic settings and Container Apps console logs to
+`var.platform_law_workspace_id` = the **platform LAW** (`law-platform-...`, management sub, from
+`platform/management`). But Microsoft Sentinel is onboarded on the **security LAW** (security sub, from
+`platform/security`); the Section 6 analytics rules run against that workspace. Unless those rules
+cross-workspace query the platform LAW, the synthetic StorageBlobLogs / KV AuditEvent / SignInLogs /
+ContainerAppConsoleLogs will never trigger a Sentinel incident, so the red-team simulation produces no
+detections in the demo.
+
+**Options being considered:**
+- A: Verify whether the Section 6 analytics rules already reference the platform LAW cross-workspace (some
+  may). If they do, no change. If not, either
+- B: point synthetic's diagnostic settings + Container Apps at the **security LAW** instead of the platform
+  LAW (change the `platform_law_workspace_id` value fed to synthetic to the security LAW id, or add a
+  dedicated `sentinel_law_id` variable), so the signals land where Sentinel reads; or
+- C: add cross-workspace analytics rules on the security LAW that query the platform LAW (needs cross-sub
+  Sentinel RBAC, the same class as OQ-027). Lowest-effort for the demo is B if the platform LAW is not
+  already a Sentinel source.
+
+### OQ-030: corp-a1 App Service (hard-referenced by synthetic) is gated off - re-enable, retarget, or gate the corp-a1 workload pieces?
+
+- **Raised:** 2026-07-10 (synthetic first-apply pre-clearance, architect)
+- **Section:** 13 (Synthetic Workload) / 9 (Landing Zones)
+- **Blocking:** Yes - `data.azurerm_linux_web_app.corp_a1` (unconditional) fails at plan with a 404 because
+  the App Service does not exist, killing the corp-a1 REST-API deploy and the k6 target.
+- **Priority:** High
+
+**Question:**
+The corp-a1 (and corp-a2) App Service tier was gated off at deploy time (`enable_app_service = false`,
+ADR-031/ADR-032; the landingzones-sub dedicated-compute offer-cap, quota support ticket still open).
+`synthetic` hard-references `app-corp-a1-globaris-poc` via an unconditional data source in `corp_a1.tf` and
+`k6.tf`, so it cannot plan. There is no flag to skip only the corp-a1 App-Service dependency.
+
+**Options being considered:**
+- A: Re-enable `enable_app_service = true` on corp-a1 - only viable if the dedicated App Service compute quota
+  is now available in the LZ sub (it was not at deploy time). Highest fidelity to PROMPT.md 13.1/13.2, but may
+  itself fail on quota and is the slowest path before an end-of-week teardown.
+- B (recommended given teardown): retarget the 13.1 REST-API stub + the 13.2 k6 load at the LIVE online-p1
+  workload (the App Gateway WAF_v2 public endpoint / the Static Web App, both deployed green) instead of the
+  absent corp-a1 App Service. Cloud-engineer change to the data source + `TARGET_BASE_URL` + the deploy step.
+- C: Add a flag (e.g. `enable_corp_a1_workload`) that gates the corp-a1 App-Service data source + REST-API
+  deploy + k6 off, so the red-team + cost-pattern layers still ship without a live HTTP target. Loses the
+  load-generation demo but unblocks everything else.
+
+### OQ-029: Synthetic public-network storage accounts + decoy Key Vault collide with the corp-MG Deny-Public-Endpoints - Waiver or make private?
+
+- **Raised:** 2026-07-10 (synthetic first-apply pre-clearance, architect)
+- **Section:** 13 (Synthetic Workload) / 2 (policy)
+- **Blocking:** Yes - `StorageDenyPaasPublicIP` (Deny, enforced at the corp MG) denies the three public
+  synthetic storage accounts; the Key Vault member likely denies the decoy KV.
+- **Priority:** High
+
+**Question:**
+The synthetic RGs land in the LZ sub under the `corp` MG, inheriting the same `Deny-Public-Endpoints`
+initiative that blocked the spoke flow-log SAs (OQ-024). `synthetic` sets `public_network_access_enabled =
+true` on `online_p1_synthetic`, `red_team_decoy`, `cost_pattern_hot`, and `corp_a1_synthetic` (needed for the
+App-Service SAS fetch, the SWA-Function queue write, the MI blob read over its outbound IP, and the Container
+Apps file-share mount), and on the decoy Key Vault (RBAC mode, `default_action = Allow`). The OQ-024 Waivers
+are RG-scoped to `rg-<spoke>-network-*` and do NOT cover the `rg-synthetic-*` RGs.
+
+**Options being considered:**
+- A (recommended): RG-scoped `azurerm_resource_group_policy_exemption` Waivers on each synthetic RG that holds
+  a public SA (and `rg-synthetic-red-team-*` for the KV member, if verification confirms it is Deny), scoped
+  to only the offending initiative member - the ADR-028 / OQ-024 pattern, IaC-managed in the synthetic root
+  (devsecops lane). Narrowest blast radius, keeps SQL/other members enforced.
+- B: Disable public network access on the synthetic SAs + decoy KV. Rejected as a default - breaks the
+  App-Service SAS deploy, the SWA-Function queue write, the storage-anomaly MI read path, the Container Apps
+  file-share mount, and the whole point of the "public decoy" red-team resources.
+- C: Downgrade the corp-assignment Storage/KeyVault member effect to Audit. Rejected - weakens governance for
+  the entire corp archetype to admit POC resources.
+
 ### OQ-028: Migrate the deprecated KeyVaults + Arm Defender plans off the plan-enablement API (or keep until Microsoft enforces retirement)?
 
 - **Raised:** 2026-07-10 (platform/security run-2 deprecation audit, architect)
