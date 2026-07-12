@@ -31,6 +31,170 @@
 
 <!-- Newest at the top. -->
 
+### OQ-040: GitHub plan reality for the banking DevSecOps wave - CodeQL, secret scanning, and the production apply gate on a private Team-plan org (GHE named in requirements)
+
+- **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B8)
+- **Section:** Banking wave B8 (DevSecOps additions) / carries OQ-015 history
+- **Blocking:** Blocks wave B8 only
+- **Priority:** Medium
+
+**Question:**
+The banking requirements name GitHub Enterprise, CodeQL, Dependabot, secret scanning, and production
+approvals. The org (`Globaris-Inc`) runs a Team plan on a PRIVATE repo. Dependabot is free everywhere. But:
+(a) CodeQL and secret scanning on private repos need the paid code-scanning products - since Microsoft
+unbundled GitHub Advanced Security (2025), Code Security and Secret Protection are purchasable standalone on
+Team plans without GHE (pricing/availability for this org UNVERIFIED - verify at github.com billing before
+B8); (b) OQ-015 is still open on the apply-run approval gate (environment required-reviewer PUTs returned
+422 billing even on the Team plan; branch protection on main was the accepted interim). What is the B8
+target state?
+
+**Options being considered:**
+- A: Buy the standalone GHAS products (Code Security + Secret Protection) on the Team plan, keep the repo
+  private, and retry the environment required-reviewer wiring (it may work once billing entitlement is
+  verified active - the OQ-015 422 looked like entitlement lag). Closest to the requirements at lowest cost.
+- B: Flip the repo public: CodeQL, secret scanning, and environment protection rules are all free on public
+  repos. Revisits the user's 2026-07-04 keep-private direction; the repo already had its secret sweep +
+  history rewrite.
+- C: Documented deviation: Dependabot + the free typed confirm=apply guard only; record CodeQL/secret
+  scanning/GHE as production design targets. Weakest posture but zero cost.
+- GHE itself: recommend recording as production-design-only in all options; no POC capability above requires
+  it.
+
+### OQ-039: Budget ceiling for the expanded estate + the Service Bus private-endpoint tier decision
+
+- **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039)
+- **Section:** Banking waves B0-B10 / FinOps
+- **Blocking:** Yes - blocks wave B0 sizing and the B3 Service Bus tier
+- **Priority:** High
+
+**Question:**
+The prior estate ran ~$3.6-4.8k/mo (COST.md, firewalls 55-65%). The net-new banking platforms add roughly
+$0.9-1.4k/mo at POC scale - or $1.6-2.1k/mo if Service Bus Premium is chosen, because private endpoints on
+Service Bus require the Premium tier ONLY (verified 2026-07-12; ~$680/mo per messaging unit approximate).
+Estate total lands ~$4.5-6.2k/mo. Two decisions: (1) what monthly ceiling do we run to, and for how long a
+window before the next teardown? (2) Service Bus at POC: Premium (compliant with Deny-Public-Network as-is),
+Standard behind an RG-scoped policy-exemption waiver unit (ADR-028/LESSON 35 pattern, documented deviation),
+or gated off entirely (default-false flag, design-only)?
+
+**Options being considered:**
+- A: Ceiling ~$5k/mo, Service Bus Standard + exemption (recommended default), fixed POC window then teardown.
+- B: Ceiling ~$6.5k/mo, Service Bus Premium for a fully policy-clean posture.
+- C: Trim wave 0 (subset redeploy per OQ-034) to buy headroom for the net-new platforms within ~$4.5k/mo.
+
+### OQ-038: AI platform POC scope - which of Foundry / Document Intelligence / AI Search actually deploys
+
+- **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B6)
+- **Section:** Banking wave B6 (AI platform)
+- **Blocking:** Blocks wave B6 only
+- **Priority:** Medium
+
+**Question:**
+The requirements name virtual banking assistant, document intelligence, predictive analytics, and AI search.
+The 2026-correct anchor is a Microsoft Foundry resource (renamed Azure AI Foundry; Microsoft.CognitiveServices
+namespace) via avm-res-cognitiveservices-account 0.11.1, plus AI Search (avm-res-search-searchservice 0.3.0)
+and a Document Intelligence account. All PE-only. Token/usage costs are small but the Search service is a
+fixed ~$75/mo (Basic, UNVERIFIED exact) and each service adds PEs and build surface. What deploys at POC?
+
+**Options being considered:**
+- A: Foundry resource + one small chat-model deployment only; Search + Document Intelligence design-only.
+  Cheapest credible "AI platform exists" slice.
+- B: Foundry + AI Search (enables a real RAG assistant demo); Document Intelligence design-only. Recommended
+  default - RAG is the portfolio-relevant pattern.
+- C: All three at POC. Fullest story, most surface.
+
+### OQ-037: Enterprise data platform anchor - Databricks + ADLS (+ optional Fabric) vs the Synapse named in the requirements
+
+- **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B5)
+- **Section:** Banking wave B5 (data platform)
+- **Blocking:** Yes - blocks wave B5
+- **Priority:** High
+
+**Question:**
+The requirements doc names Azure Synapse AND Azure Databricks. The LESSON 40-41 lifecycle audit (2026-07-12)
+found: Synapse is supported with no announced EOL, but Microsoft's strategic net-new analytics platform is
+Microsoft Fabric, official Synapse-to-Fabric migration tooling is shipping, targeted Synapse deprecations
+have already landed (Data Explorer retired 2025-10, Synapse Link for Cosmos closed to new projects), and the
+CAF cloud-scale-analytics Synapse guidance was deprecated for April 2026 deletion. Anchoring net-new 2026
+work on Synapse is exactly the stale-service class this project got burned by. What anchors the data
+platform?
+
+**Options being considered:**
+- A: Databricks (VNet-injected, avm-res-databricks-workspace 0.5.0) + ADLS Gen2 now; add a pausable Fabric
+  F2 capacity (~$263/mo pay-go, native azurerm_fabric_capacity) for the BI/regulatory-reporting face.
+  Recommended default; near-zero idle cost, current-generation, satisfies the requirements' intent.
+- B: Databricks + ADLS only; Fabric design-only. Cheapest.
+- C: Deploy Synapse as literally written (avm-res-synapse-workspace 0.1.0 exists) - NOT recommended; would
+  need the lifecycle risk recorded as user-accepted in an ADR.
+
+### OQ-036: AKS topology and module choice for the Kubernetes platform
+
+- **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B2)
+- **Section:** Banking wave B2 (Kubernetes platform)
+- **Blocking:** Blocks wave B2 only
+- **Priority:** Medium
+
+**Question:**
+Kubernetes platform posture is fixed (private cluster, Azure CNI Overlay, Entra + Azure RBAC, workload
+identity, userDefinedRouting via the hub firewall, ACR Premium with PE). Open: (1) module -
+avm-res-containerservice-managedcluster 0.6.7 (current, composition-friendly; recommended default) vs
+avm-ptn-aks-production 0.5.0 (older, opinionated pattern); (2) POC node shape - 2 or 3 nodes, which v5
+family/size, Free vs Standard control-plane tier; (3) single cluster in bank-app-p1 only at POC (recommended;
+the centralus DR cluster is design-only per the POC-vs-design split)?
+
+**Options being considered:**
+- A: Resource module, 2x small v5 nodes, Free tier, single region - recommended POC default.
+- B: Resource module, 3 nodes across AZs, Standard tier - closer to design posture, ~$75/mo more + node cost.
+- C: Pattern module (avm-ptn-aks-production) - less composition control in the spoke root.
+
+### OQ-035: Subscription and MG placement for the banking spokes - existing landingzones sub (offer-cap history) vs a new subscription
+
+- **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B1)
+- **Section:** Banking wave B1 (network foundation)
+- **Blocking:** Yes - blocks wave B1 (and everything after it)
+- **Priority:** High
+
+**Question:**
+Default design places `bank-app-p1` and `bank-data-p1` under the Corp MG in the existing `landingzones`
+subscription (eastus2). But that sub has a documented offer-cap history: Azure SQL ProvisioningDisabled in
+eastus2 (ADR-031) and App Service dedicated compute quota 0 (ADR-032). AKS node pools and Databricks
+clusters consume Microsoft.Compute vCPU quota - a different quota family from the Microsoft.Web cap that
+bit App Service - but the same offer may carry low or zero Compute caps. VERIFICATION ITEM (owned by the B1
+pre-clearance, do not skip): in the candidate sub/region check Total Regional vCPUs, the target VM family
+quota (v5 general purpose), and any per-service provisioning restrictions (AKS, Databricks, Cognitive
+Services, Search) BEFORE committing placement. Where do the banking spokes land?
+
+**Options being considered:**
+- A: Existing landingzones sub, pending the quota verification passing - zero new plumbing (recommended if
+  quota checks out).
+- B: One new banking subscription under Corp MG - clean quota slate and cleaner cost separation; needs sub
+  creation, MG association, RBAC for the CI SP, budget wiring.
+- C: Two new subs (app + data) - most enterprise-faithful, most plumbing; overkill at POC.
+
+### OQ-034: Wave B0 redeploy - timing and scope (full estate vs banking-needed subset)
+
+- **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B0)
+- **Section:** Banking wave B0 (redeploy)
+- **Blocking:** Yes - blocks the whole banking build
+- **Priority:** High
+
+**Question:**
+The estate was torn down clean 2026-07-11 (state backend + OIDC kept). The banking build needs the platform
+back. When do we redeploy, and how much? Full estate = the proven one-run path (~$3.6-4.8k/mo resumes) and
+every banking dependency present. A subset (e.g. defer corp-a1/corp-a2 spokes, keep the online-p1 App
+Gateway off until needed) trims cost but deviates from the proven deploy path and the DR story. Known
+redeploy caveats regardless of scope (from the teardown session entry): state-SA firewall window handling,
+`recover_soft_deleted_key_vaults` for the security KV (within its 90-day soft-delete window), Microsoft.AAD
+RP re-registration timing for Entra DS, and a pre-clearance REFRESH for every root (policy/lifecycle may
+have drifted since 2026-07-11; LESSON 41 re-audit applies if redeploy slips 2+ weeks past this design).
+
+**Options being considered:**
+- A: Full-estate redeploy, soon, exactly as torn down - proven path, full dependency set (recommended
+  default).
+- B: Platform-only first (management-groups, connectivity, management, identity, security), spokes deferred
+  to their banking waves - saves the 3 POC spokes' cost; corp-a2 DR story goes dormant.
+- C: Delay redeploy until OQ-035/036/037 are resolved so wave B1 can follow immediately and the paid window
+  is shortest.
+
 ### OQ-033: Scope for the future Day-2 Operations and Monitoring capability (the repositioned Section 13) - platform-anchored, DINE-propagated, AMBA-based
 
 - **Raised:** 2026-07-10 (Section 13 reposition, architect - see ADR-036)

@@ -37,6 +37,67 @@
 
 <!-- Newest at the top. -->
 
+### ADR-039: Adopt the Enterprise Azure Banking Platform as the next build on the existing landing zone; defer the AWS-Architecture rebuild; POC-scale deploys with production design targets documented; reuse the platform estate, do not rebuild it
+
+- **Date:** 2026-07-12
+- **Section:** Banking platform initiative (seeds PROMPT-BANKING.md; founding design in
+  `docs/banking-platform-design.md`)
+- **Status:** Accepted.
+- **Decision makers:** user (direction), claude (architect, framing + recording)
+
+**Context:**
+The 13-section CAF ALZ POC is complete, QA-stamped, and was torn down clean on 2026-07-11 (state backend +
+OIDC kept; redeploy is one deploy.yml run). The planned next step was rebuilding the same landing zone on AWS
+(seeded by `docs/aws-architecture-draft.md`, OQ-A1..A8). On 2026-07-12 the user brought an actual workload
+requirement instead: an Enterprise Azure Banking Platform (4-page business requirements doc; retail /
+commercial / digital banking, analytics, AI, regulatory compliance) whose 11 scope areas overlap heavily with
+what this repo already delivers. The gap analysis (`docs/banking-platform-design.md` section 1) classifies 2
+areas DONE (ALZ, hub-spoke networking), 6 PARTIAL (identity, enterprise security, shared platform services,
+monitoring, DR, DevSecOps), and 3 NET-NEW (Kubernetes platform, enterprise data platform, AI platform). The
+requirements also carry two headline NFRs - 99.99%+ availability and a 100,000 TPM design target - that a
+POC-budget estate cannot and should not deploy at face value.
+
+**Decision:**
+Four linked commitments:
+1. **AWS-Architecture is DEFERRED**, not cancelled. The draft blueprint and OQ-A1..A8 stay on file; no AWS
+   work proceeds until the user re-opens it.
+2. **The banking platform is adopted as the next build, layered on the existing Azure landing zone estate.**
+   The build plan is the 11-wave plan (B0-B10) in `docs/banking-platform-design.md` section 4, wave 0 being
+   the redeploy of the existing estate.
+3. **Reuse, not rebuild, on the platform side.** Existing roots (management-groups, connectivity, identity,
+   management, security, spokes, CI/CD) are extended where the gap analysis names a delta; they are not
+   redesigned. The Monitoring Platform requirement is satisfied by finally BUILDING the ADR-037
+   Accepted-not-built O&M Phase-1 slice, not by a new design.
+4. **POC-scale-vs-design-target split** (extends the ADR-022 designed-now/built-later precedent to NFRs):
+   99.99% availability and 100k TPM are recorded as production DESIGN targets with the scale-out design
+   documented per platform (APIM Premium multi-region, AKS Standard multi-cluster, Service Bus Premium
+   geo-DR, zone redundancy); the POC deploys the correct private-networking shape at small SKUs and states
+   explicitly where the POC posture cannot meet the target.
+
+**Alternatives considered:**
+- Proceed with the AWS rebuild as planned - rejected for now: a concrete workload requirement on the
+  already-proven Azure estate delivers more portfolio and learning value than a parallel platform rebuild,
+  and the AWS seed doc loses nothing by waiting.
+- Greenfield a separate banking repo/estate - rejected: duplicates a QA-stamped landing zone, discards the
+  proven CI/CD + policy engine, and contradicts the requirements doc itself (its platform scope IS this
+  estate).
+- Deploy the NFRs at face value (multi-region Premium tiers everywhere) - rejected: order-of-magnitude cost
+  increase (~$2.8k/mo APIM Premium alone) for a POC; the designed-now/built-later split keeps the story
+  honest and affordable.
+
+**Consequences:**
+- Positive: the estate gets a real workload narrative (banking) on top of the platform story; the three
+  genuinely new platform types (AKS, data, AI) close the biggest portfolio gaps; ADR-037's O&M design finally
+  gets built; all standing gates and the section-per-session model carry over unchanged.
+- Negative / trade-offs: the base estate must be redeployed (cost resumes at ~$3.6-4.8k/mo) plus a net-new
+  envelope of roughly $0.9-2.1k/mo at POC scale; AWS breadth is postponed; two NET-NEW areas carry 2026
+  lifecycle risk that the design manages explicitly (Synapse-vs-Fabric anchor OQ-037; Microsoft Foundry
+  naming).
+- Follow-ups required: resolve OQ-034 through OQ-040 (redeploy scope, spoke placement + quota verification,
+  AKS topology, data anchor, AI scope, budget ceiling, GitHub plan reality); author PROMPT-BANKING.md from
+  the wave plan once the OQs land; refresh every root's pre-clearance at wave B0; re-run the LESSON 40-41
+  lifecycle audit for any wave whose first apply lands more than 2 weeks after this design.
+
 ### ADR-038: Consume Azure Verified Modules directly in the composition roots; do not build a bespoke local-module abstraction layer (remove the unused Section-1 scaffold dirs)
 
 - **Date:** 2026-07-11
