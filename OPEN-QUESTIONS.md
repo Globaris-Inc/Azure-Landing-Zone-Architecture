@@ -60,6 +60,13 @@ target state?
 - GHE itself: recommend recording as production-design-only in all options; no POC capability above requires
   it.
 
+**RESOLVED 2026-07-12 (user, OQ walk):** User confirmed GHAS is ALREADY LICENSED on the org - no purchase
+needed. Wave B8 therefore: enable Code Security (CodeQL) + Secret Protection on the private repo under the
+existing entitlement, and RETRY the OQ-015 environment required-reviewer wiring (the 422 was an entitlement
+question; GHAS presence suggests billing is live - one API call to confirm). GitHub Enterprise itself is
+recorded as production-design-only. Verify at B8 pre-clearance that the entitlement covers this repo
+(org-level GHAS seat/product assignment), then wire repo settings via gh api.
+
 ### OQ-039: Budget ceiling for the expanded estate + the Service Bus private-endpoint tier decision
 
 - **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039)
@@ -81,6 +88,16 @@ or gated off entirely (default-false flag, design-only)?
 - B: Ceiling ~$6.5k/mo, Service Bus Premium for a fully policy-clean posture.
 - C: Trim wave 0 (subset redeploy per OQ-034) to buy headroom for the net-new platforms within ~$4.5k/mo.
 
+**RESOLVED 2026-07-12 (user, OQ walk):** Option A - ~$5k/mo ceiling (alerts at the standard 50/75/90/100
+thresholds when budgets are re-wired at B0), Service Bus STANDARD behind an RG-scoped policy-exemption
+Waiver for the public-endpoint deny member (ADR-028/LESSON 35 pattern, documented deviation; Premium PE
+posture recorded as the production design target). Full-scope B0 redeploy fits inside the ceiling; the
+delayed-start choice in OQ-034 keeps the paid window short.
+
+**Clarified same day (user):** the banking estate is BUILD-VERIFY-DESTROY, not a running environment -
+built out wave by wave, QA-confirmed, then torn down (the ALZ POC arc). The ceiling is a guard rail for
+the build window only; actual spend is the prorated window, not a monthly run rate.
+
 ### OQ-038: AI platform POC scope - which of Foundry / Document Intelligence / AI Search actually deploys
 
 - **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B6)
@@ -101,6 +118,9 @@ fixed ~$75/mo (Basic, UNVERIFIED exact) and each service adds PEs and build surf
 - B: Foundry + AI Search (enables a real RAG assistant demo); Document Intelligence design-only. Recommended
   default - RAG is the portfolio-relevant pattern.
 - C: All three at POC. Fullest story, most surface.
+
+**RESOLVED 2026-07-12 (user, OQ walk):** Option B - Foundry resource + one small chat-model deployment +
+AI Search, enabling the private RAG virtual-assistant demo. Document Intelligence stays design-only.
 
 ### OQ-037: Enterprise data platform anchor - Databricks + ADLS (+ optional Fabric) vs the Synapse named in the requirements
 
@@ -126,6 +146,11 @@ platform?
 - C: Deploy Synapse as literally written (avm-res-synapse-workspace 0.1.0 exists) - NOT recommended; would
   need the lifecycle risk recorded as user-accepted in an ADR.
 
+**RESOLVED 2026-07-12 (user, OQ walk):** Option A - Databricks (VNet-injected) + ADLS Gen2 now, plus a
+pausable Fabric F2 capacity for the BI/regulatory-reporting face. The requirements' Synapse naming is
+recorded as satisfied-by-successor (Fabric is Microsoft's strategic direction; LESSON 40-41 audit in the
+design doc) - no Synapse workspace deploys.
+
 ### OQ-036: AKS topology and module choice for the Kubernetes platform
 
 - **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B2)
@@ -145,6 +170,11 @@ the centralus DR cluster is design-only per the POC-vs-design split)?
 - A: Resource module, 2x small v5 nodes, Free tier, single region - recommended POC default.
 - B: Resource module, 3 nodes across AZs, Standard tier - closer to design posture, ~$75/mo more + node cost.
 - C: Pattern module (avm-ptn-aks-production) - less composition control in the spoke root.
+
+**RESOLVED 2026-07-12 (user, OQ walk):** Option B - avm-res-containerservice-managedcluster (resource
+module), 3 nodes spread across availability zones, Standard control-plane tier (SLA-backed). A deliberate
+step toward the 99.99% design posture at ~$75/mo tier cost + the third node. Single region at POC; the
+centralus DR cluster stays design-only per the POC-vs-design split.
 
 ### OQ-035: Subscription and MG placement for the banking spokes - existing landingzones sub (offer-cap history) vs a new subscription
 
@@ -170,6 +200,12 @@ Services, Search) BEFORE committing placement. Where do the banking spokes land?
   creation, MG association, RBAC for the CI SP, budget wiring.
 - C: Two new subs (app + data) - most enterprise-faithful, most plumbing; overkill at POC.
 
+**RESOLVED 2026-07-12 (user, OQ walk):** Option A - banking spokes land in the existing `landingzones`
+subscription under the Corp MG, CONDITIONAL on the mandatory B1 pre-clearance quota verification (Total
+Regional vCPUs, v5 family quota, per-service provisioning restrictions for AKS/Databricks/Cognitive
+Services/Search in eastus2). Fallback if quota fails: Option B (one new banking sub). The quota check is a
+hard gate, not a formality - this sub's offer already zeroed Microsoft.Web and SQL (ADR-031/032).
+
 ### OQ-034: Wave B0 redeploy - timing and scope (full estate vs banking-needed subset)
 
 - **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B0)
@@ -194,6 +230,16 @@ have drifted since 2026-07-11; LESSON 41 re-audit applies if redeploy slips 2+ w
   to their banking waves - saves the 3 POC spokes' cost; corp-a2 DR story goes dormant.
 - C: Delay redeploy until OQ-035/036/037 are resolved so wave B1 can follow immediately and the paid window
   is shortest.
+
+**RESOLVED 2026-07-12 (user, OQ walk):** Option C - redeploy waits for OQ-035/036/037 (all resolved the
+same session), then B0 fires immediately before wave B1 so the paid window is shortest. Scope: FULL estate
+(the proven one-run path) - confirmed affordable under the OQ-039 ~$5k/mo ceiling. B0 still requires the
+pre-clearance REFRESH (state-SA firewall window, recover_soft_deleted_key_vaults for the security KV,
+Microsoft.AAD RP re-registration timing; LESSON 41 re-audit if the start slips 2+ weeks past 2026-07-12).
+
+**Clarified same day (user):** whole-estate lifecycle is BUILD-VERIFY-DESTROY - once all waves are built
+and QA-confirmed, the estate is torn down (wave B10 ends in teardown, as the ALZ POC did). Nothing is
+designed to persist; teardown.yml must stay current with every new banking root as waves add them.
 
 ### OQ-033: Scope for the future Day-2 Operations and Monitoring capability (the repositioned Section 13) - platform-anchored, DINE-propagated, AMBA-based
 
