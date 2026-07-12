@@ -1,6 +1,6 @@
-# Purpose: corp-a1 landing zone — private spoke VNet (eastus2), App Service + Azure SQL
+# Purpose: corp-a1 landing zone - private spoke VNet (eastus2), App Service + Azure SQL
 #          with Private Endpoint, peered to the primary hub.
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-07-10
 #
 # Architecture:
@@ -31,13 +31,13 @@ locals {
   )
 
   # Subnet prefixes computed from spoke_address_space (default 10.10.0.0/16).
-  snet_integration = cidrsubnet(var.spoke_address_space, 10, 0) # /26 — App Service VNet integration (needs /26+ for scale)
-  snet_data        = cidrsubnet(var.spoke_address_space, 8, 1)  # /24 — data tier (reserved)
-  snet_pe          = cidrsubnet(var.spoke_address_space, 8, 2)  # /24 — private endpoints
+  snet_integration = cidrsubnet(var.spoke_address_space, 10, 0) # /26 - App Service VNet integration (needs /26+ for scale)
+  snet_data        = cidrsubnet(var.spoke_address_space, 8, 1)  # /24 - data tier (reserved)
+  snet_pe          = cidrsubnet(var.spoke_address_space, 8, 2)  # /24 - private endpoints
 }
 
 # ---------------------------------------------------------------------------
-# Resource Groups (4 per spoke — network, shared, workload, monitoring)
+# Resource Groups (4 per spoke - network, shared, workload, monitoring)
 # ---------------------------------------------------------------------------
 
 resource "azurerm_resource_group" "network" {
@@ -65,7 +65,7 @@ resource "azurerm_resource_group" "monitoring" {
 }
 
 # ---------------------------------------------------------------------------
-# Network Security Group — deny Internet inbound; applied to data + PE subnets
+# Network Security Group - deny Internet inbound; applied to data + PE subnets
 # ---------------------------------------------------------------------------
 
 resource "azurerm_network_security_group" "spoke" {
@@ -90,7 +90,7 @@ resource "azurerm_network_security_group" "spoke" {
 }
 
 # ---------------------------------------------------------------------------
-# Route Table — default route forces all spoke traffic through Azure Firewall
+# Route Table - default route forces all spoke traffic through Azure Firewall
 # ---------------------------------------------------------------------------
 
 resource "azurerm_route_table" "spoke" {
@@ -185,7 +185,7 @@ module "spoke_vnet" {
 }
 
 # ---------------------------------------------------------------------------
-# VNet Peering — spoke ↔ primary hub (bidirectional, cross-subscription)
+# VNet Peering - spoke ↔ primary hub (bidirectional, cross-subscription)
 # ---------------------------------------------------------------------------
 
 # Spoke → Hub (in Landing Zones subscription, default provider)
@@ -266,7 +266,7 @@ module "app_service" {
   parent_id                = azurerm_resource_group.workload.id
   service_plan_resource_id = module.app_service_plan[0].resource_id
 
-  # VNet integration — routes outbound App Service traffic through the spoke VNet.
+  # VNet integration - routes outbound App Service traffic through the spoke VNet.
   virtual_network_subnet_id = module.spoke_vnet.subnets["integration"].resource_id
 
   https_only = true
@@ -335,14 +335,14 @@ resource "azurerm_mssql_server" "this" {
   version             = "12.0"
   minimum_tls_version = "1.2"
 
-  # Entra-only authentication — no SQL local admin login.
+  # Entra-only authentication - no SQL local admin login.
   azuread_administrator {
     login_username              = var.sql_aad_admin_login
     object_id                   = var.sql_aad_admin_object_id
     azuread_authentication_only = true
   }
 
-  # Public access disabled — SQL is reachable only via the Private Endpoint.
+  # Public access disabled - SQL is reachable only via the Private Endpoint.
   # DEVIATION: GitHub Actions runner must be in-VNet or connected via VPN Gateway
   # to apply SQL-related resources. See bootstrap/README.md for self-hosted runner
   # options if the default GitHub-hosted runner cannot reach the PE.
@@ -375,7 +375,7 @@ resource "azurerm_mssql_database" "app" {
 #
 # The DNS zone group registers the PE NIC IP into the centralised
 # privatelink.database.windows.net zone (Connectivity subscription, Section 4).
-# azurerm has no standalone azurerm_private_dns_zone_group resource — the zone
+# azurerm has no standalone azurerm_private_dns_zone_group resource - the zone
 # group is a nested block on the private endpoint. The zone is looked up via
 # data.azurerm_private_dns_zone.sql (see dns_links.tf).
 # ---------------------------------------------------------------------------

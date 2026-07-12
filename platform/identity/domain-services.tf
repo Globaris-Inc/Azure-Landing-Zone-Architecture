@@ -1,7 +1,7 @@
-# Purpose: Identity subscription domain services — native Microsoft Entra Domain
+# Purpose: Identity subscription domain services - native Microsoft Entra Domain
 #          Services + a Recovery Services Vault for future DC/management VMs.
-#          (Section 8 — G1 / Gap-Closure Wave 3 / ADR-010)
-# Section: 8 — Standard Platform Components (Identity subscription)
+#          (Section 8 - G1 / Gap-Closure Wave 3 / ADR-010)
+# Section: 8 - Standard Platform Components (Identity subscription)
 # Last updated: 2026-07-08
 #
 # DEVIATION: there is NO AVM module for Entra Domain Services (the registry returns
@@ -9,7 +9,7 @@
 # azurerm_active_directory_domain_service resource. It is current (not deprecated)
 # in the pinned provider azurerm ~> 4.71.
 #
-# MANUAL OPERATOR PREREQUISITE (NOT automatable — see README.md): before apply an
+# MANUAL OPERATOR PREREQUISITE (NOT automatable - see README.md): before apply an
 # operator must create the "Domain Controller Services" enterprise application /
 # service principal and an "AAD DC Administrators" group in the tenant. Terraform
 # cannot create the Entra DS publisher SP.
@@ -22,13 +22,13 @@
 #   - domain_name, sku, location, name, resource_group_name : required (string)
 #   - sku = "Standard" : valid (single replica set, lowest cost ~$110/mo)
 #   - initial_replica_set { subnet_id } : list block (min 1, max 1); subnet_id REQUIRED
-#   - filtered_sync_enabled : top-level OPTIONAL bool (NOT a block — the plan's
+#   - filtered_sync_enabled : top-level OPTIONAL bool (NOT a block - the plan's
 #     "filtered_sync" shorthand maps to this attribute name)
 #   - notifications { notify_dc_admins, notify_global_admins, additional_recipients }
 #     : optional list block (max 1)
 #   - security { ntlm_v1_enabled, tls_v1_enabled, sync_ntlm_passwords, ... }
 #     : optional list block (max 1)
-#   - secure_ldap : optional list block (left unset — disabled; would require a PFX cert)
+#   - secure_ldap : optional list block (left unset - disabled; would require a PFX cert)
 # ---------------------------------------------------------------------------
 
 # Microsoft.AAD RP registration - identity subscription. Verified NotRegistered live
@@ -156,7 +156,7 @@ resource "azurerm_active_directory_domain_service" "this" {
 }
 
 # ---------------------------------------------------------------------------
-# Recovery Services Vault — identity subscription
+# Recovery Services Vault - identity subscription
 # Module: Azure/avm-res-recoveryservices-vault/azurerm v1.1.3
 # Same module + pin as G4/corp-a1 (avoid version skew). For future DC/management
 # VM backups. Gated on identity_mode != "none" (exists for both entra-ds and ad-ds).

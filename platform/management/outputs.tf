@@ -1,5 +1,5 @@
 # Purpose: Outputs for the Management platform root module.
-# Section: 7 — FinOps: Tagging & Budgets
+# Section: 7 - FinOps: Tagging & Budgets
 # Last updated: 2026-07-08
 
 output "resource_group_name" {
@@ -58,7 +58,7 @@ output "carbon_optimization_workbook_id" {
 }
 
 # ---------------------------------------------------------------------------
-# Section 8 — Management sub monitoring outputs
+# Section 8 - Management sub monitoring outputs
 # ---------------------------------------------------------------------------
 
 output "platform_management_rg_name" {

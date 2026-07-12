@@ -1,10 +1,10 @@
-# Purpose: Outputs from the bootstrap layer — paste these into envs/poc.backend.hcl
+# Purpose: Outputs from the bootstrap layer - paste these into envs/poc.backend.hcl
 #          and the GitHub repository variables after running terraform apply.
-# Section: 10a — Pipeline & Tooling (bootstrap subset)
+# Section: 10a - Pipeline & Tooling (bootstrap subset)
 # Last updated: 2026-05-05
 
 # ---------------------------------------------------------------------------
-# State backend — paste into envs/poc.backend.hcl
+# State backend - paste into envs/poc.backend.hcl
 # ---------------------------------------------------------------------------
 
 output "resource_group_name" {
@@ -33,7 +33,7 @@ output "key_vault_id" {
 }
 
 # ---------------------------------------------------------------------------
-# OIDC / GitHub Actions — set these as GitHub repository variables (not secrets)
+# OIDC / GitHub Actions - set these as GitHub repository variables (not secrets)
 # ---------------------------------------------------------------------------
 
 output "oidc_client_id" {

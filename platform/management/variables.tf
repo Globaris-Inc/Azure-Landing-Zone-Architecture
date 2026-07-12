@@ -1,5 +1,5 @@
 # Purpose: Input variables for the Management platform root module.
-# Section: 7 — FinOps: Tagging & Budgets (initial); extended in Section 8.
+# Section: 7 - FinOps: Tagging & Budgets (initial); extended in Section 8.
 # Last updated: 2026-07-07
 
 variable "tenant_id" {
@@ -55,7 +55,7 @@ variable "terraform_sp_object_id" {
 }
 
 # ---------------------------------------------------------------------------
-# FinOps — Budgets
+# FinOps - Budgets
 # ---------------------------------------------------------------------------
 
 variable "budget_amount_per_subscription" {
@@ -93,11 +93,11 @@ variable "export_end_date" {
 }
 
 # ---------------------------------------------------------------------------
-# Section 8 — Management Platform Monitoring
+# Section 8 - Management Platform Monitoring
 # ---------------------------------------------------------------------------
 
 variable "platform_law_retention_days" {
-  description = "Log Analytics workspace data retention period in days (30–730). Section 8 baseline is 90."
+  description = "Log Analytics workspace data retention period in days (30-730). Section 8 baseline is 90."
   type        = number
   default     = 90
 }

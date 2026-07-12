@@ -1,6 +1,6 @@
-# Purpose: Connectivity platform root module — dual-hub hub-and-spoke VNets with
+# Purpose: Connectivity platform root module - dual-hub hub-and-spoke VNets with
 #          Azure Firewall Premium (IDPS), VPN Gateway, and DNS Private Resolver.
-# Section: 8 — Standard Platform Components
+# Section: 8 - Standard Platform Components
 # Last updated: 2026-07-06 (delegate dns-resolver-outbound subnet to Microsoft.Network/dnsResolvers - fixes ARM 400 SubnetMissingRequiredDelegation on apply)
 #
 # Apply order: Independent of platform/management; run before platform/security
@@ -57,18 +57,18 @@ resource "azurerm_resource_group" "connectivity_secondary" {
 }
 
 # ---------------------------------------------------------------------------
-# Hub-and-spoke VNets — primary (eastus2) + secondary (centralus) DR hub
+# Hub-and-spoke VNets - primary (eastus2) + secondary (centralus) DR hub
 # ---------------------------------------------------------------------------
 #
 # Module: Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet v0.17.1
 # Confirmed on registry.terraform.io 2026-05-12.
 #
 # Primary hub:   Firewall Premium + VPN GW (VpnGw1AZ) + DNS Private Resolver
-# Secondary hub: Firewall Premium only — VPN GW and DNS Resolver on primary only
+# Secondary hub: Firewall Premium only - VPN GW and DNS Resolver on primary only
 #                to reduce idle POC cost (~$1.40/hr for VpnGw1AZ).
 #
 # DEVIATION: Azure Firewall Premium TLS inspection requires a Key Vault certificate
-# (Key Vault is created in Section 8 Batch 3 — platform/security). The firewall policy
+# (Key Vault is created in Section 8 Batch 3 - platform/security). The firewall policy
 # is deployed at Premium SKU with IDPS in Alert mode. Wire tls_certificate in
 # firewall_policy once the Security KV is available.
 
@@ -136,7 +136,7 @@ module "hub_and_spoke" {
 
       firewall_policy = {
         sku = "Premium"
-        # DEVIATION: tls_certificate omitted — Key Vault created in Section 8 Batch 3.
+        # DEVIATION: tls_certificate omitted - Key Vault created in Section 8 Batch 3.
         # Add tls_certificate.key_vault_secret_id once platform/security is deployed.
         intrusion_detection = {
           mode = "Alert"

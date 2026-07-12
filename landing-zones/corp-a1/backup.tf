@@ -1,16 +1,16 @@
-# Purpose: corp-a1 landing zone — Recovery Services Vault for Azure Backup /
+# Purpose: corp-a1 landing zone - Recovery Services Vault for Azure Backup /
 #          Azure Site Recovery (parity with corp-a2; ADR-012 / gap-closure Wave 2 G4).
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-06-25
 #
 # Architecture:
 #   - Recovery Services Vault (Standard) in the corp-a1 shared RG (rg-corp-a1-shared-*).
 #   - Storage mode ZoneRedundant: corp-a1 is the in-region primary spoke, so backup
 #     data is kept zone-redundant within eastus2 (corp-a2, the DR spoke, stays
-#     GeoRedundant — do not change corp-a2). Cross-region restore is a GeoRedundant-only
+#     GeoRedundant - do not change corp-a2). Cross-region restore is a GeoRedundant-only
 #     capability and is therefore disabled here.
 #   - The vault is created bare here; backup/ASR policies and item enrolment are
-#     configured later (Section 13) once source VMs exist — mirroring corp-a2, which
+#     configured later (Section 13) once source VMs exist - mirroring corp-a2, which
 #     defines no backup policy at vault-creation time.
 
 # ---------------------------------------------------------------------------

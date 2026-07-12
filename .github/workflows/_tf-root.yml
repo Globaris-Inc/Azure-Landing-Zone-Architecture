@@ -125,9 +125,6 @@ jobs:
       TF_VAR_pim_approver_group_object_id: ${{ secrets.PIM_APPROVER_GROUP_OBJECT_ID }}
       TF_VAR_sentinel_owner_group_object_id: ${{ secrets.SENTINEL_OWNER_GROUP_OBJECT_ID }}
       TF_VAR_honeypot_user_principal_name: ${{ secrets.HONEYPOT_USER_PRINCIPAL_NAME }}
-      # ADR-029 recovery import: replica-set ID of an Entra DS managed domain that exists in
-      # Azure but not in state. Unset Secret => empty string => import {} is a no-op (greenfield).
-      TF_VAR_aadds_import_replica_set_id: ${{ secrets.AADDS_IMPORT_REPLICA_SET_ID }}
       TF_VAR_cost_pattern_budget_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
       TF_VAR_cost_guardrails_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
     steps:

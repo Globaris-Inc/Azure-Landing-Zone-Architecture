@@ -1,5 +1,5 @@
 # Purpose: Provider configuration for the corp-a2 landing zone root module (DR spoke).
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-07-10
 #
 # Apply order: After platform/connectivity (secondary hub VNet ID and firewall IP required).

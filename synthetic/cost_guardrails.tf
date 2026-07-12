@@ -1,8 +1,8 @@
-# Purpose: §13.6 cost guardrails — Automation Account + 2 runbooks +
+# Purpose: §13.6 cost guardrails - Automation Account + 2 runbooks +
 #          weekly schedule + action group + subscription budget that fires
 #          the stop-synthetic-compute runbook when the synthetic-layer
 #          spend is projected to exceed the daily-equivalent cap.
-# Section: 13.6 — Cost Guardrails
+# Section: 13.6 - Cost Guardrails
 # Last updated: 2026-06-06
 #
 # Architecture:
@@ -23,7 +23,7 @@
 # DEVIATIONS vs PROMPT.md §13.6:
 #   - Azure consumption budgets are Monthly minimum (no Daily time_grain).
 #     We approximate "$5/day" by setting the monthly cap to 30×$5 = $150 and
-#     using a Forecasted 100% threshold, which trips on day 1–2 when the
+#     using a Forecasted 100% threshold, which trips on day 1-2 when the
 #     synthetic layer is on pace to exceed the cap.
 #   - PROMPT.md asks for "ACI restartPolicy=OnFailure, 4-hour max via Logic
 #     App". §13.2/§13.3 use Container Apps Jobs instead of ACI; each CAJ
@@ -36,7 +36,7 @@
 #     only watches synthetic-layer spend.
 
 # ---------------------------------------------------------------------------
-# Locals — 13.6 sub-gate
+# Locals - 13.6 sub-gate
 # ---------------------------------------------------------------------------
 
 locals {
@@ -102,7 +102,7 @@ resource "azurerm_role_assignment" "guardrails_contributor_rt_secondary" {
 }
 
 # ---------------------------------------------------------------------------
-# Runbook content upload — blobs in the corp-a1 synthetic SA
+# Runbook content upload - blobs in the corp-a1 synthetic SA
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_container" "runbooks" {
@@ -166,7 +166,7 @@ resource "azurerm_automation_runbook" "stop_synthetic_compute" {
   log_progress            = true
   log_verbose             = true
   runbook_type            = "PowerShell72"
-  description             = "Emergency stop of synthetic compute — fired by the §13.6 budget action group webhook."
+  description             = "Emergency stop of synthetic compute - fired by the §13.6 budget action group webhook."
 
   publish_content_link {
     uri = "https://${azurerm_storage_account.corp_a1_synthetic[0].name}.blob.core.windows.net/${azurerm_storage_container.runbooks[0].name}/${azurerm_storage_blob.stop_synthetic_compute[0].name}${data.azurerm_storage_account_blob_container_sas.runbooks[0].sas}"
@@ -238,7 +238,7 @@ resource "azurerm_automation_job_schedule" "weekly_cleanup" {
 }
 
 # ---------------------------------------------------------------------------
-# Action Group — routes Forecasted-100% budget breach to the stop webhook
+# Action Group - routes Forecasted-100% budget breach to the stop webhook
 # ---------------------------------------------------------------------------
 
 resource "azurerm_monitor_action_group" "guardrails" {
@@ -270,7 +270,7 @@ resource "azurerm_monitor_action_group" "guardrails" {
 }
 
 # ---------------------------------------------------------------------------
-# Subscription budget — Layer=Synthetic tag filter, Forecasted 100% trip
+# Subscription budget - Layer=Synthetic tag filter, Forecasted 100% trip
 # ---------------------------------------------------------------------------
 
 resource "azurerm_consumption_budget_subscription" "synthetic_guardrails" {

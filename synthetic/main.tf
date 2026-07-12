@@ -1,15 +1,15 @@
-# Purpose: Synthetic workload root module — entry point.
-# Section: 13.1 (this commit) — Workload targets only.
+# Purpose: Synthetic workload root module - entry point.
+# Section: 13.1 (this commit) - Workload targets only.
 #          Future commits add 13.2 (k6 ACI), 13.3 (red-team simulator), 13.4 (cost patterns).
 # Last updated: 2026-06-02
 #
 # Resource grouping:
-#   corp_a1.tf   — REST API stub on corp-a1 App Service + supporting storage
-#   corp_a2.tf   — Cold standby reference (no resources today; ASR drill comes in 13.5)
-#   online_p1.tf — Storage Queue for the online-p1 contact form
+#   corp_a1.tf   - REST API stub on corp-a1 App Service + supporting storage
+#   corp_a2.tf   - Cold standby reference (no resources today; ASR drill comes in 13.5)
+#   online_p1.tf - Storage Queue for the online-p1 contact form
 #
 # Every resource in this layer is gated by `var.enable_synthetic_workload`.
-# When the flag is false the entire layer plans to zero — see synthetic/README.md.
+# When the flag is false the entire layer plans to zero - see synthetic/README.md.
 
 # ---------------------------------------------------------------------------
 # Locals

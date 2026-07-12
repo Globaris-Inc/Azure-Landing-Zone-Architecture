@@ -1,5 +1,5 @@
 # Purpose: Outputs for the online-p1 landing zone root module.
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-05-14
 
 output "spoke_vnet_id" {

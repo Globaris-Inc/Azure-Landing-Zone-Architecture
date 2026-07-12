@@ -1,14 +1,14 @@
-# Purpose: Red-team simulator — 5 Container Apps Jobs producing the security
+# Purpose: Red-team simulator - 5 Container Apps Jobs producing the security
 #          signals listed in PROMPT.md §13.3.
-# Section: 13.3 — Synthetic Security Signals
+# Section: 13.3 - Synthetic Security Signals
 # Last updated: 2026-06-04
 #
 # Architecture:
 #   - Primary CAE (eastus2) is reused from §13.2.
 #   - Secondary CAE in `red_team_geo_location` (default westeurope) hosts the
-#     impossible-travel west pole — distinct geo IP is the whole point.
+#     impossible-travel west pole - distinct geo IP is the whole point.
 #   - One Azure File share `red-team-scripts` on the existing corp-a1 synthetic
-#     SA. Both CAEs mount it (cross-region for westeurope — fine for ~5 KB
+#     SA. Both CAEs mount it (cross-region for westeurope - fine for ~5 KB
 #     bash files).
 #   - Decoy Storage Account (eastus2, public network, Defender for Storage on
 #     via §6) holds a small dummy blob. The `storage_anomaly` CAJ's MI has
@@ -16,7 +16,7 @@
 #     `StorageBlobLogs` rows.
 #   - Decoy Key Vault (eastus2, RBAC mode, public network). MI gets only
 #     Key Vault Reader (control plane). `az keyvault secret show` always
-#     fails 403 — that is the §6 "KV bulk secret access" signal.
+#     fails 403 - that is the §6 "KV bulk secret access" signal.
 #   - All red-team resources + jobs tagged `Purpose = "SecuritySimulation"`
 #     merged into local.common_tags so a single KQL filter cleanly separates
 #     synthetic noise from real telemetry.
@@ -25,23 +25,23 @@
 #   - PROMPT.md says "ACI" for the red-team simulator. Implementing as
 #     Container Apps Jobs for consistency with §13.2 (native cron + native LAW
 #     shipping). The geographic separation that drives impossible-travel still
-#     works — two CAEs in two regions yield two outbound IP pools.
+#     works - two CAEs in two regions yield two outbound IP pools.
 #   - PROMPT.md asks for a dedicated `synthetic-events` LAW custom table via
 #     DCE/DCR. Going with `ContainerAppConsoleLogs_CL` plus tag-based KQL
-#     filtering — same separation outcome, far less plumbing. The DCR/DCE path
+#     filtering - same separation outcome, far less plumbing. The DCR/DCE path
 #     is a §13.x refinement once we want strict schema control.
 #   - The honeypot Entra user (`svc-honeypot@<tenant>`) is **not** created by
-#     Terraform — synthetic doesn't carry the azuread provider, and the user
+#     Terraform - synthetic doesn't carry the azuread provider, and the user
 #     account is a one-off manual artifact (must be created Disabled). See
 #     synthetic/README.md for the manual step.
 
 # ---------------------------------------------------------------------------
-# Locals — 13.3 sub-gate + scenario catalogue
+# Locals - 13.3 sub-gate + scenario catalogue
 # ---------------------------------------------------------------------------
 
 locals {
   # Red-team requires the Platform LAW (Container Apps Environment needs it)
-  # — same precondition as 13.2.
+  # - same precondition as 13.2.
   red_team_enabled = local.k6_enabled
 
   # Sign-in scenarios need a honeypot UPN. Without one the failed-signin-burst
@@ -73,7 +73,7 @@ locals {
     }
     impossible_travel_west = {
       script          = "impossible_travel.sh"
-      cron            = "5 */6 * * *" # every 6h at :05 — 5 minutes after east pole
+      cron            = "5 */6 * * *" # every 6h at :05 - 5 minutes after east pole
       cae             = "secondary"
       timeout_seconds = 300
       cpu             = 0.25
@@ -135,7 +135,7 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# Subscription ref — scripts call az login --identity, then az account set
+# Subscription ref - scripts call az login --identity, then az account set
 # ---------------------------------------------------------------------------
 
 data "azurerm_client_config" "current" {}
@@ -182,7 +182,7 @@ resource "azurerm_storage_account" "red_team_decoy" {
 
   # Shared keys enabled so Terraform's azurerm_storage_blob upload works through
   # the provider's shared-key path. The MI-driven storage_anomaly script reads
-  # via Entra (Storage Blob Data Reader) — Entra is the auth path that lands
+  # via Entra (Storage Blob Data Reader) - Entra is the auth path that lands
   # in StorageBlobLogs as the §6 detection signal.
   shared_access_key_enabled = true
 
@@ -244,7 +244,7 @@ resource "azurerm_key_vault" "red_team_decoy" {
   depends_on = [time_sleep.wait_synthetic_policy_exemptions]
 }
 
-# Diagnostic settings — KV → Platform LAW so probing attempts surface in KQL.
+# Diagnostic settings - KV → Platform LAW so probing attempts surface in KQL.
 resource "azurerm_monitor_diagnostic_setting" "red_team_kv" {
   count                      = local.red_team_enabled
   name                       = "diag-rt-kv-to-platform-law"
@@ -265,7 +265,7 @@ resource "azurerm_monitor_diagnostic_setting" "red_team_kv" {
   }
 }
 
-# Diagnostic settings — Decoy SA blob plane → Platform LAW for mass-download visibility.
+# Diagnostic settings - Decoy SA blob plane → Platform LAW for mass-download visibility.
 resource "azurerm_monitor_diagnostic_setting" "red_team_decoy_blob" {
   count                      = local.red_team_enabled
   name                       = "diag-rt-decoy-blob-to-platform-law"
@@ -305,7 +305,7 @@ resource "azurerm_container_app_environment" "red_team_secondary" {
 }
 
 # ---------------------------------------------------------------------------
-# Red-team scripts share + uploads — reuses corp-a1 synthetic SA (eastus2)
+# Red-team scripts share + uploads - reuses corp-a1 synthetic SA (eastus2)
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_share" "red_team_scripts" {
@@ -343,7 +343,7 @@ resource "azurerm_container_app_environment_storage" "red_team_scripts_primary" 
   access_mode                  = "ReadOnly"
 }
 
-# CAE → share link (secondary). Cross-region access — Azure Files over HTTPS
+# CAE → share link (secondary). Cross-region access - Azure Files over HTTPS
 # handles it; the ~5 KB script latency penalty per job start is negligible.
 resource "azurerm_container_app_environment_storage" "red_team_scripts_secondary" {
   count                        = local.red_team_signin_enabled
@@ -356,7 +356,7 @@ resource "azurerm_container_app_environment_storage" "red_team_scripts_secondary
 }
 
 # ---------------------------------------------------------------------------
-# Container Apps Jobs — one per scenario
+# Container Apps Jobs - one per scenario
 # ---------------------------------------------------------------------------
 
 resource "azurerm_container_app_job" "red_team" {
@@ -467,7 +467,7 @@ resource "azurerm_container_app_job" "red_team" {
 }
 
 # ---------------------------------------------------------------------------
-# Role assignments — narrow MI privileges per scenario
+# Role assignments - narrow MI privileges per scenario
 # ---------------------------------------------------------------------------
 
 # resource_anomaly: create + delete public IPs in the red-team primary RG.
@@ -486,7 +486,7 @@ resource "azurerm_role_assignment" "rt_storage_anomaly_blob_reader" {
   principal_id         = azurerm_container_app_job.red_team["storage_anomaly"].identity[0].principal_id
 }
 
-# kv_probing: control-plane Reader only — secret GETs always fail authorization,
+# kv_probing: control-plane Reader only - secret GETs always fail authorization,
 # which is the §6 "KV bulk secret access denied" signal source.
 resource "azurerm_role_assignment" "rt_kv_probing_kv_reader" {
   count                = local.red_team_enabled

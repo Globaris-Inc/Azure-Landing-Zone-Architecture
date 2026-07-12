@@ -1,5 +1,5 @@
 # Purpose: Outputs for the identity / Zero Trust root module.
-# Section: 5 — Zero Trust + Conditional Access
+# Section: 5 - Zero Trust + Conditional Access
 # Last updated: 2026-07-10
 
 output "named_location_approved_countries_id" {

@@ -1,15 +1,15 @@
-# Purpose: online-p1 landing zone — internet-facing spoke with Application Gateway WAF_v2
+# Purpose: online-p1 landing zone - internet-facing spoke with Application Gateway WAF_v2
 #          and Azure Static Web App; peered to the primary hub.
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-05-14
 #
 # Architecture:
 #   - Spoke VNet (10.20.0.0/16) peered to primary hub VNet (eastus2)
-#   - snet-appgateway (/24) — Application Gateway WAF_v2; NO firewall UDR on this subnet
+#   - snet-appgateway (/24) - Application Gateway WAF_v2; NO firewall UDR on this subnet
 #     (App Gateway WAF_v2 is incompatible with UDRs pointing to NVAs on its own subnet)
-#   - snet-workload (/24) and snet-private-endpoints (/24) — firewall UDR applied
+#   - snet-workload (/24) and snet-private-endpoints (/24) - firewall UDR applied
 #   - Application Gateway WAF_v2 with OWASP 3.2 ruleset (Prevention mode by default)
-#   - Azure Static Web App (Standard tier) — hosted behind the App Gateway
+#   - Azure Static Web App (Standard tier) - hosted behind the App Gateway
 #
 # DEVIATIONS:
 #   - Azure/avm-res-web-staticsite/azurerm does not exist (HTTP 404 on registry 2026-05-14);
@@ -38,9 +38,9 @@ locals {
   )
 
   # Subnet prefixes computed from spoke_address_space (default 10.20.0.0/16).
-  snet_appgateway = cidrsubnet(var.spoke_address_space, 8, 0) # /24 — App Gateway (requires /24 minimum for WAF_v2)
-  snet_workload   = cidrsubnet(var.spoke_address_space, 8, 1) # /24 — workload tier
-  snet_pe         = cidrsubnet(var.spoke_address_space, 8, 2) # /24 — private endpoints
+  snet_appgateway = cidrsubnet(var.spoke_address_space, 8, 0) # /24 - App Gateway (requires /24 minimum for WAF_v2)
+  snet_workload   = cidrsubnet(var.spoke_address_space, 8, 1) # /24 - workload tier
+  snet_pe         = cidrsubnet(var.spoke_address_space, 8, 2) # /24 - private endpoints
 }
 
 # ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ resource "azurerm_resource_group" "monitoring" {
 # Network Security Groups
 # ---------------------------------------------------------------------------
 
-# NSG for the App Gateway subnet — must allow GatewayManager service tag
+# NSG for the App Gateway subnet - must allow GatewayManager service tag
 # and Azure Load Balancer probes per Microsoft requirements.
 resource "azurerm_network_security_group" "appgw" {
   name                = "nsg-appgw-online-p1-${var.org_prefix}-${var.environment}"
@@ -147,7 +147,7 @@ resource "azurerm_network_security_group" "workload" {
 }
 
 # ---------------------------------------------------------------------------
-# Route Table — applied to workload + PE subnets only (NOT App Gateway subnet)
+# Route Table - applied to workload + PE subnets only (NOT App Gateway subnet)
 # ---------------------------------------------------------------------------
 
 resource "azurerm_route_table" "workload" {
@@ -185,7 +185,7 @@ module "spoke_vnet" {
       name             = "snet-appgateway"
       address_prefixes = [local.snet_appgateway]
 
-      # No route_table on this subnet — App Gateway WAF_v2 is incompatible with
+      # No route_table on this subnet - App Gateway WAF_v2 is incompatible with
       # UDRs to NVAs (Azure Firewall). Internet traffic enters the App Gateway
       # directly; its backend traffic exits to the workload subnet.
       network_security_group = {
@@ -226,7 +226,7 @@ module "spoke_vnet" {
 }
 
 # ---------------------------------------------------------------------------
-# VNet Peering — spoke ↔ primary hub
+# VNet Peering - spoke ↔ primary hub
 # ---------------------------------------------------------------------------
 
 resource "azurerm_virtual_network_peering" "spoke_to_hub" {
@@ -269,7 +269,7 @@ resource "azurerm_static_web_app" "this" {
 }
 
 # ---------------------------------------------------------------------------
-# Public IP — App Gateway WAF_v2 frontend
+# Public IP - App Gateway WAF_v2 frontend
 # ---------------------------------------------------------------------------
 
 resource "azurerm_public_ip" "appgw" {
@@ -284,7 +284,7 @@ resource "azurerm_public_ip" "appgw" {
 }
 
 # ---------------------------------------------------------------------------
-# WAF Policy — OWASP 3.2 in Prevention mode
+# WAF Policy - OWASP 3.2 in Prevention mode
 # ---------------------------------------------------------------------------
 
 resource "azurerm_web_application_firewall_policy" "this" {
@@ -390,7 +390,7 @@ resource "azurerm_application_gateway" "this" {
 }
 
 # ---------------------------------------------------------------------------
-# Diagnostic settings — App Gateway → Platform LA workspace
+# Diagnostic settings - App Gateway → Platform LA workspace
 # ---------------------------------------------------------------------------
 
 resource "azurerm_monitor_diagnostic_setting" "appgw" {

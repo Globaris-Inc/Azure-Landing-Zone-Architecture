@@ -1,9 +1,9 @@
 # Purpose: Outputs from the synthetic workload root module.
-# Section: 13.1 — Workload Targets
+# Section: 13.1 - Workload Targets
 # Last updated: 2026-06-02
 
 output "enabled" {
-  description = "Resolved value of the kill switch — true when synthetic resources are deployed, false when the entire layer is empty."
+  description = "Resolved value of the kill switch - true when synthetic resources are deployed, false when the entire layer is empty."
   value       = var.enable_synthetic_workload
 }
 
@@ -46,7 +46,7 @@ output "online_p1_synthetic_storage_account_name" {
 }
 
 # ---------------------------------------------------------------------------
-# 13.2 — k6 load generator
+# 13.2 - k6 load generator
 # ---------------------------------------------------------------------------
 
 output "k6_container_app_environment_id" {
@@ -65,7 +65,7 @@ output "k6_job_names" {
 }
 
 # ---------------------------------------------------------------------------
-# 13.3 — Red-team simulator
+# 13.3 - Red-team simulator
 # ---------------------------------------------------------------------------
 
 output "red_team_primary_rg_name" {
@@ -99,7 +99,7 @@ output "red_team_job_principal_ids" {
 }
 
 # ---------------------------------------------------------------------------
-# 13.4 — Cost-generating patterns
+# 13.4 - Cost-generating patterns
 # ---------------------------------------------------------------------------
 
 output "cost_patterns_rg_name" {
@@ -108,7 +108,7 @@ output "cost_patterns_rg_name" {
 }
 
 output "ungoverned_rg_name" {
-  description = "Intentionally untagged resource group. The §7 Modify policy at MG scope adds default FinOps tags out-of-band — the policy-evaluation entry in AzureActivity is the demo signal."
+  description = "Intentionally untagged resource group. The §7 Modify policy at MG scope adds default FinOps tags out-of-band - the policy-evaluation entry in AzureActivity is the demo signal."
   value       = local.cost_patterns_enabled == 1 ? azurerm_resource_group.ungoverned[0].name : ""
 }
 
@@ -123,7 +123,7 @@ output "oversized_vm_size" {
 }
 
 output "oversized_vm_ssh_private_key_pem" {
-  description = "Ephemeral RSA private key for break-glass SSH access to the oversized idle VM. Sensitive — pull from state with `terraform output -raw oversized_vm_ssh_private_key_pem`."
+  description = "Ephemeral RSA private key for break-glass SSH access to the oversized idle VM. Sensitive - pull from state with `terraform output -raw oversized_vm_ssh_private_key_pem`."
   value       = local.cost_patterns_enabled == 1 ? tls_private_key.oversized_vm[0].private_key_pem : ""
   sensitive   = true
 }
@@ -144,7 +144,7 @@ output "cost_pattern_budget_id" {
 }
 
 # ---------------------------------------------------------------------------
-# 13.6 — Cost guardrails
+# 13.6 - Cost guardrails
 # ---------------------------------------------------------------------------
 
 output "guardrails_automation_account_id" {

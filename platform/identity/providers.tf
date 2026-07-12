@@ -1,10 +1,10 @@
-# Purpose: Zero Trust + Conditional Access — provider configuration.
-# Section: 5 — Zero Trust + Conditional Access
+# Purpose: Zero Trust + Conditional Access - provider configuration.
+# Section: 5 - Zero Trust + Conditional Access
 # Last updated: 2026-07-08
 #
 # Three providers are required for this module:
-#   azuread — Conditional Access policies, named locations, Identity Protection
-#   azurerm — PIM eligible role assignments, role management policies (MG scope)
+#   azuread - Conditional Access policies, named locations, Identity Protection
+#   azurerm - PIM eligible role assignments, role management policies (MG scope)
 #   azapi   - inherited by the AVM RSV + VNet modules (Section 8 G1)
 #
 # Authentication: all providers use OIDC via the same GitHub Actions OIDC SP.
@@ -69,7 +69,7 @@ provider "azurerm" {
 }
 
 # ---------------------------------------------------------------------------
-# Identity-subscription provider alias (Section 8 — G1, ADR-010 / Wave 3)
+# Identity-subscription provider alias (Section 8 - G1, ADR-010 / Wave 3)
 # ---------------------------------------------------------------------------
 # The default azurerm provider is management-anchored (for MG-scope PIM). The G1
 # identity-services build (identity VNet, Entra Domain Services, RSV) must land in
@@ -80,7 +80,7 @@ provider "azurerm" {
   features {}
 }
 
-# Connectivity-subscription alias — used ONLY for the hub-to-identity return VNet
+# Connectivity-subscription alias - used ONLY for the hub-to-identity return VNet
 # peering (mirrors the spoke pattern in landing-zones/corp-a1). The OIDC SP holds
 # Contributor on the Connectivity sub (ADR-021 scoped role set), which covers the
 # return peering write.

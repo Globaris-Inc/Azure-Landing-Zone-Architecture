@@ -1,12 +1,12 @@
-# Purpose: Management Group hierarchy — calls avm-ptn-alz to create the Globaris MG tree
+# Purpose: Management Group hierarchy - calls avm-ptn-alz to create the Globaris MG tree
 #          and places all 5 POC subscriptions under their respective management groups.
-# Section: 2 — Management Group Hierarchy
+# Section: 2 - Management Group Hierarchy
 # Last updated: 2026-07-06
 #
 # Architecture (defined in lib/globaris.alz_architecture_definition.json):
 #
 #   Tenant Root Group
-#   └── Globaris                     (root — id: globaris)
+#   └── Globaris                     (root - id: globaris)
 #       ├── Platform                (id: platform)
 #       │   ├── Management          (id: management)   ← sub-management-poc-01
 #       │   ├── Connectivity        (id: connectivity) ← sub-connectivity-poc-01
@@ -38,7 +38,7 @@ module "alz_management_groups" {
   location = var.primary_location
 
   # Parent of the Globaris root MG is the Tenant Root Group. The module wants the
-  # bare parent MG *name* (the tenant id for a tenant-root child) — NOT the full
+  # bare parent MG *name* (the tenant id for a tenant-root child) - NOT the full
   # `/providers/Microsoft.Management/managementGroups/...` path (validated in the
   # module: variables.tf parent_resource_id must not contain `/`). Confirmed
   # against avm-ptn-alz 0.19.1. Last updated: 2026-07-04.

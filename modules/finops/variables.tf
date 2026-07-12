@@ -1,5 +1,5 @@
 # Purpose: Input variables for the reusable FinOps child module.
-# Section: 7 — FinOps: Tagging & Budgets
+# Section: 7 - FinOps: Tagging & Budgets
 # Last updated: 2026-07-08
 #
 # This module creates per-subscription FinOps resources: subscription budget,

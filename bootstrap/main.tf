@@ -1,5 +1,5 @@
-# Purpose: State backend infrastructure — RG, Key Vault (CMK), Storage Account.
-# Section: 10a — Pipeline & Tooling (bootstrap subset)
+# Purpose: State backend infrastructure - RG, Key Vault (CMK), Storage Account.
+# Section: 10a - Pipeline & Tooling (bootstrap subset)
 # Last updated: 2026-07-06
 #
 # Resources created:
@@ -16,7 +16,7 @@
 # public access entirely. See WORKLOG.md 2026-05-05 for rationale.
 #
 # NOTE (ADR-024, 2026-07-06): a container WORM immutability policy was removed. Even
-# UNLOCKED it broke Terraform state operations — the azurerm backend takes a blob
+# UNLOCKED it broke Terraform state operations - the azurerm backend takes a blob
 # lease (lock) on every run, which a container time-based retention policy rejects
 # with 409 BlobImmutableDueToPolicy, versioning notwithstanding. State protection is
 # provided by blob versioning + 14-day blob/container soft-delete + Entra-only access.
@@ -74,7 +74,7 @@ resource "azurerm_user_assigned_identity" "tfstate" {
 }
 
 # ---------------------------------------------------------------------------
-# Key Vault (RBAC-authorised, soft-delete, purge-protected — ADR-004)
+# Key Vault (RBAC-authorised, soft-delete, purge-protected - ADR-004)
 # ---------------------------------------------------------------------------
 
 resource "azurerm_key_vault" "tfstate" {
@@ -89,7 +89,7 @@ resource "azurerm_key_vault" "tfstate" {
   purge_protection_enabled   = true
 
   # Public network access is fine for the bootstrap KV (only used during one-time apply
-  # and for Storage CMK — Azure Storage accesses the KV internally via trusted services).
+  # and for Storage CMK - Azure Storage accesses the KV internally via trusted services).
   public_network_access_enabled = true
 
   tags = local.common_tags
@@ -113,7 +113,7 @@ resource "azurerm_role_assignment" "tfstate_uami_kv_crypto" {
   principal_id         = azurerm_user_assigned_identity.tfstate.principal_id
 }
 
-# Azure RBAC propagation can take 30–60 s. Wait before creating the key and storage CMK.
+# Azure RBAC propagation can take 30-60 s. Wait before creating the key and storage CMK.
 resource "time_sleep" "wait_for_kv_rbac" {
   depends_on = [
     azurerm_role_assignment.deployer_kv_crypto_officer,
@@ -158,7 +158,7 @@ resource "azurerm_storage_account" "tfstate" {
   account_replication_type = "GZRS"
   account_kind             = "StorageV2"
 
-  # Entra ID (RBAC) auth only — no shared access keys exposed.
+  # Entra ID (RBAC) auth only - no shared access keys exposed.
   shared_access_key_enabled       = false
   allow_nested_items_to_be_public = false
   min_tls_version                 = "TLS1_2"
@@ -217,7 +217,7 @@ resource "azurerm_storage_container" "tfstate" {
 # REMOVED 2026-07-06 (ADR-024): a container-level WORM immutability policy is
 # incompatible with the Terraform azurerm backend. Every state operation takes a
 # blob lease (lock) and rewrites the state blob; a container time-based retention
-# policy rejects the lease/write with HTTP 409 BlobImmutableDueToPolicy — even
+# policy rejects the lease/write with HTTP 409 BlobImmutableDueToPolicy - even
 # with versioning enabled (versioning protects overwrites, not the lock path).
 # It broke the first post-policy state init (platform/connectivity) and would
 # have broken every future apply on existing roots too. State immutability is not
@@ -227,6 +227,6 @@ resource "azurerm_storage_container" "tfstate" {
 # it was removable.
 
 # ---------------------------------------------------------------------------
-# Storage Blob Data Contributor — OIDC SP (defined in identity.tf)
+# Storage Blob Data Contributor - OIDC SP (defined in identity.tf)
 # Role assignment is in identity.tf to keep all SP-related RBAC co-located.
 # ---------------------------------------------------------------------------

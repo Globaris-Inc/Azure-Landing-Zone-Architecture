@@ -1,5 +1,5 @@
 # Purpose: Input variables for the bootstrap layer.
-# Section: 10a — Pipeline & Tooling (bootstrap subset)
+# Section: 10a - Pipeline & Tooling (bootstrap subset)
 # Last updated: 2026-06-29
 
 variable "tenant_id" {
@@ -13,7 +13,7 @@ variable "management_subscription_id" {
 }
 
 # ---------------------------------------------------------------------------
-# CI/CD subscription IDs — grant the OIDC SP Contributor + User Access
+# CI/CD subscription IDs - grant the OIDC SP Contributor + User Access
 # Administrator on each of the 5 platform subscriptions (OQ-008 / ADR-021).
 # Names match platform/management-groups/variables.tf exactly.
 # ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ variable "ip_allow_list" {
 }
 
 variable "kv_soft_delete_retention_days" {
-  description = "Number of days to retain soft-deleted Key Vault objects (7–90)."
+  description = "Number of days to retain soft-deleted Key Vault objects (7-90)."
   type        = number
   default     = 90
 }

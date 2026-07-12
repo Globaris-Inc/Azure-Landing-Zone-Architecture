@@ -1,5 +1,5 @@
-# Purpose: Reusable FinOps resources — subscription budget, daily cost export, VM auto-shutdown.
-# Section: 7 — FinOps: Tagging & Budgets
+# Purpose: Reusable FinOps resources - subscription budget, daily cost export, VM auto-shutdown.
+# Section: 7 - FinOps: Tagging & Budgets
 # Last updated: 2026-07-08
 #
 # DEVIATION: No AVM module exists for Azure Cost Management resources (budgets, exports,

@@ -1,5 +1,5 @@
 # Purpose: Centralised Private DNS zones for Azure Private Link services.
-# Section: 4 — Private Endpoints + Private DNS
+# Section: 4 - Private Endpoints + Private DNS
 # Last updated: 2026-05-21
 #
 # Architecture:
@@ -11,7 +11,7 @@
 #     (see landing-zones/*/dns_links.tf) using the azurerm.connectivity alias.
 
 # ---------------------------------------------------------------------------
-# Resource Group — Private DNS zones
+# Resource Group - Private DNS zones
 # ---------------------------------------------------------------------------
 
 resource "azurerm_resource_group" "dns" {
@@ -21,12 +21,12 @@ resource "azurerm_resource_group" "dns" {
 }
 
 # ---------------------------------------------------------------------------
-# Private DNS Zones — all Azure Private Link zones
+# Private DNS Zones - all Azure Private Link zones
 # Module: Azure/avm-ptn-network-private-link-private-dns-zones/azurerm v0.23.1
 # Confirmed on registry.terraform.io 2026-05-21
 #
 # v0.23.1 uses an existing RG via parent_id (the RG resource ID); there is no
-# resource_group_creation_enabled toggle — the module always links to the RG
+# resource_group_creation_enabled toggle - the module always links to the RG
 # referenced by parent_id, which is exactly the RG created above.
 # ---------------------------------------------------------------------------
 

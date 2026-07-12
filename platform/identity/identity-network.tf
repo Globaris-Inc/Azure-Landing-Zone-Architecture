@@ -1,22 +1,22 @@
-# Purpose: Identity subscription network plane — resource groups, identity VNet
+# Purpose: Identity subscription network plane - resource groups, identity VNet
 #          (DNS servers derived from the AADDS subnet CIDR), Entra DS subnet + NSG
 #          (Microsoft-mandated rules), and bidirectional peering to the primary
-#          hub. (Section 8 — G1 / Gap-Closure Wave 3 / ADR-010, ADR-029)
-# Section: 8 — Standard Platform Components (Identity subscription)
+#          hub. (Section 8 - G1 / Gap-Closure Wave 3 / ADR-010, ADR-029)
+# Section: 8 - Standard Platform Components (Identity subscription)
 # Last updated: 2026-07-10
 #
 # All resources here are gated on identity_mode != "none" via the static boolean
-# local.identity_enabled (LESSON 5 — gate on a static bool, never on an unknown ID)
+# local.identity_enabled (LESSON 5 - gate on a static bool, never on an unknown ID)
 # and land in the Identity subscription via the azurerm.identity provider alias.
 # The hub-side return peering uses the azurerm.connectivity alias (mirrors the
 # landing-zones/corp-a1 spoke pattern).
 
 # ---------------------------------------------------------------------------
-# Locals — gating + naming + subnet math
+# Locals - gating + naming + subnet math
 # ---------------------------------------------------------------------------
 
 locals {
-  # Static booleans — known at plan time, safe to drive count/for_each.
+  # Static booleans - known at plan time, safe to drive count/for_each.
   identity_enabled = var.identity_mode != "none"
   entra_ds_enabled = var.identity_mode == "entra-ds"
 
@@ -86,17 +86,17 @@ resource "azurerm_resource_group" "identity_aadds" {
 }
 
 # ---------------------------------------------------------------------------
-# Network Security Group — Entra DS subnet
+# Network Security Group - Entra DS subnet
 #
 # Rule set verified against the current Microsoft docs "Network considerations for
 # Microsoft Entra Domain Services" and "AADDS104 - Network error" (learn.microsoft.com,
 # reviewed 2026-07-10 for ADR-029):
 #   - REQUIRED inbound: TCP 5986 from the AzureActiveDirectoryDomainServices
-#     service tag — Entra DS management/synchronisation (PowerShell remoting). This
+#     service tag - Entra DS management/synchronisation (PowerShell remoting). This
 #     equals Microsoft's own default `AllowPSRemoting` @301.
 #   - The managed service no longer requires the legacy CorpNetSaw/ports 443/3389
 #     inbound rules that older guidance listed; those are intentionally omitted.
-#   - TCP 636 (secure LDAP) is added ONLY if/when secure LDAP is enabled — left
+#   - TCP 636 (secure LDAP) is added ONLY if/when secure LDAP is enabled - left
 #     out here because secure_ldap is disabled in this build (see domain-services.tf).
 #   - There is DELIBERATELY no custom deny-all inbound rule (ADR-029). Azure's
 #     undeletable default rules AllowVnetInBound @65000, AllowAzureLoadBalancerInBound
@@ -116,7 +116,7 @@ resource "azurerm_network_security_group" "entra_ds" {
   resource_group_name = azurerm_resource_group.identity_network[0].name
   location            = var.identity_location
 
-  # REQUIRED — Entra DS management traffic (synchronisation / monitoring).
+  # REQUIRED - Entra DS management traffic (synchronisation / monitoring).
   security_rule {
     name                       = "Allow-AADDS-Management-5986"
     priority                   = 301
@@ -207,7 +207,7 @@ module "identity_vnet" {
 }
 
 # ---------------------------------------------------------------------------
-# VNet Peering — identity VNet <-> primary hub (bidirectional, cross-subscription)
+# VNet Peering - identity VNet <-> primary hub (bidirectional, cross-subscription)
 # Mirrors the landing-zones/corp-a1 spoke_to_hub / hub_to_spoke pattern.
 # ---------------------------------------------------------------------------
 

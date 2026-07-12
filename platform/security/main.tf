@@ -1,6 +1,6 @@
-# Purpose: Security platform root module — RBAC-isolated Security LA workspace,
+# Purpose: Security platform root module - RBAC-isolated Security LA workspace,
 #          Microsoft Sentinel, Key Vault for security secrets, Defender for Cloud plans.
-# Section: 8 — Standard Platform Components
+# Section: 8 - Standard Platform Components
 # Last updated: 2026-05-14
 #
 # Apply order: After platform/management (platform LA workspace ID not required here;
@@ -29,7 +29,7 @@ locals {
   )
 
   # Defender for Cloud resource types enabled on the Security subscription.
-  # VirtualMachines uses subplan "P2" (Defender for Servers Plan 2 — includes MDE + VA).
+  # VirtualMachines uses subplan "P2" (Defender for Servers Plan 2 - includes MDE + VA).
   # Other types are added directly below via for_each.
   #
   # Map of resource_type => subplan. The subplan is pinned to the exact value
@@ -60,7 +60,7 @@ resource "azurerm_resource_group" "security" {
 }
 
 # ---------------------------------------------------------------------------
-# Security Log Analytics Workspace — RBAC-isolated from platform workspace
+# Security Log Analytics Workspace - RBAC-isolated from platform workspace
 # ---------------------------------------------------------------------------
 #
 # This workspace is separate from the platform LA workspace in platform/management.
@@ -82,7 +82,7 @@ module "security_law" {
 }
 
 # ---------------------------------------------------------------------------
-# Microsoft Sentinel — onboarded to the Security LA workspace
+# Microsoft Sentinel - onboarded to the Security LA workspace
 # ---------------------------------------------------------------------------
 
 resource "azurerm_sentinel_log_analytics_workspace_onboarding" "this" {
@@ -90,7 +90,7 @@ resource "azurerm_sentinel_log_analytics_workspace_onboarding" "this" {
 }
 
 # ---------------------------------------------------------------------------
-# Security Key Vault — secrets for security operations + future Firewall TLS cert
+# Security Key Vault - secrets for security operations + future Firewall TLS cert
 # ---------------------------------------------------------------------------
 
 # Globally-unique suffix for the Key Vault name (3-24 chars, alphanumeric + hyphens).
@@ -132,12 +132,12 @@ module "security_kv" {
 }
 
 # ---------------------------------------------------------------------------
-# Defender for Cloud — subscription-level plans on the Security subscription
+# Defender for Cloud - subscription-level plans on the Security subscription
 # ---------------------------------------------------------------------------
 #
 # DEVIATION: No AVM module for azurerm_security_center_subscription_pricing.
 # Plans are enabled per-subscription. In a full ALZ deployment these would be
-# enforced via DINE policies at the Globaris root MG scope — tracked as a
+# enforced via DINE policies at the Globaris root MG scope - tracked as a
 # Section 12 hardening item.
 
 resource "azurerm_security_center_subscription_pricing" "servers" {
@@ -154,7 +154,7 @@ resource "azurerm_security_center_subscription_pricing" "this" {
 }
 
 # ---------------------------------------------------------------------------
-# Defender for Cloud — security contact
+# Defender for Cloud - security contact
 # ---------------------------------------------------------------------------
 
 resource "azurerm_security_center_contact" "this" {

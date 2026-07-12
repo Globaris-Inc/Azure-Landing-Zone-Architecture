@@ -1,6 +1,6 @@
-# Purpose: k6 load generator — three scheduled Container Apps Jobs hitting the
+# Purpose: k6 load generator - three scheduled Container Apps Jobs hitting the
 #          corp-a1 REST API stub. Satisfies PROMPT.md §13.2.
-# Section: 13.2 — Load Generator
+# Section: 13.2 - Load Generator
 # Last updated: 2026-06-03
 #
 # Architecture:
@@ -23,7 +23,7 @@
 #   - Cron times are UTC. Adjusted to land at ~9am ET / noon ET / 3am ET.
 
 # ---------------------------------------------------------------------------
-# Locals — 13.2 sub-gate (CAE requires Platform LAW workspace ID)
+# Locals - 13.2 sub-gate (CAE requires Platform LAW workspace ID)
 # ---------------------------------------------------------------------------
 
 locals {
@@ -39,7 +39,7 @@ locals {
     baseline = {
       script           = "baseline.js"
       cron             = "0 14 * * 1-5" # 09:00 ET weekdays
-      timeout_seconds  = 33000          # 9h10m — covers the full ramp + buffer
+      timeout_seconds  = 33000          # 9h10m - covers the full ramp + buffer
       cpu              = 0.25
       memory           = "0.5Gi"
       retry_limit      = 0
@@ -49,7 +49,7 @@ locals {
     spike = {
       script           = "spike.js"
       cron             = "0 17 * * 2,4" # 12:00 ET Tue + Thu
-      timeout_seconds  = 1200           # 20m — script is 15m + buffer
+      timeout_seconds  = 1200           # 20m - script is 15m + buffer
       cpu              = 1.0
       memory           = "2.0Gi"
       retry_limit      = 0
@@ -59,7 +59,7 @@ locals {
     anomalous = {
       script           = "anomalous.js"
       cron             = "0 8 * * 0" # 03:00 ET Sun
-      timeout_seconds  = 600         # 10m — script is 5m + buffer
+      timeout_seconds  = 600         # 10m - script is 5m + buffer
       cpu              = 1.0
       memory           = "2.0Gi"
       retry_limit      = 0
@@ -84,7 +84,7 @@ resource "azurerm_container_app_environment" "k6" {
 }
 
 # ---------------------------------------------------------------------------
-# Azure File share + script uploads — hosted on the existing corp-a1 synthetic
+# Azure File share + script uploads - hosted on the existing corp-a1 synthetic
 # storage account (shared-key auth already enabled there for the SCM deploy).
 # ---------------------------------------------------------------------------
 
@@ -92,7 +92,7 @@ resource "azurerm_storage_share" "k6_scripts" {
   count              = local.k6_enabled
   name               = "k6-scripts"
   storage_account_id = azurerm_storage_account.corp_a1_synthetic[0].id
-  quota              = 1 # GB — three small JS files
+  quota              = 1 # GB - three small JS files
 }
 
 resource "azurerm_storage_share_file" "k6_script" {

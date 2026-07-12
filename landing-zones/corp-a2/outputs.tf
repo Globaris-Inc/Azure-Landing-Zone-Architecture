@@ -1,5 +1,5 @@
 # Purpose: Outputs for the corp-a2 landing zone root module (DR spoke).
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-07-10
 
 output "spoke_vnet_id" {

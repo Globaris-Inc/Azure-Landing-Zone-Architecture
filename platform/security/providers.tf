@@ -1,5 +1,5 @@
 # Purpose: Provider configuration for the Security platform root module.
-# Section: 8 — Standard Platform Components (Security sub) / extended in Section 6
+# Section: 8 - Standard Platform Components (Security sub) / extended in Section 6
 # Last updated: 2026-05-29
 
 terraform {

@@ -1,11 +1,11 @@
 # Purpose: Provider configuration for the Connectivity platform root module.
-# Section: 8 — Standard Platform Components (Connectivity sub)
+# Section: 8 - Standard Platform Components (Connectivity sub)
 # Last updated: 2026-05-14
 #
 # Providers required:
-#   azurerm — Connectivity subscription (hub VNets, firewalls, VPN GW)
-#   azapi   — Required by avm-ptn-alz-connectivity-hub-and-spoke-vnet v0.17.1
-#   modtm   — AVM telemetry provider (required by all AVM pattern modules)
+#   azurerm - Connectivity subscription (hub VNets, firewalls, VPN GW)
+#   azapi   - Required by avm-ptn-alz-connectivity-hub-and-spoke-vnet v0.17.1
+#   modtm   - AVM telemetry provider (required by all AVM pattern modules)
 
 terraform {
   required_version = ">= 1.9"

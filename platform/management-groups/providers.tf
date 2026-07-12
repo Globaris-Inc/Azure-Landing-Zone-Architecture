@@ -1,5 +1,5 @@
 # Purpose: Provider configuration for Management Group hierarchy root module.
-# Section: 2 — Management Group Hierarchy
+# Section: 2 - Management Group Hierarchy
 # Last updated: 2026-07-05
 
 terraform {
@@ -38,7 +38,7 @@ terraform {
 provider "alz" {
   library_references = [
     {
-      # Microsoft's canonical ALZ library — provides built-in archetypes
+      # Microsoft's canonical ALZ library - provides built-in archetypes
       # (root, platform, landing_zones, corp, online, management, connectivity,
       # identity, security, decommissioned, sandbox).
       #
@@ -53,7 +53,7 @@ provider "alz" {
       ref  = "2026.04.2"
     },
     {
-      # Custom Globaris hierarchy — defines the globaris architecture,
+      # Custom Globaris hierarchy - defines the globaris architecture,
       # overriding root MG id "alz" with "globaris".
       custom_url = "${path.root}/lib"
     }

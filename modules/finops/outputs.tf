@@ -1,5 +1,5 @@
 # Purpose: Outputs for the reusable FinOps child module.
-# Section: 7 — FinOps: Tagging & Budgets
+# Section: 7 - FinOps: Tagging & Budgets
 # Last updated: 2026-07-08
 
 output "budget_id" {

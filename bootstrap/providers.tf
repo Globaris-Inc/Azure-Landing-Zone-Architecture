@@ -1,5 +1,5 @@
 # Purpose: Provider and Terraform version constraints for the bootstrap layer.
-# Section: 10a — Pipeline & Tooling (bootstrap subset)
+# Section: 10a - Pipeline & Tooling (bootstrap subset)
 # Last updated: 2026-05-05
 #
 # This root module uses LOCAL state (ADR-005). Do not configure a backend block here.
@@ -37,7 +37,7 @@ provider "azurerm" {
 
   features {
     key_vault {
-      # Never auto-purge on destroy — purge protection is enabled on the bootstrap KV.
+      # Never auto-purge on destroy - purge protection is enabled on the bootstrap KV.
       purge_soft_delete_on_destroy    = false
       recover_soft_deleted_key_vaults = true
     }

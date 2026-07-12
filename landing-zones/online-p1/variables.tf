@@ -1,5 +1,5 @@
 # Purpose: Input variables for the online-p1 landing zone root module (internet-facing spoke).
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-05-14
 
 # ---------------------------------------------------------------------------

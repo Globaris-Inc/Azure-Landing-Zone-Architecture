@@ -1,5 +1,5 @@
-# Purpose: Zero Trust baseline — Conditional Access policies and Identity Protection.
-# Section: 5 — Zero Trust + Conditional Access
+# Purpose: Zero Trust baseline - Conditional Access policies and Identity Protection.
+# Section: 5 - Zero Trust + Conditional Access
 # Last updated: 2026-07-10
 #
 # Policies deployed (all start in Report-only mode via var.ca_policy_state):
@@ -7,7 +7,7 @@
 #   CA-002  Block legacy authentication protocols
 #   CA-003  Require compliant or hybrid-joined device for Azure portal + management API
 #   CA-004  Require phishing-resistant MFA when activating roles via PIM
-#   CA-005  Geo-block — deny sign-ins from outside approved countries
+#   CA-005  Geo-block - deny sign-ins from outside approved countries
 #   CA-006  Sign-in frequency 4 h for admin roles on management applications
 #   CA-007  Block access on high user risk (Identity Protection integration)
 #   CA-008  Require MFA on medium/high sign-in risk (Identity Protection integration)
@@ -19,11 +19,11 @@
 #   Azure portal:              c44b4083-3bb0-49c1-b47d-974e53cbdf3c (NOT CA-targetable - Graph 1034; do not re-add to app lists)
 #   Microsoft Azure Mgmt API:  797f4846-ba00-4fd7-ba43-dac1f8f63013
 #
-# Admin role template IDs (stable across tenants — confirmed on
+# Admin role template IDs (stable across tenants - confirmed on
 # learn.microsoft.com/en-us/entra/identity/role-based-access-control/permissions-reference):
 
 locals {
-  # Break-glass exclusion list — empty list if no group configured.
+  # Break-glass exclusion list - empty list if no group configured.
   bg_group = compact([var.break_glass_group_object_id])
 
   # Entra ID directory role template IDs for privileged admin roles.
@@ -63,7 +63,7 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# Named Location — Approved Countries (geo-block allowlist)
+# Named Location - Approved Countries (geo-block allowlist)
 # ---------------------------------------------------------------------------
 
 resource "azuread_named_location" "approved_countries" {
@@ -99,7 +99,7 @@ resource "time_sleep" "wait_named_location" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "require_mfa_admins" {
-  display_name = "CA-001 [${upper(var.org_prefix)}] Require MFA — Admin Roles"
+  display_name = "CA-001 [${upper(var.org_prefix)}] Require MFA - Admin Roles"
   state        = var.ca_policy_state
 
   conditions {
@@ -154,7 +154,7 @@ resource "azuread_conditional_access_policy" "block_legacy_auth" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "require_compliant_device_portal" {
-  display_name = "CA-003 [${upper(var.org_prefix)}] Compliant Device — Azure Portal + Mgmt API"
+  display_name = "CA-003 [${upper(var.org_prefix)}] Compliant Device - Azure Portal + Mgmt API"
   state        = var.ca_policy_state
 
   conditions {
@@ -188,7 +188,7 @@ resource "azuread_conditional_access_policy" "require_compliant_device_portal" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "phishing_resistant_mfa_pim" {
-  display_name = "CA-004 [${upper(var.org_prefix)}] Require MFA — PIM Role Activation (phishing-resistant in prod)"
+  display_name = "CA-004 [${upper(var.org_prefix)}] Require MFA - PIM Role Activation (phishing-resistant in prod)"
   state        = var.ca_policy_state
 
   conditions {
@@ -270,7 +270,7 @@ resource "azuread_conditional_access_policy" "geo_block" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "signin_frequency_admins" {
-  display_name = "CA-006 [${upper(var.org_prefix)}] Sign-in Frequency 4h — Admin Roles on Mgmt Apps"
+  display_name = "CA-006 [${upper(var.org_prefix)}] Sign-in Frequency 4h - Admin Roles on Mgmt Apps"
   state        = var.ca_policy_state
 
   conditions {
@@ -298,7 +298,7 @@ resource "azuread_conditional_access_policy" "signin_frequency_admins" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "block_high_user_risk" {
-  display_name = "CA-007 [${upper(var.org_prefix)}] Block — High User Risk"
+  display_name = "CA-007 [${upper(var.org_prefix)}] Block - High User Risk"
   state        = var.ca_policy_state
 
   conditions {
@@ -326,7 +326,7 @@ resource "azuread_conditional_access_policy" "block_high_user_risk" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "mfa_signin_risk" {
-  display_name = "CA-008 [${upper(var.org_prefix)}] Require MFA — Medium/High Sign-in Risk"
+  display_name = "CA-008 [${upper(var.org_prefix)}] Require MFA - Medium/High Sign-in Risk"
   state        = var.ca_policy_state
 
   conditions {

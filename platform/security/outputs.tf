@@ -1,5 +1,5 @@
 # Purpose: Outputs for the Security platform root module.
-# Section: 8 — Standard Platform Components / extended in Section 6
+# Section: 8 - Standard Platform Components / extended in Section 6
 # Last updated: 2026-05-29
 
 output "security_rg_name" {
@@ -50,7 +50,7 @@ output "security_kv_uri" {
 }
 
 # ---------------------------------------------------------------------------
-# Section 6 — Defender for Cloud extension + MDC export
+# Section 6 - Defender for Cloud extension + MDC export
 # ---------------------------------------------------------------------------
 
 output "defender_extended_plan_ids" {
@@ -84,7 +84,7 @@ output "regulatory_compliance_assignment_ids" {
 }
 
 # ---------------------------------------------------------------------------
-# Section 6 — Sentinel
+# Section 6 - Sentinel
 # ---------------------------------------------------------------------------
 
 output "sentinel_data_connector_ids" {

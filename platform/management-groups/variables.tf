@@ -1,29 +1,29 @@
 # Purpose: Input variables for Management Group hierarchy root module.
-# Section: 2 — Management Group Hierarchy
+# Section: 2 - Management Group Hierarchy
 # Last updated: 2026-05-06
 
 variable "connectivity_subscription_id" {
-  description = "Subscription ID for sub-connectivity-poc-01 — placed under the Connectivity management group."
+  description = "Subscription ID for sub-connectivity-poc-01 - placed under the Connectivity management group."
   type        = string
 }
 
 variable "management_subscription_id" {
-  description = "Subscription ID for sub-management-poc-01 — placed under the Management management group."
+  description = "Subscription ID for sub-management-poc-01 - placed under the Management management group."
   type        = string
 }
 
 variable "identity_subscription_id" {
-  description = "Subscription ID for sub-identity-poc-01 — placed under the Identity management group."
+  description = "Subscription ID for sub-identity-poc-01 - placed under the Identity management group."
   type        = string
 }
 
 variable "security_subscription_id" {
-  description = "Subscription ID for sub-security-poc-01 — placed under the Security management group."
+  description = "Subscription ID for sub-security-poc-01 - placed under the Security management group."
   type        = string
 }
 
 variable "landingzones_subscription_id" {
-  description = "Subscription ID for sub-landingzones-poc-01 — placed under the Corp management group."
+  description = "Subscription ID for sub-landingzones-poc-01 - placed under the Corp management group."
   type        = string
 }
 

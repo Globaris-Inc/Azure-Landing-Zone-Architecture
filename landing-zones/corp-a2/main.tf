@@ -1,13 +1,13 @@
-# Purpose: corp-a2 landing zone — DR spoke VNet (centralus), App Service + SQL mirroring
+# Purpose: corp-a2 landing zone - DR spoke VNet (centralus), App Service + SQL mirroring
 #          corp-a1, Recovery Services Vault for Azure Site Recovery.
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-07-10
 #
 # Architecture:
 #   - Spoke VNet (10.11.0.0/16) peered to secondary (DR) hub VNet (centralus)
 #   - All subnet traffic forced through secondary Azure Firewall via UDR
-#   - App Service (Linux B2) with VNet integration — mirrors corp-a1 workload tier
-#   - Azure SQL Server (Entra-only auth) — independent; geo-replication to/from corp-a1
+#   - App Service (Linux B2) with VNet integration - mirrors corp-a1 workload tier
+#   - Azure SQL Server (Entra-only auth) - independent; geo-replication to/from corp-a1
 #     can be configured via creation_source_database_id after both spokes are deployed
 #   - Recovery Services Vault (Standard, GeoRedundant) for ASR replication
 #   - Private Endpoint for SQL (DNS deferred to Section 4)
@@ -32,9 +32,9 @@ locals {
   )
 
   # Subnet prefixes computed from spoke_address_space (default 10.11.0.0/16).
-  snet_integration = cidrsubnet(var.spoke_address_space, 10, 0) # /26 — App Service VNet integration
-  snet_data        = cidrsubnet(var.spoke_address_space, 8, 1)  # /24 — data tier (reserved)
-  snet_pe          = cidrsubnet(var.spoke_address_space, 8, 2)  # /24 — private endpoints
+  snet_integration = cidrsubnet(var.spoke_address_space, 10, 0) # /26 - App Service VNet integration
+  snet_data        = cidrsubnet(var.spoke_address_space, 8, 1)  # /24 - data tier (reserved)
+  snet_pe          = cidrsubnet(var.spoke_address_space, 8, 2)  # /24 - private endpoints
 }
 
 # ---------------------------------------------------------------------------
@@ -183,7 +183,7 @@ module "spoke_vnet" {
 }
 
 # ---------------------------------------------------------------------------
-# VNet Peering — spoke ↔ secondary hub
+# VNet Peering - spoke ↔ secondary hub
 # ---------------------------------------------------------------------------
 
 resource "azurerm_virtual_network_peering" "spoke_to_hub" {
@@ -245,7 +245,7 @@ module "app_service_plan" {
 }
 
 # ---------------------------------------------------------------------------
-# App Service — DR mirror of corp-a1 App Service
+# App Service - DR mirror of corp-a1 App Service
 # Module: Azure/avm-res-web-site/azurerm v0.22.0
 # ---------------------------------------------------------------------------
 
@@ -298,7 +298,7 @@ module "app_service" {
 }
 
 # ---------------------------------------------------------------------------
-# Azure SQL Server + Database (DR — independent; link to corp-a1 via geo-replication)
+# Azure SQL Server + Database (DR - independent; link to corp-a1 via geo-replication)
 #
 # DEVIATION: Native azurerm resources used (see corp-a1/main.tf deviation note).
 #
@@ -371,7 +371,7 @@ resource "azurerm_private_endpoint" "sql" {
     is_manual_connection           = false
   }
 
-  # azurerm has no standalone azurerm_private_dns_zone_group resource — the zone
+  # azurerm has no standalone azurerm_private_dns_zone_group resource - the zone
   # group is a nested block on the private endpoint. Zone looked up via
   # data.azurerm_private_dns_zone.sql (see dns_links.tf).
   private_dns_zone_group {

@@ -1,22 +1,22 @@
-# Purpose: Section 6 — diagnostic settings that pipe identity + control-plane
+# Purpose: Section 6 - diagnostic settings that pipe identity + control-plane
 #          logs into the Security LA workspace so Sentinel can detect on them.
 #          Entra ID (AAD) tenant-scope logs and the Security subscription's
 #          Activity Log both flow here; other subscriptions' activity logs are
 #          covered by the per-sub Azure Activity Sentinel data connector
 #          (configured via the management-plane data connector pattern).
-# Section: 6 — Defender for Cloud + Sentinel Tuning
+# Section: 6 - Defender for Cloud + Sentinel Tuning
 # Last updated: 2026-05-29
 
 # ---------------------------------------------------------------------------
 # Entra ID (AAD) diagnostic settings → Security LA workspace
 # ---------------------------------------------------------------------------
 #
-# azurerm_monitor_aad_diagnostic_setting is tenant-scoped — no resource_group
+# azurerm_monitor_aad_diagnostic_setting is tenant-scoped - no resource_group
 # or subscription parameter. The OIDC SP must hold Security Administrator (or
 # at minimum Security Reader + Reports Reader) at the tenant root.
 #
 # DEVIATION: ADFSSignInLogs and NetworkAccessTrafficLogs are intentionally
-# omitted — ADFS is not in scope for this Entra-first POC, and Network Access
+# omitted - ADFS is not in scope for this Entra-first POC, and Network Access
 # Traffic Logs require Entra Internet/Private Access licences not assumed
 # here. Add them if those workloads come online.
 
@@ -59,7 +59,7 @@ resource "azurerm_monitor_aad_diagnostic_setting" "security_law" {
 # The per-subscription Azure Activity connector for Sentinel writes to the
 # AzureActivity table on the workspace. The modern (post-2021) integration
 # uses a subscription-scope diagnostic setting; Sentinel reads from
-# AzureActivity transparently. Only the Security subscription is wired here —
+# AzureActivity transparently. Only the Security subscription is wired here -
 # other subscriptions need their own diagnostic settings or the connector
 # enabled per sub. Section 12 hardening tracks that fan-out via DINE.
 

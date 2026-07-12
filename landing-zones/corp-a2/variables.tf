@@ -1,5 +1,5 @@
 # Purpose: Input variables for the corp-a2 landing zone root module (DR spoke).
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-07-10
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ variable "secondary_firewall_private_ip" {
 }
 
 # ---------------------------------------------------------------------------
-# Workload — SQL
+# Workload - SQL
 # ---------------------------------------------------------------------------
 
 variable "enable_sql" {

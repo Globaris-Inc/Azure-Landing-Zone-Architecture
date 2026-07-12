@@ -1,5 +1,5 @@
 # Purpose: Input variables for the identity / Zero Trust root module.
-# Section: 5 — Zero Trust + Conditional Access
+# Section: 5 - Zero Trust + Conditional Access
 # Last updated: 2026-07-10
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ variable "environment" {
 }
 
 # ---------------------------------------------------------------------------
-# Conditional Access — behaviour
+# Conditional Access - behaviour
 # ---------------------------------------------------------------------------
 
 variable "ca_policy_state" {
@@ -81,7 +81,7 @@ variable "break_glass_group_object_id" {
   description = <<-EOT
     Object ID of an Entra ID group containing break-glass / emergency-access accounts.
     These accounts are excluded from all Conditional Access policies to prevent
-    complete lockout. Leave empty ("") to skip the exclusion — NOT recommended for
+    complete lockout. Leave empty ("") to skip the exclusion - NOT recommended for
     production.
   EOT
   type        = string
@@ -89,14 +89,14 @@ variable "break_glass_group_object_id" {
 }
 
 # ---------------------------------------------------------------------------
-# PIM — Privileged Identity Management
+# PIM - Privileged Identity Management
 # ---------------------------------------------------------------------------
 
 variable "pim_privileged_group_object_id" {
   description = <<-EOT
     Object ID of the Entra ID security group whose members receive eligible role
     assignments via PIM (Owner at root MG, Contributor at Landing Zones MG, etc.).
-    Leave empty ("") to skip all PIM eligible assignment resources — useful for
+    Leave empty ("") to skip all PIM eligible assignment resources - useful for
     initial bootstrap when the group doesn't exist yet.
   EOT
   type        = string
@@ -113,7 +113,7 @@ variable "pim_approver_group_object_id" {
 }
 
 # ---------------------------------------------------------------------------
-# Identity subscription domain-services infrastructure (Section 8 — G1, ADR-010)
+# Identity subscription domain-services infrastructure (Section 8 - G1, ADR-010)
 # Added: Gap-Closure Wave 3. Gates the Entra DS + identity VNet + RSV build.
 # ---------------------------------------------------------------------------
 
@@ -130,13 +130,13 @@ variable "connectivity_subscription_id" {
 variable "identity_mode" {
   description = <<-EOT
     Selects how the Identity subscription provides directory/domain services (ADR-010).
-      "entra-ds" — Microsoft Entra Domain Services (managed), the shipped default.
-      "ad-ds"    — self-managed AD DS domain controllers on IaaS. DOCUMENTED-ONLY in this
+      "entra-ds" - Microsoft Entra Domain Services (managed), the shipped default.
+      "ad-ds"    - self-managed AD DS domain controllers on IaaS. DOCUMENTED-ONLY in this
                    wave: selecting it does NOT yet build DCs (no DC VMs authored). It only
                    keeps the identity VNet + RSV (mode != "none") with no Entra DS resource.
-      "none"     — Identity sub left empty (no VNet/DS/RSV). Reverses to the pre-G1 posture.
+      "none"     - Identity sub left empty (no VNet/DS/RSV). Reverses to the pre-G1 posture.
     Everything new is gated on identity_mode != "none"; the Entra DS resource is additionally
-    gated on identity_mode == "entra-ds". Gating uses static booleans (LESSON 5 — never gate
+    gated on identity_mode == "entra-ds". Gating uses static booleans (LESSON 5 - never gate
     on an unknown resource ID).
   EOT
   type        = string
@@ -150,20 +150,6 @@ variable "identity_mode" {
 
 variable "identity_domain_name" {
   description = "Fully-qualified DNS domain name for Microsoft Entra Domain Services (e.g. 'aadds.globaris.onmicrosoft.com'). Required when identity_mode = 'entra-ds'. Ties to OQ-003 (POC domain name)."
-  type        = string
-  default     = ""
-}
-
-variable "aadds_import_replica_set_id" {
-  description = <<-EOT
-    ONE-TIME RECOVERY INPUT (ADR-029). GUID of the managed domain's initial replica
-    set, used to build the composite config-driven import ID for the built-but-unstated
-    Entra Domain Services resource:
-    '<domain resource ID>/initialReplicaSetId/<this GUID>'. Supplied operationally via
-    TF_VAR_aadds_import_replica_set_id in CI for the recovery apply only. Leave "" for a
-    greenfield deploy (no domain to import): the import block is then a no-op, keeping the
-    config portable. Never commit the live GUID to tfvars.
-  EOT
   type        = string
   default     = ""
 }

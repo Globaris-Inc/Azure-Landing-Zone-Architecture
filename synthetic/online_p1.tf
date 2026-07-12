@@ -1,7 +1,7 @@
-# Purpose: online-p1 synthetic workload — Storage Queue receiver for the public
+# Purpose: online-p1 synthetic workload - Storage Queue receiver for the public
 #          landing-page contact form. Satisfies PROMPT.md §13.1 (online-p1
 #          landing page contact form → Storage Queue).
-# Section: 13.1 — Workload Targets
+# Section: 13.1 - Workload Targets
 # Last updated: 2026-06-02
 #
 # Architecture:
@@ -18,7 +18,7 @@
 #   uses the `static_web_app_api_key` output from landing-zones/online-p1.
 
 # ---------------------------------------------------------------------------
-# Data sources — existing online-p1 resources from Section 9 (referenced for
+# Data sources - existing online-p1 resources from Section 9 (referenced for
 # diagnostic settings + future contact-form Function deployment)
 # ---------------------------------------------------------------------------
 
@@ -97,7 +97,7 @@ resource "azurerm_storage_queue" "contact_form" {
 }
 
 # ---------------------------------------------------------------------------
-# Diagnostic settings — queue plane → Platform LAW for KQL visibility
+# Diagnostic settings - queue plane → Platform LAW for KQL visibility
 # ---------------------------------------------------------------------------
 
 resource "azurerm_monitor_diagnostic_setting" "online_p1_queue" {

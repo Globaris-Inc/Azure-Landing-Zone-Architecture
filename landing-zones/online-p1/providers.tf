@@ -1,5 +1,5 @@
 # Purpose: Provider configuration for the online-p1 landing zone root module.
-# Section: 9 — Landing Zone Spokes
+# Section: 9 - Landing Zone Spokes
 # Last updated: 2026-07-10
 #
 # Apply order: After platform/connectivity (primary hub VNet ID and firewall IP required).

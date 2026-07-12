@@ -1,6 +1,6 @@
 # Purpose: Outputs for the Connectivity platform root module.
-# Section: 8 — Standard Platform Components
-# Last updated: 2026-06-27 (G6: gated primary_bastion_id/dns_name outputs — ADR-015)
+# Section: 8 - Standard Platform Components
+# Last updated: 2026-06-27 (G6: gated primary_bastion_id/dns_name outputs - ADR-015)
 
 output "connectivity_primary_rg_name" {
   description = "Name of the primary connectivity resource group."
@@ -87,7 +87,7 @@ output "primary_dns_resolver_inbound_ips" {
 }
 
 # ---------------------------------------------------------------------------
-# Section 4 — Private DNS outputs consumed by landing zone dns_links.tf files
+# Section 4 - Private DNS outputs consumed by landing zone dns_links.tf files
 # ---------------------------------------------------------------------------
 
 output "private_dns_rg_name" {

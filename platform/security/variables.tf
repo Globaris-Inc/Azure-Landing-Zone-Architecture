@@ -1,5 +1,5 @@
 # Purpose: Input variables for the Security platform root module.
-# Section: 8 — Standard Platform Components / extended in Section 6 (Defender + Sentinel)
+# Section: 8 - Standard Platform Components / extended in Section 6 (Defender + Sentinel)
 # Last updated: 2026-05-29
 
 variable "tenant_id" {
@@ -34,7 +34,7 @@ variable "environment" {
 # ---------------------------------------------------------------------------
 
 variable "security_law_retention_days" {
-  description = "Log Analytics workspace data retention period in days (30–730) for the RBAC-isolated Security workspace."
+  description = "Log Analytics workspace data retention period in days (30-730) for the RBAC-isolated Security workspace."
   type        = number
   default     = 90
 }
@@ -58,7 +58,7 @@ variable "security_contact_email" {
 }
 
 # ---------------------------------------------------------------------------
-# Section 6 — Defender for Cloud extension + regulatory compliance
+# Section 6 - Defender for Cloud extension + regulatory compliance
 # ---------------------------------------------------------------------------
 
 variable "root_management_group_id" {
@@ -80,7 +80,7 @@ variable "enable_mdc_event_hub_export" {
 }
 
 variable "event_hub_namespace_capacity" {
-  description = "Throughput units (1–20) for the MDC export Event Hub Namespace. 1 unit = 1 MB/s ingress + 2 MB/s egress (~2.5 GB/day at saturation)."
+  description = "Throughput units (1-20) for the MDC export Event Hub Namespace. 1 unit = 1 MB/s ingress + 2 MB/s egress (~2.5 GB/day at saturation)."
   type        = number
   default     = 1
   validation {
@@ -90,7 +90,7 @@ variable "event_hub_namespace_capacity" {
 }
 
 # ---------------------------------------------------------------------------
-# Section 6 — Sentinel data connectors + UEBA
+# Section 6 - Sentinel data connectors + UEBA
 # ---------------------------------------------------------------------------
 
 variable "enable_aad_diagnostics" {
@@ -142,11 +142,11 @@ variable "sentinel_owner_group_object_id" {
 }
 
 # ---------------------------------------------------------------------------
-# Section 6 — Analytics rules
+# Section 6 - Analytics rules
 # ---------------------------------------------------------------------------
 
 variable "analytics_rule_lookback_minutes" {
-  description = "Default query lookback window for scheduled analytics rules, in minutes. Most POC rules run every 5–60 minutes; smaller windows reduce duplicate alerts."
+  description = "Default query lookback window for scheduled analytics rules, in minutes. Most POC rules run every 5-60 minutes; smaller windows reduce duplicate alerts."
   type        = number
   default     = 60
 }
@@ -158,7 +158,7 @@ variable "analytics_rule_query_frequency_minutes" {
 }
 
 # ---------------------------------------------------------------------------
-# Section 6 — Watchlists
+# Section 6 - Watchlists
 # ---------------------------------------------------------------------------
 
 variable "vip_user_object_ids" {

@@ -1,20 +1,20 @@
-# Purpose: Cost-generating patterns — five deliberate FinOps anti-patterns
+# Purpose: Cost-generating patterns - five deliberate FinOps anti-patterns
 #          that drive Azure Advisor + Cost Management recommendations and
 #          §6 Defender for Cloud "right-size" signals.
-# Section: 13.4 — Cost-Generating Patterns
+# Section: 13.4 - Cost-Generating Patterns
 # Last updated: 2026-06-05
 #
 # Anti-patterns shipped:
 #   1. Oversized idle VM (var.cost_pattern_vm_size, default Standard_D4s_v5)
-#      tagged Optimization=Candidate — drives the Advisor downsize recommendation.
-#   2. Unattached 32 GB Premium SSD — drives Advisor delete-unattached-disk.
-#   3. Hot-tier storage with stale blobs — drives Advisor lifecycle-policy
+#      tagged Optimization=Candidate - drives the Advisor downsize recommendation.
+#   2. Unattached 32 GB Premium SSD - drives Advisor delete-unattached-disk.
+#   3. Hot-tier storage with stale blobs - drives Advisor lifecycle-policy
 #      recommendation once the 7-day no-access window elapses.
-#   4. Ungoverned RG with empty tags — Section 7 Modify policy detects the
+#   4. Ungoverned RG with empty tags - Section 7 Modify policy detects the
 #      missing FinOps tags and AzureActivity records the remediation.
 #   5. RG-scope consumption budget set to var.cost_pattern_budget_amount_usd
 #      (default $1) so every month's spend trips the 50/75/100% notifications
-#      on day 1 — the demo signal for cost-overrun alerting.
+#      on day 1 - the demo signal for cost-overrun alerting.
 #
 # DEVIATIONS vs PROMPT.md:
 #   - ADR-003 collapsed the sandbox subscription into the Landing Zones sub.
@@ -28,7 +28,7 @@
 #     layer down in <5 min per §13.6.
 
 # ---------------------------------------------------------------------------
-# Locals — 13.4 sub-gate + naming
+# Locals - 13.4 sub-gate + naming
 # ---------------------------------------------------------------------------
 
 locals {
@@ -56,7 +56,7 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# Resource groups — governed + intentionally ungoverned
+# Resource groups - governed + intentionally ungoverned
 # ---------------------------------------------------------------------------
 
 resource "azurerm_resource_group" "cost_patterns" {
@@ -66,7 +66,7 @@ resource "azurerm_resource_group" "cost_patterns" {
   tags     = local.cost_patterns_tags
 }
 
-# Anti-pattern #4 — the Section 7 Modify policy at MG scope adds the missing
+# Anti-pattern #4 - the Section 7 Modify policy at MG scope adds the missing
 # FinOps tags shortly after creation; the policy-evaluation entry in
 # AzureActivity is the demo signal. Empty tags map is intentional.
 resource "azurerm_resource_group" "ungoverned" {
@@ -76,14 +76,14 @@ resource "azurerm_resource_group" "ungoverned" {
   tags     = {}
 
   lifecycle {
-    # The Section 7 Modify policy will mutate tags out-of-band — accept the
+    # The Section 7 Modify policy will mutate tags out-of-band - accept the
     # drift rather than fighting it on every plan.
     ignore_changes = [tags]
   }
 }
 
 # ---------------------------------------------------------------------------
-# Isolated VNet for the cost-pattern VM — no peering, no firewall UDR, no PE
+# Isolated VNet for the cost-pattern VM - no peering, no firewall UDR, no PE
 # ---------------------------------------------------------------------------
 
 resource "azurerm_virtual_network" "cost_patterns" {
@@ -153,7 +153,7 @@ resource "azurerm_network_interface" "oversized_vm" {
 }
 
 # ---------------------------------------------------------------------------
-# Ephemeral SSH keypair — public key on the VM, private key as sensitive output
+# Ephemeral SSH keypair - public key on the VM, private key as sensitive output
 # ---------------------------------------------------------------------------
 
 resource "tls_private_key" "oversized_vm" {
@@ -163,7 +163,7 @@ resource "tls_private_key" "oversized_vm" {
 }
 
 # ---------------------------------------------------------------------------
-# Anti-pattern #1 — oversized idle VM (Standard_D4s_v5 by default)
+# Anti-pattern #1 - oversized idle VM (Standard_D4s_v5 by default)
 # ---------------------------------------------------------------------------
 
 resource "azurerm_linux_virtual_machine" "oversized_idle" {
@@ -202,7 +202,7 @@ resource "azurerm_linux_virtual_machine" "oversized_idle" {
 }
 
 # ---------------------------------------------------------------------------
-# Anti-pattern #2 — unattached 32 GB Premium SSD
+# Anti-pattern #2 - unattached 32 GB Premium SSD
 # ---------------------------------------------------------------------------
 
 resource "azurerm_managed_disk" "unattached" {
@@ -224,7 +224,7 @@ resource "azurerm_managed_disk" "unattached" {
 }
 
 # ---------------------------------------------------------------------------
-# Anti-pattern #3 — Hot-tier storage with stale blobs
+# Anti-pattern #3 - Hot-tier storage with stale blobs
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_account" "cost_pattern_hot" {
@@ -265,7 +265,7 @@ resource "azurerm_storage_container" "stale" {
   container_access_type = "private"
 }
 
-# Five 4 KB sentinel blobs — uploaded once and intentionally never read again.
+# Five 4 KB sentinel blobs - uploaded once and intentionally never read again.
 # After 7 days, the storage account's "last access tracking" surfaces them in
 # the Storage Insights "infrequently accessed blobs" recommendation.
 resource "azurerm_storage_blob" "stale" {
@@ -282,11 +282,11 @@ resource "azurerm_storage_blob" "stale" {
   storage_container_name = azurerm_storage_container.stale[0].name
   type                   = "Block"
   access_tier            = "Hot"
-  source_content         = "synthetic stale payload — section 13.4 anti-pattern — ${each.value} — do not access"
+  source_content         = "synthetic stale payload - section 13.4 anti-pattern - ${each.value} - do not access"
 }
 
 # ---------------------------------------------------------------------------
-# Anti-pattern #5 — deliberately-low budget at RG scope ($1/mo by default)
+# Anti-pattern #5 - deliberately-low budget at RG scope ($1/mo by default)
 # ---------------------------------------------------------------------------
 
 resource "azurerm_consumption_budget_resource_group" "sandbox_overrun" {

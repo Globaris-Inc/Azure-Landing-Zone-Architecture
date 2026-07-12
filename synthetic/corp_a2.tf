@@ -1,5 +1,5 @@
-# Purpose: corp-a2 placeholder — DR cold standby.
-# Section: 13.1 — Workload Targets
+# Purpose: corp-a2 placeholder - DR cold standby.
+# Section: 13.1 - Workload Targets
 # Last updated: 2026-06-02
 #
 # corp-a2 is the cold-standby spoke for the failover drill demo. Section 13.1
@@ -9,6 +9,6 @@
 #
 # Failover demo wiring (ASR replication policy + corp-a1 SQL geo-replication
 # to corp-a2 SQL) lands in §13.5 (Demo Orchestration → 02-failover-drill.sh)
-# in a future session — not today.
+# in a future session - not today.
 #
 # Intentionally empty.

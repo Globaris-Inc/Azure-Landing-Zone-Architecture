@@ -1,7 +1,7 @@
-# Purpose: Section 6 — Microsoft Sentinel data connectors, UEBA, watchlists,
+# Purpose: Section 6 - Microsoft Sentinel data connectors, UEBA, watchlists,
 #          analytics rules, automation rules, and workbooks. The Sentinel
 #          workspace itself is onboarded in main.tf (Section 8).
-# Section: 6 — Defender for Cloud + Sentinel Tuning
+# Section: 6 - Defender for Cloud + Sentinel Tuning
 # Last updated: 2026-05-29
 #
 # Apply order: After azurerm_sentinel_log_analytics_workspace_onboarding.this
@@ -15,7 +15,7 @@
 # into Sentinel via a connector. Section 4 sends NSG flow logs to the platform
 # LA workspace; the hub Azure Firewall sends its diagnostics there too. The
 # corresponding analytics rules below use the cross-workspace `workspace()`
-# KQL function to query the platform workspace from the Security workspace —
+# KQL function to query the platform workspace from the Security workspace -
 # preferred for POC since it avoids duplicate log ingestion costs (~$2.3/GB).
 
 resource "azurerm_sentinel_data_connector_azure_active_directory" "this" {
@@ -53,7 +53,7 @@ resource "azurerm_sentinel_data_connector_microsoft_defender_advanced_threat_pro
   depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.this]
 }
 
-# Microsoft Threat Intelligence connector — feeds ThreatIntelligenceIndicator
+# Microsoft Threat Intelligence connector - feeds ThreatIntelligenceIndicator
 # table from the Microsoft TI feed (free tier of MS Threat Intel for Sentinel).
 resource "azurerm_sentinel_data_connector_threat_intelligence" "this" {
   count = var.enable_ti_connector ? 1 : 0
@@ -66,14 +66,14 @@ resource "azurerm_sentinel_data_connector_threat_intelligence" "this" {
 }
 
 # ===========================================================================
-# 2. UEBA + Entity Analytics (azapi — no native azurerm resource)
+# 2. UEBA + Entity Analytics (azapi - no native azurerm resource)
 # ===========================================================================
 #
 # UNVERIFIED 2026-05-29: API version 2024-09-01 is the GA version published
 # on docs.microsoft.com at time of writing. Confirm against the latest
 # Microsoft.SecurityInsights/settings resource provider versions before apply
 # (`az provider show -n Microsoft.SecurityInsights --query resourceTypes`).
-# Entity Analytics is a prerequisite for UEBA — the explicit depends_on
+# Entity Analytics is a prerequisite for UEBA - the explicit depends_on
 # ordering ensures it lands first.
 
 resource "azapi_resource" "entity_analytics" {
@@ -113,13 +113,13 @@ resource "azapi_resource" "ueba" {
 }
 
 # ===========================================================================
-# 3. Watchlists — VIPs + High-Value Assets
+# 3. Watchlists - VIPs + High-Value Assets
 # ===========================================================================
 #
 # Watchlists join against detection KQL via the _GetWatchlist() function:
 #   SigninLogs
 #   | join kind=inner (_GetWatchlist('VIPUsers')) on $left.UserId == $right.UserObjectId
-# Population is conditional — empty input lists skip the watchlist entirely.
+# Population is conditional - empty input lists skip the watchlist entirely.
 
 resource "azurerm_sentinel_watchlist" "vip_users" {
   count = length(var.vip_user_object_ids) > 0 ? 1 : 0
@@ -178,13 +178,13 @@ resource "azurerm_sentinel_watchlist_item" "high_value_assets" {
 }
 
 # ===========================================================================
-# 4. Analytics rules — 10 scheduled + 1 MS incident creation
+# 4. Analytics rules - 10 scheduled + 1 MS incident creation
 # ===========================================================================
 #
 # Each scheduled rule lives behind a logical key in local.analytics_rules.
 # The KQL is hand-rolled to mirror the equivalent Azure/Azure-Sentinel template
 # but keeps the rule self-contained so it deploys cleanly in any tenant. Real
-# detections need tuning against actual sign-in / activity volume — see
+# detections need tuning against actual sign-in / activity volume - see
 # sentinel/tuning.md for the threshold rationale.
 
 locals {
@@ -197,7 +197,7 @@ locals {
 
     brute_force_entra = {
       display_name        = "Multiple failed Entra ID sign-ins from a single user (brute force)"
-      description         = "Detects ≥10 failed interactive sign-ins for the same UserPrincipalName within 5 minutes — typical of password spray or credential stuffing."
+      description         = "Detects ≥10 failed interactive sign-ins for the same UserPrincipalName within 5 minutes - typical of password spray or credential stuffing."
       severity            = "Medium"
       query_frequency     = "PT5M"
       query_period        = "PT5M"
@@ -217,7 +217,7 @@ locals {
 
     blocked_country_signin = {
       display_name        = "Successful sign-in from outside approved countries"
-      description         = "Successful sign-in originating from a country not on the approved list — bypass attempt of CA-005 (Geo-block named location) or an emergency-access account in transit."
+      description         = "Successful sign-in originating from a country not on the approved list - bypass attempt of CA-005 (Geo-block named location) or an emergency-access account in transit."
       severity            = "High"
       query_frequency     = "PT15M"
       query_period        = "PT15M"
@@ -238,7 +238,7 @@ locals {
 
     legacy_auth_attempt = {
       display_name        = "Legacy authentication attempt"
-      description         = "Sign-in attempt using a legacy authentication protocol (POP/IMAP/SMTP basic, Other clients). CA-002 should be blocking these — alert if any slip through."
+      description         = "Sign-in attempt using a legacy authentication protocol (POP/IMAP/SMTP basic, Other clients). CA-002 should be blocking these - alert if any slip through."
       severity            = "Medium"
       query_frequency     = "PT30M"
       query_period        = "PT30M"
@@ -461,7 +461,7 @@ resource "azurerm_sentinel_alert_rule_scheduled" "this" {
 resource "azurerm_sentinel_alert_rule_ms_security_incident" "mdc_high" {
   name                       = "ar-mdc-high-${var.org_prefix}-${var.environment}"
   log_analytics_workspace_id = module.security_law.resource_id
-  display_name               = "Microsoft Defender for Cloud — high-severity alert"
+  display_name               = "Microsoft Defender for Cloud - high-severity alert"
   product_filter             = "Azure Security Center"
   severity_filter            = ["High"]
 
@@ -471,11 +471,11 @@ resource "azurerm_sentinel_alert_rule_ms_security_incident" "mdc_high" {
 }
 
 # ===========================================================================
-# 5. Automation rules — auto-assign + TI enrichment tag
+# 5. Automation rules - auto-assign + TI enrichment tag
 # ===========================================================================
 #
 # Production playbooks (Logic Apps that quarantine MDE devices, enrich with
-# Recorded Future, etc.) are out of scope for this section — they require app
+# Recorded Future, etc.) are out of scope for this section - they require app
 # registrations + MDE API permissions tracked under Section 13 (synthetic
 # workload + signal generation).
 
@@ -494,7 +494,7 @@ resource "azurerm_sentinel_automation_rule" "auto_assign" {
   action_incident {
     order = 1
     # UNVERIFIED 2026-05-29: azurerm 4.71 action_incident.owner_id assignment
-    # path — confirm against provider docs before apply; some 4.x releases
+    # path - confirm against provider docs before apply; some 4.x releases
     # require nesting under a separate owner{} sub-block.
     owner_id = var.sentinel_owner_group_object_id
     labels   = ["auto-assigned"]
@@ -529,7 +529,7 @@ resource "azurerm_sentinel_automation_rule" "ti_enrichment_tag" {
 }
 
 # ===========================================================================
-# 6. Workbooks — Azure Activity, Identity & Access, Azure Firewall, Investigation
+# 6. Workbooks - Azure Activity, Identity & Access, Azure Firewall, Investigation
 # ===========================================================================
 #
 # DEVIATION: The four built-in Sentinel workbooks live in the Sentinel Content
@@ -575,7 +575,7 @@ resource "azurerm_application_insights_workbook" "sentinel" {
   name                = random_uuid.workbooks[each.key].result
   resource_group_name = azurerm_resource_group.security.name
   location            = var.primary_location
-  display_name        = "Sentinel — ${each.value}"
+  display_name        = "Sentinel - ${each.value}"
   source_id           = lower(module.security_law.resource_id)
   category            = "sentinel"
   data_json           = local.workbook_placeholder_json

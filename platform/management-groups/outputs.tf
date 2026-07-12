@@ -1,10 +1,10 @@
 # Purpose: Outputs for Management Group hierarchy root module.
-# Section: 2 — Management Group Hierarchy
+# Section: 2 - Management Group Hierarchy
 # Last updated: 2026-05-06
 #
 # Management Group resource IDs are deterministic:
 #   /providers/Microsoft.Management/managementGroups/{id}
-# They do not require a data source lookup — downstream modules can construct
+# They do not require a data source lookup - downstream modules can construct
 # them from the known MG IDs in the architecture definition.
 
 output "management_group_ids" {
@@ -25,7 +25,7 @@ output "management_group_ids" {
 }
 
 output "alz_module_outputs" {
-  description = "Full output object from the avm-ptn-alz module — useful for debugging policy assignments and archetype details."
+  description = "Full output object from the avm-ptn-alz module - useful for debugging policy assignments and archetype details."
   value       = module.alz_management_groups
   sensitive   = false
 }

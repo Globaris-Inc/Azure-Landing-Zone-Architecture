@@ -1,9 +1,9 @@
-# Purpose: Section 6 — Defender for Cloud extension.
+# Purpose: Section 6 - Defender for Cloud extension.
 #          Adds the remaining Defender plans, MDC continuous export to the
 #          Security LA workspace and an Event Hub (SIEM-ready), and assigns the
 #          NIST SP 800-53 R5 + CIS Azure Foundations 2.0 built-in policy
 #          initiatives at the Globaris root management group scope.
-# Section: 6 — Defender for Cloud + Sentinel Tuning
+# Section: 6 - Defender for Cloud + Sentinel Tuning
 # Last updated: 2026-07-06
 #
 # Apply order: After platform/management-groups (root MG must exist for the
@@ -17,7 +17,7 @@
 locals {
   # Additional Defender for Cloud resource types enabled on the Security sub.
   # The four foundational plans (VirtualMachines/P2, StorageAccounts, KeyVaults,
-  # Arm) are already enabled in main.tf — this set adds the workload-tier
+  # Arm) are already enabled in main.tf - this set adds the workload-tier
   # plans and Defender CSPM.
   #
   # resource_type values are taken from the azurerm_security_center_subscription_pricing
@@ -41,10 +41,10 @@ locals {
   # VERIFIED 2026-07-06 (via `az policy set-definition show`, both GUIDs confirmed):
   #   179d1daa-458f-4e47-8086-2a68d0d6c38f = "NIST SP 800-53 Rev. 5" (initiative v14.19.0)
   #   06f19060-9e68-4070-92ca-f15cc126059e = "CIS Microsoft Azure Foundations Benchmark
-  #     v2.0.0" (initiative v1.10.0) — this GUID IS the intended v2.0.0 benchmark.
+  #     v2.0.0" (initiative v1.10.0) - this GUID IS the intended v2.0.0 benchmark.
   # Neither initiative has any required parameter without a default (0 of 122 each),
   # so the parameterless assignment below supplies everything needed. GUIDs are
-  # correct as-is — do not change.
+  # correct as-is - do not change.
   regulatory_compliance_initiatives = {
     nist_sp_800_53_r5 = {
       definition_id = "/providers/Microsoft.Authorization/policySetDefinitions/179d1daa-458f-4e47-8086-2a68d0d6c38f"
@@ -58,7 +58,7 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# Defender for Cloud — extended plans (workload + CSPM)
+# Defender for Cloud - extended plans (workload + CSPM)
 # ---------------------------------------------------------------------------
 
 resource "azurerm_security_center_subscription_pricing" "extended" {
@@ -75,7 +75,7 @@ resource "azurerm_security_center_subscription_pricing" "extended" {
 }
 
 # ---------------------------------------------------------------------------
-# Event Hub for MDC continuous export — SIEM-ready alert + recommendation stream
+# Event Hub for MDC continuous export - SIEM-ready alert + recommendation stream
 # ---------------------------------------------------------------------------
 
 resource "random_id" "mdc_eh_namespace" {
@@ -105,7 +105,7 @@ resource "azurerm_eventhub" "mdc_export" {
   name              = "evh-mdc-export"
   namespace_id      = azurerm_eventhub_namespace.mdc_export[0].id
   partition_count   = 4
-  message_retention = 1 # day — MDC alerts are streamed for downstream SIEM, not retained here
+  message_retention = 1 # day - MDC alerts are streamed for downstream SIEM, not retained here
 }
 
 # Authorisation rule the MDC export consumer uses. Listen + Send (Send is
@@ -125,11 +125,11 @@ resource "azurerm_eventhub_authorization_rule" "mdc_export" {
 }
 
 # ---------------------------------------------------------------------------
-# Defender for Cloud — continuous export automation
+# Defender for Cloud - continuous export automation
 # ---------------------------------------------------------------------------
 #
 # MDC continuous export uses azurerm_security_center_automation with two
-# action blocks — one targeting the Security LA workspace, one targeting the
+# action blocks - one targeting the Security LA workspace, one targeting the
 # Event Hub. Sources cover alerts (high/medium severity) and the full
 # assessment + sub-assessment + regulatory compliance stream.
 #
@@ -193,7 +193,7 @@ resource "azurerm_security_center_automation" "mdc_export" {
 }
 
 # ---------------------------------------------------------------------------
-# Regulatory compliance — NIST SP 800-53 R5 + CIS Azure Foundations 2.0
+# Regulatory compliance - NIST SP 800-53 R5 + CIS Azure Foundations 2.0
 # ---------------------------------------------------------------------------
 #
 # Defender for Cloud surfaces a regulatory compliance dashboard for any
@@ -204,7 +204,7 @@ resource "azurerm_security_center_automation" "mdc_export" {
 # All audit-effect policies in these initiatives produce evidence in the
 # compliance dashboard without modifying resources. The handful of
 # DeployIfNotExists / AuditIfNotExists policies need a managed identity for
-# any future remediation tasks — we attach a system-assigned identity but do
+# any future remediation tasks - we attach a system-assigned identity but do
 # not create remediation jobs in this section (Section 12 hardening).
 
 resource "azurerm_management_group_policy_assignment" "regulatory_compliance" {

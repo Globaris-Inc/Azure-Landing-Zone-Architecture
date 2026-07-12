@@ -1,5 +1,5 @@
 # Purpose: Input variables for the synthetic workload layer.
-# Section: 13 — Synthetic Workload & Telemetry Generation
+# Section: 13 - Synthetic Workload & Telemetry Generation
 # Last updated: 2026-06-02
 
 # ---------------------------------------------------------------------------
@@ -34,12 +34,12 @@ variable "secondary_location" {
 }
 
 variable "org_prefix" {
-  description = "Short org prefix used in deterministic resource names — must match the value used by landing-zones/* so data-source lookups resolve."
+  description = "Short org prefix used in deterministic resource names - must match the value used by landing-zones/* so data-source lookups resolve."
   type        = string
 }
 
 variable "environment" {
-  description = "Environment short name (e.g. poc) — must match the value used by landing-zones/*."
+  description = "Environment short name (e.g. poc) - must match the value used by landing-zones/*."
   type        = string
 }
 
@@ -54,23 +54,23 @@ variable "platform_law_workspace_id" {
 }
 
 # ---------------------------------------------------------------------------
-# 13.3 — Red-team simulator
+# 13.3 - Red-team simulator
 # ---------------------------------------------------------------------------
 
 variable "red_team_geo_location" {
-  description = "Azure region for the impossible-travel west pole — must be outside the §5 approved_sign_in_countries list (US/CA/GB by default) so the §6 blocked-country detection rule has a valid signal."
+  description = "Azure region for the impossible-travel west pole - must be outside the §5 approved_sign_in_countries list (US/CA/GB by default) so the §6 blocked-country detection rule has a valid signal."
   type        = string
   default     = "westeurope"
 }
 
 variable "honeypot_user_principal_name" {
-  description = "Tenant-resident UPN of the disabled honeypot user (e.g. svc-honeypot@<tenant>.onmicrosoft.com). Must be created manually as a Disabled account — see synthetic/README.md §13.3 pre-reqs. Empty string disables the sign-in / impossible-travel red-team scenarios; the storage / KV / public-IP scenarios still ship."
+  description = "Tenant-resident UPN of the disabled honeypot user (e.g. svc-honeypot@<tenant>.onmicrosoft.com). Must be created manually as a Disabled account - see synthetic/README.md §13.3 pre-reqs. Empty string disables the sign-in / impossible-travel red-team scenarios; the storage / KV / public-IP scenarios still ship."
   type        = string
   default     = ""
 }
 
 # ---------------------------------------------------------------------------
-# 13.4 — Cost-generating patterns
+# 13.4 - Cost-generating patterns
 # ---------------------------------------------------------------------------
 
 variable "cost_pattern_vm_size" {
@@ -86,7 +86,7 @@ variable "cost_pattern_vm_admin_username" {
 }
 
 variable "cost_pattern_budget_amount_usd" {
-  description = "Monthly cap (USD) on the synthetic cost-pattern resource group. Deliberately low so it trips on day 1 — PROMPT.md §13.4 calls for a 'budget set deliberately below projected spend on sandbox sub'."
+  description = "Monthly cap (USD) on the synthetic cost-pattern resource group. Deliberately low so it trips on day 1 - PROMPT.md §13.4 calls for a 'budget set deliberately below projected spend on sandbox sub'."
   type        = number
   default     = 1
 }
@@ -98,17 +98,17 @@ variable "cost_pattern_budget_alert_emails" {
 }
 
 # ---------------------------------------------------------------------------
-# 13.6 — Cost guardrails
+# 13.6 - Cost guardrails
 # ---------------------------------------------------------------------------
 
 variable "cost_guardrails_monthly_cap_usd" {
-  description = "Subscription budget cap (USD/mo) on Layer=Synthetic spend. Default 150 ≈ $5/day × 30 — the §13.6 PROMPT.md daily cap expressed at the monthly granularity Azure consumption budgets support. Forecasted-100% notification routes to the stop-synthetic-compute runbook via action group webhook."
+  description = "Subscription budget cap (USD/mo) on Layer=Synthetic spend. Default 150 ≈ $5/day × 30 - the §13.6 PROMPT.md daily cap expressed at the monthly granularity Azure consumption budgets support. Forecasted-100% notification routes to the stop-synthetic-compute runbook via action group webhook."
   type        = number
   default     = 150
 }
 
 variable "cost_guardrails_alert_emails" {
-  description = "Email recipients for the §13.6 budget Forecasted 50%/100% notifications. Empty list silently skips the action group + budget — the Automation Account + runbooks + weekly schedule still ship for manual operator use."
+  description = "Email recipients for the §13.6 budget Forecasted 50%/100% notifications. Empty list silently skips the action group + budget - the Automation Account + runbooks + weekly schedule still ship for manual operator use."
   type        = list(string)
   default     = []
 }
