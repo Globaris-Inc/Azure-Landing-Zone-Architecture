@@ -37,6 +37,105 @@
 
 <!-- Newest at the top. -->
 
+### ADR-041: Post-teardown MG-scope RBAC bridge for the B0a redeploy - two time-boxed tenant-root grants (UAA + Cost Management Contributor), bootstrap rebind after the MG tree returns, no Owner re-grant ever
+
+- **Date:** 2026-07-12
+- **Section:** Banking wave B0a (redeploy) / refines ADR-021, advances OQ-008
+- **Status:** Accepted (b0a pre-clearance precondition PC-2/PC-3; see docs/preclearance/b0a-redeploy.md)
+- **Decision makers:** claude (architect); operator executes the grants
+
+**Context:**
+The 2026-07-11 teardown deleted the globaris MG tree, and with it every MG-scoped role assignment on the
+CI SP: bootstrap rows 2/3/4 (Resource Policy Contributor + UAA @ globaris, UAA @ landingzones) and the
+3 standing OQ-008 Owner @ MG grants. Live enumeration (2026-07-12, direct per-scope queries) confirms
+the SP retains Contributor + UAA at ALL FIVE subscriptions, Storage Blob Data Contributor at the state
+SA, and Management Group Contributor at the Tenant Root Group - but nothing that can write policy
+objects, role assignments, or consumption budgets at MG scope. The B0a roots need exactly that:
+management-groups writes the whole ALZ policy engine at the recreated MG scopes; management assigns
+tag-governance + a remediation role assignment @ globaris and creates 3 MG-scope budgets; security
+assigns NIST/CIS @ globaris. Bootstrap rows 2/3/4 cannot be re-applied first because their scopes do
+not exist until management-groups runs (the documented bootstrap-ordering caveat), and the original
+first deploy escaped this only because the SP then held tenant-root Owner (ADR-006 era). A second gap
+surfaced during this analysis: the ADR-021 scoped set NEVER covered Microsoft.Consumption/budgets at MG
+scope - it was silently masked by the standing Owner @ globaris.
+
+**Decision:**
+1. Bridge the window with two TIME-BOXED grants to the CI SP at the Tenant Root Group scope, created
+   manually by the operator before the B0a applies:
+   - **User Access Administrator** (verified live: `*/read, Microsoft.Authorization/*, Microsoft.Support/*`)
+     covers every policy definition / set definition / assignment / exemption write AND role-assignment
+     write at all recreated MG scopes and below.
+   - **Cost Management Contributor** (verified live: `Microsoft.Consumption/*, Microsoft.CostManagement/*`)
+     covers the MG-scope budget writes.
+2. After management-groups is green, run the FULL local bootstrap re-apply: rows 2/3/4 rebind at the
+   recreated globaris/landingzones scopes (they are dangling in bootstrap state), and the known WORM
+   immutability-policy drift reconciles.
+3. Then REVOKE the temp UAA @ tenant root. The Cost Management Contributor grant's durable disposition
+   is OQ-041 (recommended: a new bootstrap row at globaris MG scope, revoking the tenant-root temp).
+4. The 3 Owner @ MG grants are NEVER re-created. Their deletion is the OQ-008 scope-down finally taking
+   effect; B0a is the live validation run of the ADR-021 scoped set. Any 403 during B0a gets the precise
+   missing action/scope added (ADR-021 rule), not an Owner re-grant.
+
+**Alternatives considered:**
+- Re-grant Owner @ globaris/platform/connectivity - rejected: reopens OQ-008, discards the accidental
+  but real scope-down win the teardown delivered.
+- Two-pass management-groups apply (create MGs, fail on policy, rebind bootstrap, rerun) - rejected:
+  deliberately shipping a known-failing apply violates the one-disposition-per-failure-set discipline
+  (LESSON 59) and the user's failure budget.
+- Standing (permanent) UAA @ Tenant Root Group in bootstrap - rejected: broader than the globaris-scoped
+  ADR-021 posture with no offsetting benefit once rows 2/3/4 rebind.
+
+**Consequences:**
+- Positive: single-pass B0a applies; ADR-021 finally gets its live validation without the Owner crutch;
+  the Consumption gap is now known and tracked (OQ-041) instead of Owner-masked.
+- Negative / trade-offs: temp UAA @ tenant root is self-escalation-capable for its window (same class as
+  the accepted UAA @ globaris, one level broader) - mitigated by the time-box and the revoke step; two
+  more manual operator actions.
+- Follow-ups required: OQ-041 resolution; the eventual banking teardown needs the same MG-scope rights
+  present at destroy time (rows 2/3 + the OQ-041 row cover it while the MGs still exist, since
+  management destroys before management-groups); optional lifecycle hardening from the pre-clearance
+  (log_analytics_workspace permanently_delete_on_destroy = true).
+
+### ADR-040: Remove the deprecated KeyVaults and Arm Defender plans from the security root for the redeploy (supersedes the ADR-034 hold-as-latent-debt and the ADR-035 subplan pins for those two entries)
+
+- **Date:** 2026-07-12
+- **Section:** 6 (Defender/Sentinel) / Banking wave B0a redeploy
+- **Status:** Accepted (b0a pre-clearance precondition PC-1)
+- **Decision makers:** claude (architect); cloud-engineer implements
+
+**Context:**
+ADR-034 held the deprecated `KeyVaults` and `Arm` Defender plans as latent debt because they were
+live-Standard and in state, where removing them meant a posture downgrade and the 2026-07-05 API block
+only stops NEW Standard enablement. ADR-035 then pinned their Azure-assigned subplans to stop a
+ForceNew recreate that the block would have failed. The teardown inverted every premise: verified live
+2026-07-12, ALL Defender plans in the security sub are Free and the state is empty. On redeploy,
+`azurerm_security_center_subscription_pricing.this["KeyVaults"|"Arm"]` would be a fresh Standard PUT =
+new enablement of a deprecated plan = deterministic 400 ("plan is deprecated and can no longer be
+enabled"), failing every security apply.
+
+**Decision:**
+Remove the `KeyVaults` and `Arm` entries from `local.defender_basic_plans` in
+`platform/security/main.tf` (with a comment recording this ADR). Keep
+`StorageAccounts = "DefenderForStorageV2"` pinned (ADR-035 logic still applies to it). The Defender
+release-notes recheck (2026-07-12) found no additional blocked plans beyond the five of 2026-07-05;
+all remaining configured plans are current.
+
+**Alternatives considered:**
+- Keep the entries and accept the failed resources - rejected: guarantees a partial apply on a root
+  with a strict failure budget.
+- Gate behind default-false flags - rejected: the block is permanent, not tenant-conditional; a flag
+  implies a re-enable path that does not exist.
+
+**Consequences:**
+- Positive: the security redeploy plan is clean; the latent debt ADR-034 carried is retired rather
+  than inherited by the banking estate.
+- Negative / trade-offs: no Defender for Key Vault / Resource Manager coverage on the redeployed sub -
+  identical to the forced end-state Microsoft's deprecation imposes; successor coverage is the
+  Defender CSPM plan (already Standard in config).
+- Follow-ups required: cloud-engineer edit + reviewer pass before the B0a security apply (PC-1);
+  standing rule stays - re-audit the Defender plan list against current release notes in every
+  pre-clearance that touches pricing.
+
 ### ADR-039: Adopt the Enterprise Azure Banking Platform as the next build on the existing landing zone; defer the AWS-Architecture rebuild; POC-scale deploys with production design targets documented; reuse the platform estate, do not rebuild it
 
 - **Date:** 2026-07-12

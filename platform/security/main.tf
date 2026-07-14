@@ -37,15 +37,15 @@ locals {
   # leaving subplan unset made config null vs state <value> on a ForceNew field,
   # which forced a destroy/recreate of all three plans (ref ADR-035).
   #
-  # KeyVaults and Arm are both deprecated for NEW enablement as of 2026-07-05,
-  # but they are held here as-is on purpose: both are already live-Standard and
-  # in Terraform state (ref ADR-034 / OQ-028). They must NOT be re-PUT or
-  # recreated - removing or re-enabling them would fail. Pinning the subplan
-  # keeps config == state so the plan is a no-op. Leave them in place.
+  # KeyVaults and Arm were REMOVED for the post-teardown redeploy (ADR-040,
+  # inverts ADR-034's hold-as-latent-debt logic): the 2026-07-11 teardown reset
+  # every plan in the security sub to Free, so re-applying them Standard would
+  # be NEW enablement of plans Microsoft blocked for new enablement on
+  # 2026-07-05 - a deterministic 400 at PUT. ADR-034's hold only applied while
+  # they were live-Standard and in state. Do not re-add them; their successor
+  # coverage is tracked in ADR-040 / OQ-028.
   defender_basic_plans = {
     StorageAccounts = "DefenderForStorageV2"
-    KeyVaults       = "PerKeyVault"
-    Arm             = "PerSubscription"
   }
 }
 

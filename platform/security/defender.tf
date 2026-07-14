@@ -16,9 +16,11 @@
 
 locals {
   # Additional Defender for Cloud resource types enabled on the Security sub.
-  # The four foundational plans (VirtualMachines/P2, StorageAccounts, KeyVaults,
-  # Arm) are already enabled in main.tf - this set adds the workload-tier
-  # plans and Defender CSPM.
+  # The foundational plans (VirtualMachines/P2, StorageAccounts) are enabled in
+  # main.tf - this set adds the workload-tier plans and Defender CSPM.
+  # (KeyVaults and Arm were removed from main.tf per ADR-040: deprecated for
+  # new enablement since 2026-07-05; CloudPosture/CSPM below carries the
+  # posture surface for both.)
   #
   # resource_type values are taken from the azurerm_security_center_subscription_pricing
   # docs. "Containers" supersedes the legacy "ContainerRegistry" + "KubernetesService"

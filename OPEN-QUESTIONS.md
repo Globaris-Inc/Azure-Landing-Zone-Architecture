@@ -31,6 +31,34 @@
 
 <!-- Newest at the top. -->
 
+### OQ-041: Durable home for the MG-scope Cost Management rights the ADR-021 scoped set never had
+
+- **Raised:** 2026-07-12 (B0a redeploy pre-clearance, architect - see ADR-041)
+- **Section:** 10a (bootstrap RBAC) / carries OQ-008 history
+- **Blocking:** Not B0a (the ADR-041 temp tenant-root grant bridges it). Blocks the post-B0a cleanup
+  step (when the temp grants are revoked) and, if unresolved, the eventual estate teardown (MG budget
+  DELETE needs the same rights).
+- **Priority:** Medium
+
+**Question:**
+The management root creates (and the teardown deletes) three consumption budgets at MG scope
+(globaris / platform / landingzones), which need `Microsoft.Consumption/budgets/*` at MG scope. The
+ADR-021 scoped role set never covered this - it worked only because the standing OQ-008 Owner @
+globaris masked it, and that Owner died with the MG tree (and is never coming back, per ADR-041).
+Where do these rights live permanently?
+
+**Options being considered:**
+- A (recommended default): add a bootstrap row - **Cost Management Contributor @ globaris MG** - to
+  `bootstrap/identity.tf`, bound in the same post-B0a full bootstrap re-apply that rebinds rows 2/3/4.
+  Least-privilege scope consistent with the ADR-021 matrix, survives for day-2 budget changes and the
+  teardown (management destroys before management-groups, so the MG scope still exists). Small
+  cloud-engineer/devsecops change + ADR-021 amendment note.
+- B: keep the ADR-041 temp **Cost Management Contributor @ Tenant Root Group** standing until the final
+  banking teardown, then revoke. Zero code change, but broader scope than needed and a
+  must-remember-at-teardown liability.
+- C: drop the MG-scope budgets from the management root (sub budgets remain). Zero RBAC need, but a
+  FinOps posture regression and a silent deviation from the deployed Section 7 design.
+
 ### OQ-040: GitHub plan reality for the banking DevSecOps wave - CodeQL, secret scanning, and the production apply gate on a private Team-plan org (GHE named in requirements)
 
 - **Raised:** 2026-07-12 (banking platform founding design, architect - see ADR-039, wave B8)
@@ -241,6 +269,15 @@ Microsoft.AAD RP re-registration timing; LESSON 41 re-audit if the start slips 2
 and QA-confirmed, the estate is torn down (wave B10 ends in teardown, as the ALZ POC did). Nothing is
 designed to persist; teardown.yml must stay current with every new banking root as waves add them.
 
+**Amended same day (user): SPLIT B0 - cheap now, expensive late.** B0a deploys the firewall-independent
+foundation roots now (management-groups, management, security - small idle cost). The expensive chain
+(connectivity with its 2 Firewall Premiums + VPN GW, then identity, then the 3 spokes with the App
+Gateway; none of these are flag-gated, all unconditional in their roots) is B0b, deferred until the first
+compute wave (B2) is reviewer-approved and ready to apply, so firewall hours burn only during the active
+build-verify window (~$86-120/day deferred). Deviation from the proven single-run order accepted; relative
+root order preserved. Banking waves authored during the gap get static review + validate only - live plans
+that data-source estate resources wait for B0b.
+
 ### OQ-033: Scope for the future Day-2 Operations and Monitoring capability (the repositioned Section 13) - platform-anchored, DINE-propagated, AMBA-based
 
 - **Raised:** 2026-07-10 (Section 13 reposition, architect - see ADR-036)
@@ -406,6 +443,13 @@ they are on deprecated plans and any future re-PUT would be blocked. What is the
 - C: Keep them enabled but move management out of `azurerm_security_center_subscription_pricing` to whatever the
   "fixed pricing model" successor path is once Microsoft documents the IaC-supported form - deferred until that
   path exists.
+
+**RESOLVED 2026-07-12 (overtaken by events - ADR-040):** the 2026-07-11 full teardown reset every plan in the
+security sub to Free, which destroyed Option A's premise (live-Standard + in state). Any redeploy re-PUT of
+KeyVaults/Arm at Standard is now NEW enablement of blocked plans = deterministic 400. B0a pre-clearance
+(docs/preclearance/b0a-redeploy.md, PC-1) removed both from `defender_basic_plans`; Defender CSPM
+(CloudPosture) carries the posture surface. Effectively Option B, forced by the teardown rather than chosen;
+the posture delta is recorded in ADR-040.
 
 ### OQ-027: Re-enable path for the firewall_threat_intel_hit cross-workspace analytics rule (fully-qualified reference + Sentinel cross-workspace RBAC)?
 
