@@ -177,21 +177,37 @@ jobs:
           # which can be admitted for the probe yet rejected seconds later because the
           # runner SNATs across a dynamic pool and IP-rule propagation is per front-end
           # node). Propagation to the data plane is still NOT instant (Azure: up to a few
-          # minutes), so poll the exact access path init uses (a blob list on the state
-          # container via the logged-in SP) until the firewall admits us, then proceed.
-          echo "Waiting for the state-SA firewall to open (probing blob list)..."
+          # minutes) AND is eventually consistent ACROSS front-end nodes: on 2026-07-16
+          # three B0a runs passed a single-success probe and still 403'd seconds later on
+          # a stale-Deny front end (one survived only via the init retry backstop; one
+          # died mid-plan where nothing retries). So a single successful probe is NOT
+          # proof of propagation. Require 3 CONSECUTIVE successes, 8s apart, on the exact
+          # access path init uses (a blob list on the state container via the logged-in
+          # SP) before declaring the firewall open. The counter resets on any failure, so
+          # we only proceed once the Allow has demonstrably settled across front ends.
+          echo "Waiting for the state-SA firewall to open (3 consecutive probe successes required)..."
           ready=0
-          for i in $(seq 1 24); do
+          consecutive=0
+          for i in $(seq 1 32); do
             if az storage blob list \
                  --account-name "$SA_NAME" --container-name "$CONTAINER" \
                  --auth-mode login --num-results 1 --only-show-errors -o none 2>/dev/null; then
-              echo "State SA reachable after ~$(( (i-1) * 8 ))s."
-              ready=1; break
+              consecutive=$((consecutive + 1))
+              echo "Probe success $consecutive/3 (~$(( (i-1) * 8 ))s elapsed)."
+              if [ "$consecutive" -ge 3 ]; then
+                echo "State SA firewall settled after ~$(( (i-1) * 8 ))s."
+                ready=1; break
+              fi
+            else
+              if [ "$consecutive" -gt 0 ]; then
+                echo "Probe FAILED after $consecutive success(es) - propagation not settled; counter reset."
+              fi
+              consecutive=0
             fi
             sleep 8
           done
           if [ "$ready" != "1" ]; then
-            echo "::error::State SA firewall did not open (default_action=Allow) within ~192s."
+            echo "::error::State SA firewall did not settle (3 consecutive probe successes) within ~256s."
             exit 1
           fi
 
@@ -204,15 +220,16 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ inputs.root }}
         # Bounded retry backstop for the state-SA firewall race (ADR-025 follow-up).
-        # The "Open state SA firewall" step flips default_action=Allow and polls a blob
-        # list until ONE front-end node admits us. But an Allow flip is eventually
-        # consistent ACROSS front-end nodes, so Terraform's own backend connection can
-        # still land on a node that has not yet received the update and 403 on
-        # "listing blobs". Since default_action=Allow only ever propagates TOWARD open
-        # (monotonic per node, and stays open for the whole job window), retrying init
-        # over ~75-90s succeeds once propagation completes. Harmless when
-        # manage_runner_ip is false — init just passes on attempt 1. A genuinely broken
-        # init still fails loudly: after the final attempt we exit non-zero.
+        # The "Open state SA firewall" step flips default_action=Allow and now requires
+        # 3 CONSECUTIVE successful blob-list probes before proceeding (2026-07-16 fix).
+        # Even so, an Allow flip is eventually consistent ACROSS front-end nodes, so
+        # Terraform's own backend connection can still land on a node that has not yet
+        # received the update and 403 on "listing blobs". Since default_action=Allow
+        # only ever propagates TOWARD open (monotonic per node, and stays open for the
+        # whole job window), retrying init over ~75-90s succeeds once propagation
+        # completes. Harmless when manage_runner_ip is false - init just passes on
+        # attempt 1. A genuinely broken init still fails loudly: after the final
+        # attempt we exit non-zero.
         run: |
           set -euo pipefail
           attempts=6
