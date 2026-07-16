@@ -148,6 +148,30 @@ appgw_capacity = 1
 # sql_aad_admin_login     = "TODO"
 
 # ---------------------------------------------------------------------------
+# Banking Spokes  (Banking wave B1 - docs/banking-platform-design.md)
+# ---------------------------------------------------------------------------
+
+# Banking spoke VNet CIDR allocations - ARCHITECT-CONFIRMED (B1 amendment ruling).
+# Full banking allocation table:
+#   10.30.0.0/16 - bank-app-p1 (eastus2, deployed)
+#   10.31.0.0/16 - RESERVED bank-app DR (centralus, design-only, NOT deployed)
+#   10.32.0.0/16 - bank-data-p1 (eastus2, deployed)
+#   10.33.0.0/16 - RESERVED bank-data DR (centralus, design-only, NOT deployed)
+# Non-overlapping with the estate (hubs 10.0/16 + 10.1/16, identity 10.2.0.0/24,
+# spokes 10.10/16, 10.11/16, 10.20/16).
+# NOTE: like the Section 9 entries above, each root declares its own
+# `spoke_address_space` variable carrying the same value as its default; these
+# entries document the estate-wide allocation map.
+bank_app_p1_spoke_address_space  = "10.30.0.0/16"
+bank_data_p1_spoke_address_space = "10.32.0.0/16"
+
+# The banking spokes reuse the Section 9 spoke inputs supplied via TF_VAR_* in CI /
+# poc.secret.tfvars locally: primary_hub_vnet_id, primary_hub_vnet_name,
+# primary_hub_rg_name, primary_firewall_private_ip, platform_law_workspace_id,
+# platform_law_customer_id, private_dns_rg_name (below), flow_log_retention_days
+# (below). No new secret values are introduced by wave B1.
+
+# ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
 # ---------------------------------------------------------------------------
 
