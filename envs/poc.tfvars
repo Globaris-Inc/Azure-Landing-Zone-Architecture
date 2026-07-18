@@ -210,6 +210,23 @@ enable_kubernetes_platform = true
 enable_messaging_platform = true
 
 # ---------------------------------------------------------------------------
+# Banking wave B4 - API platform (ADR-047)
+# ---------------------------------------------------------------------------
+# APIM Developer_1 stv2 in internal VNet mode in snet-apim (no public IP, no
+# zones), plus the forced-tunneling resolution unit: dedicated snet-apim route
+# table (0.0.0.0/0 -> firewall + ApiManagement service tag -> Internet), service
+# endpoints Sql/Storage/EventHub/KeyVault on snet-apim, and rcg-apim-egress-primary
+# on the primary hub policy. Scoped gateway-FQDN private DNS zone in rg-dns (the
+# apex azure-api.net zone is NOT SUPPORTED - ADR-047). Flag defaults false in the
+# root (LESSON 42); this reviewed-commit entry is the flag supply (ADR-044
+# precedent). ORDERING IS HARD (design doc section 7): apply platform/connectivity
+# FIRST so the RCG is live, THEN bank-app-p1 - the APIM create needs firewall
+# passage for its force-tunneled dependency traffic mid-provision. Longest create
+# of the build: 30-90+ min, occasionally ~3h (provider timeout 3h). B4 adds
+# ~$1.7/day under the ADR-045 sprint frame (EOW teardown).
+enable_api_platform = true
+
+# ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
 # ---------------------------------------------------------------------------
 

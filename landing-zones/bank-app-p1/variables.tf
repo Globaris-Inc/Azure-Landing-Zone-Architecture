@@ -1,8 +1,9 @@
 # Purpose: Input variables for the bank-app-p1 landing zone root module (banking
 #          application spoke - B1 network foundation + B2 Kubernetes platform +
-#          B3 messaging platform inputs).
-# Section: Banking waves B1-B3 (docs/banking-platform-design.md,
-#          docs/b2-aks-platform-design.md, docs/b3-messaging-platform-design.md)
+#          B3 messaging platform + B4 API platform inputs).
+# Section: Banking waves B1-B4 (docs/banking-platform-design.md,
+#          docs/b2-aks-platform-design.md, docs/b3-messaging-platform-design.md,
+#          docs/b4-apim-platform-design.md)
 # Last updated: 2026-07-18
 
 # ---------------------------------------------------------------------------
@@ -132,6 +133,22 @@ variable "enable_messaging_platform" {
   description = "Deploy the wave B3 messaging/eventing backbone: Event Hubs Standard namespace (1 TU, public access off, SAS auth off) plus the Service Bus Premium namespace (1 MU, public access off, local auth off, TLS 1.2 min) per the OQ-044 shape A resolution - Premium is the only Service Bus tier that attaches private endpoints, making both namespaces compliant with the corp deny initiative by design, no exemption (docs/b3-messaging-platform-design.md; rulings ADR-046 under the ADR-045 sprint frame, EOW teardown). Both PE into snet-private-endpoints on the shared privatelink.servicebus.windows.net zone. Default false per the LESSON 42 flag pattern."
   type        = bool
   default     = false
+}
+
+# ---------------------------------------------------------------------------
+# API platform (wave B4 - ADR-047)
+# ---------------------------------------------------------------------------
+
+variable "enable_api_platform" {
+  description = "Deploy the wave B4 API platform: APIM Developer_1 stv2 in internal VNet mode injected into snet-apim (no public IP, no zones, system-assigned MI), the dedicated snet-apim route table (0.0.0.0/0 -> firewall + ApiManagement service tag -> Internet), snet-apim service endpoints (Sql/Storage/EventHub/KeyVault), the scoped gateway-FQDN private DNS zone + apex A record + spoke/hub links, and the mock health API (docs/b4-apim-platform-design.md; ADR-047). Default false per the LESSON 42 flag pattern. ORDERING (design doc section 7): flip only AFTER platform/connectivity is applied with rcg-apim-egress-primary live - the APIM create needs firewall passage for its force-tunneled dependency traffic mid-provision."
+  type        = bool
+  default     = false
+}
+
+variable "apim_publisher_email" {
+  description = "Publisher email for the APIM instance (required by the service; surfaces in APIM notifications config). Generic non-personal alias by default - never a personal address in the repo (standing rule); override in tfvars if a real distribution list exists."
+  type        = string
+  default     = "platform-team@example.com"
 }
 
 # ---------------------------------------------------------------------------

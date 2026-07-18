@@ -37,6 +37,91 @@
 
 <!-- Newest at the top. -->
 
+### ADR-047: Wave B4 API platform rulings - APIM Developer stv2 internal mode, scoped-FQDN DNS zone (apex azure-api.net pattern rejected), forced-tunneling unit (dedicated route table + service endpoints + rcg-apim-egress-primary), no public IP, kubelet RA fix rides the batch
+
+- **Date:** 2026-07-18
+- **Section:** Banking wave B4 (API platform); resolves the parked B1 forced-tunneling caveat in
+  landing-zones/bank-app-p1/main.tf; full spec and verification log in
+  docs/b4-apim-platform-design.md
+- **Status:** Accepted (architect technical rulings; no user fork - the Developer tier is the
+  recorded intent from the founding design and the B1 snet-apim design, and the ADR-045 sprint
+  frame prices it at ~$1.6/day, so no SKU OQ is raised)
+- **Decision makers:** claude (architect)
+
+**Context:**
+B1 shipped snet-apim (10.30.1.0/24) with the stv2 NSG rules and parked one caveat: whether stv2
+forced tunneling needs an ApiManagement service-tag route. Verified today against current MS Learn
+(internal-vnet doc updated 2026-06-25; virtual-network-reference dated 2026-04-30): (1) stv2
+management-plane traffic REQUIRES a UDR for the ApiManagement service tag with next hop Internet
+when a 0.0.0.0/0 NVA route exists - the caveat is real; (2) since May 2024 internal-mode stv2
+needs NO public IP resource; (3) the common apex azure-api.net private DNS zone pattern is now
+explicitly NOT SUPPORTED - zones must be scoped to the exact instance FQDNs (a LESSON 40 class
+catch: the older community pattern validates and applies but is wrong per current guidance);
+(4) the direct management API retired March 2025; (5) classic Developer tier is current, stv2 is
+current, zones are Premium-only. Live sweep this session: Microsoft.ApiManagement RP Registered;
+zero Deny policy members target APIM at corp or landingzones (ApiManDenyPublicIP =
+AuditIfNotExists); instance name available; module avm-res-apimanagement-service still 0.9.0.
+
+**Decision:**
+1. **Instance:** APIM `Developer_1`, stv2, `virtual_network_type = "Internal"` in snet-apim, NO
+   public IP resource, NO zones, system-assigned managed identity, module
+   avm-res-apimanagement-service 0.9.0, flag `enable_api_platform` (default false, LESSON 42),
+   shared RG. One mock health API for QA; nothing else (no portal publish, no self-hosted
+   gateway, no AKS backend wiring, no custom domains at B4).
+2. **DNS:** ONE private DNS zone scoped to the exact gateway FQDN
+   (`apim-bank-app-p1-<org>-<env>.azure-api.net`) in the central rg-dns via the
+   azurerm.connectivity provider, apex A record to the APIM private VIP, links to the spoke VNet
+   and primary hub VNet. The apex azure-api.net zone is FORBIDDEN (unsupported, shadows other
+   azure-api.net consumers). portal/developer/management/scm records are design-only.
+3. **Forced tunneling is ONE unit:** (a) dedicated route table rt-apim on snet-apim carrying
+   0.0.0.0/0 -> firewall AND ApiManagement -> Internet (shared rt-spoke untouched so the
+   exception does not leak to AKS/PE subnets); (b) service endpoints Sql/Storage/EventHub/
+   KeyVault on snet-apim (Microsoft strongly recommended; dependency traffic off the tunnel);
+   (c) new RCG `rcg-apim-egress-primary` priority 310 on the PRIMARY hub policy only (ADR-044
+   pattern, enable_firewall-gated, source 10.30.1.0/24) for the remaining force-tunneled
+   dependencies: cert-validation/Entra/diagnostics/Windows-platform/Defender FQDN app rules +
+   AzureMonitor 1886,443 + NTP UDP 123 + KMS TCP 1688 network rules, destination `*` on
+   NTP/KMS to keep DNS proxy off. NSG unchanged (B1 rules match current requirements).
+4. **Ordering:** connectivity RCG apply FIRST, then the bank-app-p1 apply - an APIM create
+   behind a default-deny firewall hangs toward the 3h timeout. Long-create isolation and the
+   mid-apply-death disposition (import-based recovery if the create was in flight) per the
+   design doc section 9. Teardown designed: azurerm features api_management soft-delete purge
+   flags in the root provider.
+5. **The MANDATED kubelet AcrPull RA durable fix rides this batch** (B3 PC-3M disposition):
+   data.azurerm_kubernetes_cluster on literal deterministic name/RG strings feeds the RA
+   principal_id; the interim one-accepted-replace bar is RETIRED on merge; plans must then show
+   zero replaces.
+
+**Alternatives considered:**
+- Apex azure-api.net private zone (community pattern) - rejected: explicitly unsupported per
+  current MS Learn; breaks resolution of other azure-api.net names tenant-wide.
+- ApiManagement -> Internet route on the shared rt-spoke - rejected: applies the bypass to
+  AKS/PE subnets that never need it.
+- Full force-tunnel of dependency traffic through AZFW instead of service endpoints - rejected:
+  requires complete published IP-range allowlists per dependent service that rot (LESSON 40
+  class) and adds timeout risk to the longest create of the build.
+- Extending rcg-aks-egress-primary with APIM rules - rejected: different source prefix,
+  lifecycle, and review blast radius per wave; a dedicated RCG keeps plan bars exact.
+- Premium (zones, SLA) at POC - rejected: ~$95/day vs ~$1.6/day buys nothing the POC
+  demonstrates; Premium multi-region + zones is the recorded production design target (ADR-022
+  split). Not raised as an OQ: Developer is the standing recorded intent, not an open fork.
+- v2 tiers (Standard v2/Premium v2 VNet integration/injection) - rejected for B4: the estate
+  design and B1 subnet/NSG shape target classic stv2 injection; classic Developer is current
+  with no retirement announced. v2 is noted for future evaluation in the production design.
+
+**Consequences:**
+- Positive: the parked caveat closes with verified current requirements; zero policy exemptions;
+  zero NSG changes; the DNS ruling avoids a stale-pattern landmine; firewall evidence for QA now
+  exists in-boundary (B3 diagnostics); the kubelet cascade dies.
+- Negative / trade-offs: APIM platform dependency traffic bypasses AZFW inspection via service
+  endpoints (recorded, Microsoft-recommended); the management return path bypasses the firewall
+  by service-tag route (Microsoft states not a significant risk; inbound stays locked to 3443
+  from the ApiManagement tag); Developer has no SLA and infra changes cause downtime (POC
+  acceptable); the ~3h create window is the sprint's longest single apply.
+- Follow-ups: cloud-engineer one-pass batch (apim.tf + rt/subnet delta + DNS + providers
+  features + kubelet fix + firewall_rules_apim.tf + poc.tfvars flip); architect pre-clearance
+  docs/preclearance/b4-apim.md before any apply; QA per design doc section 12.7.
+
 ### ADR-046: Wave B3 messaging platform rulings - Service Bus Premium 1 MU + PE (OQ-044 resolution retires the OQ-039 Waiver posture for SB), Event Hubs Standard PE-only, AAD-only data plane, AZFW diagnostics ride-along
 
 - **Date:** 2026-07-18

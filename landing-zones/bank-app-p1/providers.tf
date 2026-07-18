@@ -1,6 +1,6 @@
 # Purpose: Provider configuration for the bank-app-p1 landing zone root module.
-# Section: Banking waves B1-B2 (docs/banking-platform-design.md,
-#          docs/b2-aks-platform-design.md)
+# Section: Banking waves B1-B4 (docs/banking-platform-design.md,
+#          docs/b2-aks-platform-design.md, docs/b4-apim-platform-design.md)
 # Last updated: 2026-07-18
 #
 # Apply order: After platform/connectivity (primary hub VNet ID and firewall IP required).
@@ -46,7 +46,17 @@ terraform {
 
 provider "azurerm" {
   subscription_id = var.landingzones_subscription_id
-  features {}
+
+  # Wave B4 (design doc section 3): APIM soft-delete handling for the
+  # BUILD-VERIFY-DESTROY estate. Without purge, a destroyed APIM name stays
+  # soft-delete-reserved and blocks re-create (LESSON 54-57 class). Argument names
+  # verified against the azurerm v4.71.0 features schema (internal/provider/features.go).
+  features {
+    api_management {
+      purge_soft_delete_on_destroy = true
+      recover_soft_deleted         = true
+    }
+  }
 }
 
 # Default azapi provider MUST be anchored to the Landing Zones sub (same fix as the
