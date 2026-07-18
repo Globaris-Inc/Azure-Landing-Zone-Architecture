@@ -546,6 +546,18 @@ the root creates, before the first apply (see lesson 58).
     roles via Graph (the SP cannot self-revoke them), then VERIFY with a membership query, not
     assumption.
 
+63. **A stale local `.terraform` directory forges 403s - delete it before diagnosing RBAC or firewall.**
+    *Symptom:* local `terraform init` on platform/connectivity returned 403 against the state SA and
+    looked exactly like a JIT-firewall or RBAC failure; the real cause was a stale `.terraform`
+    directory whose cached backend pointer predated backend/root changes. Deleting `.terraform` and
+    re-initializing fixed it instantly (B3 batch review, 2026-07-18). *Why missed:* the cached backend
+    config is invisible - the error surface is indistinguishable from the two failure classes this
+    estate actually has (state-SA firewall windows, scoped RBAC), so diagnosis starts in the wrong
+    place. *Guardrail:* on ANY local init/state failure, step zero is `rm -rf .terraform` + re-init
+    BEFORE touching firewall rules or role assignments; never "fix" access based on an error produced
+    by a stale pointer. (CI is immune - fresh checkout every run - which is also why the failure
+    appears only locally.)
+
 ---
 
 ## J. The operating loop that made deploys land (process lessons)
