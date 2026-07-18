@@ -37,6 +37,154 @@
 
 <!-- Newest at the top. -->
 
+### ADR-044: B2 egress ruling executed - time-boxed firewall sprint (userDefinedRouting), AKS rule collection group on the primary policy only, poc.tfvars flag supply, EOD re-gate frames
+
+- **Date:** 2026-07-18
+- **Section:** Banking wave B2; executes the OQ-042 resolution; fires the ADR-042 re-enable trigger; complements ADR-043 (which deliberately left outbound_type unruled)
+- **Status:** Accepted (user: option choice, time-box, hourly cost framing; architect: rules delta, placement, runbook)
+- **Decision makers:** user + claude (architect)
+
+**Context:**
+OQ-042 resolved: option (a), userDefinedRouting through the returning ADR-042 firewall pair,
+EXPLICITLY TIME-BOXED - the user intends to stand the full banking landing zone up and re-gate or tear
+the firewalls down by end of day, costing them at ~$3.5/hr for both hubs rather than as monthly
+run-rate. ADR-042's one-flag-both-hubs design stands (no supersede). The hub firewall policies were
+authored pre-AKS (ADR-009 era) and contain ZERO allow rules; with default-deny, an AKS cluster behind
+the firewall cannot bootstrap without an explicit egress rule set. The pinned pattern module's
+firewall_policy schema (0.17.1 source, read 2026-07-18) has no rule-collection support, so rules are a
+standalone resource in the connectivity root.
+
+**Decision:**
+1. **outbound_type is now PINNED: `userDefinedRouting`.** The B1 spoke wiring is untouched - the
+   0.0.0.0/0 -> 10.0.0.4 UDR stays on snet-aks-nodes and goes live when the firewall returns. The
+   route-scoping change designed for options (b)/(c) is dead and must not be made.
+2. **AKS egress rules = one `azurerm_firewall_policy_rule_collection_group` (`rcg-aks-egress-primary`,
+   priority 300) on the PRIMARY hub policy only** (ADR-009 independent policies; no eastus2 spoke
+   routes to the secondary firewall, which returns for mesh-route integrity only). Contents verified
+   against Microsoft Learn outbound-rules-control-egress (2026-06-18 page): application collection =
+   AzureKubernetesService FQDN tag (443+80) + Ubuntu repo FQDNs + Defender-for-Containers FQDNs;
+   network collection = AzureMonitor service tag TCP 443 + NTP UDP 123 to `*`. Deliberate exclusions,
+   each because the private-networking path already carries the traffic: UDP 1194 / TCP 9000 /
+   API-server 443 / `*.hcp.<region>.azmk8s.io` (private cluster, konnectivity over the private
+   endpoint) and all pulls from our own ACR (private endpoint). NTP uses destination `*`, never an
+   FQDN, so firewall DNS proxy can stay OFF; the FQDN tag and application-rule FQDNs do not need it.
+   New file `platform/connectivity/firewall_rules_aks.tf`, gated on `var.enable_firewall` via for_each
+   (no-count rule) so the EOD re-gate removes it automatically; source prefix is a variable defaulting
+   to 10.30.0.0/24.
+3. **Flag supply: `enable_firewall = true` is a reviewed commit in `envs/poc.tfvars`**, not a
+   workflow-dispatch override - flag state must be visible to plan-on-pr and drift checks, and the EOD
+   re-gate becomes an equally reviewable one-line revert.
+4. **Ordering is hard:** connectivity apply (firewalls + rules) FIRST, then a post-apply gate
+   confirming the firewall private IPs are exactly 10.0.0.4 / 10.1.0.4 (the ADR-042 contract), THEN
+   the bank-app-p1 AKS apply. Nodes cannot bootstrap through a blackhole; a firewall on the wrong IP
+   is a STOP before the spoke is touched.
+5. **EOD disposition, two pre-framed options, user picks at EOD:** Frame A = re-gate only (revert flag,
+   ~20-35 firewall-class destroys, zero VNet/zone destroys) PAIRED with `az aks stop` - a cluster
+   behind a re-blackholed route cannot scale, upgrade, pull, or ship telemetry, so stopping it freezes
+   it cleanly, stops node billing, and releases 6 vCPUs (OQ-043 synergy); restart order later is
+   firewall first, then `az aks start`. Frame B = full estate teardown via the standing spoke-first
+   flow. Runbook with plan-shape histograms: design doc section 6.4.
+
+**Alternatives considered:**
+- Rules via the module's firewall_policy config - impossible; the 0.17.1 schema has no rule support.
+- Rules on both hub policies - rejected: nothing routes eastus2 AKS egress to the secondary firewall;
+  duplicate rules would be untestable dead config (ADR-009 notes the duplication burden).
+- FQDN-by-FQDN application rules instead of the AzureKubernetesService tag - rejected: the tag is
+  Microsoft-maintained and auto-tracks list changes; explicit FQDNs rot (LESSON 40 class).
+- ntp.ubuntu.com FQDN network rule - rejected: would force DNS proxy on, a policy behavior change with
+  spoke-wide blast radius, for a rule the docs call optional on modern node images.
+- Workflow-dispatch TF_VAR for the flag - rejected: invisible to PR plans and drift detection.
+- Leaving the cluster running after Frame A re-gate - rejected as default: a blackholed cluster decays
+  (no pulls/upgrades/telemetry); recorded as user-overridable at EOD.
+
+**Consequences:**
+- Positive: banking-grade inspected egress is actually demonstrated (IDPS Alert, FQDN-tag allowlist,
+  default-deny); the firewall bill is hours-scale; re-gate is a one-line revert; the production
+  design target and the POC deployment are the same architecture, differing only in duty cycle.
+- Negative / trade-offs: while re-gated (Frame A) the platform is frozen, not merely idle; the sprint
+  has a hard intra-day ordering dependency (connectivity before spoke); rule changes remain
+  primary-policy-only knowledge until the ADR-009 parent/child hierarchy is ever built.
+- Follow-ups: implementer builds firewall_rules_aks.tf + poc.tfvars flip + aks.tf/acr.tf in one pass;
+  architect pre-clearance (docs/preclearance/b2-aks.md) before the first apply; QA per section 6.4
+  step iii; EOD user decision Frame A vs B recorded in the WORKLOG when taken.
+
+### ADR-043: Wave B2 AKS platform design rulings - D2s_v4 supersedes the v5 node family (offer cap), CNI Overlay CIDR pins, private cluster on the shared estate zone, ACR Premium, single system pool, no GitOps at B2
+
+- **Date:** 2026-07-18
+- **Section:** Banking wave B2 (Kubernetes platform); refines docs/banking-platform-design.md section 2.1
+- **Status:** Accepted (architect technical rulings; the egress fork and quota disposition are NOT decided here - OQ-042 / OQ-043)
+- **Decision makers:** claude (architect). User forks deliberately excluded and routed to OQs.
+
+**Context:**
+B1 delivered the bank-app-p1 network foundation (QA-green 2026-07-18). B2 designs the AKS platform into
+it. OQ-036 fixed the module (avm-res-containerservice-managedcluster), node count (3, AZ-spread), and
+tier (Standard). Live verification on 2026-07-18 found: (1) the module is still 0.6.7 and its azapi-based
+input surface covers every needed lever (network_profile incl. outbound_type/pod_cidr, private cluster w/
+BYO private_dns_zone, oidc_issuer_profile, workload identity, aad_profile w/ Azure RBAC, oms agent,
+diagnostic_settings); (2) the landingzones sub caps EVERY v5 VM family at 0 in eastus2 (the ADR-031/032
+offer-cap class again) while DSv4-class families and the total regional cap sit at 10 vCPUs; (3) the AKS
+default service CIDR (10.0.0.0/16) collides with the primary hub VNet; (4) kubenet retires 2028-03-31 and
+CNI Overlay is the current default (lifecycle audit clean); (5) ACR private endpoints still require
+Premium. Full log in docs/b2-aks-platform-design.md section 2.
+
+**Decision:**
+1. **Landing + gating:** AKS and ACR extend `landing-zones/bank-app-p1` (composition root, AVM-direct
+   per ADR-038) behind `enable_kubernetes_platform` (bool, default false) - the LESSON 42 flag pattern.
+2. **Node SKU superseded:** Standard_D2s_v4, 3 nodes, zones 1-3, single system pool, autoscaler off,
+   upgrade max_surge 1. The founding design's v5 family is unbuildable in this sub (family cap 0);
+   D2s_v4 is zone-complete and unrestricted (live-verified). A user node pool is quota-blocked at POC
+   (10 total vCPUs) and becomes a production design target.
+3. **CIDR pins:** pod_cidr 192.168.0.0/16 RATIFIED (the B1-recorded recommendation); service_cidr
+   PINNED to 172.20.0.0/16 with dns_service_ip 172.20.0.10, because the AKS default service CIDR
+   10.0.0.0/16 overlaps the primary hub and would silently break pod-to-hub routing. Neither CIDR may
+   ever be left to defaults.
+4. **Private cluster wiring:** enable_private_cluster true, public FQDN off, BYO private_dns_zone = the
+   estate's shared privatelink.eastus2.azmk8s.io zone (already spoke-linked and hub-linked). This
+   requires a pre-created user-assigned control-plane identity holding Private DNS Zone Contributor at
+   the zone scope (connectivity sub) and Network Contributor at the spoke network RG, each with a 300s
+   propagation sleep before cluster create (LESSON 35 timing class). The API-server record is written by
+   the control plane, NOT a PE zone group; the zone-group pattern applies to the ACR PE only.
+5. **Auth:** Entra-managed AAD profile with Azure RBAC enabled, admin group supplied by the user as a
+   variable, disable_local_accounts true.
+6. **Workload identity:** OIDC issuer + workload identity enabled at create.
+7. **ACR:** avm-res-containerregistry-registry 0.5.1, Premium (private endpoints require it - ruled, not
+   optional under the estate's deny-public posture), public access off, admin off, zone redundancy on,
+   AzureServices bypass, one PE into snet-private-endpoints wired to the live privatelink.azurecr.io
+   zone via the module-managed zone group; AcrPull for the kubelet identity at registry scope.
+8. **Monitoring:** Container Insights (oms agent) to the platform LAW (region-matched, LESSON 43) +
+   control-plane diagnostic settings (kube-apiserver, kube-audit-admin, guard) to the same LAW. Managed
+   Prometheus/Grafana deferred to the B7 O&M wave.
+9. **Defender for Containers** stays in B2 scope as a platform/security pricing flip with the ADR-035
+   plan-scan condition (ForceNew subplan class).
+10. **GitOps/Flux ruled OUT of B2** - nothing to reconcile until a workload exists.
+11. **Egress outbound_type is NOT ruled here** - it is the OQ-042 user fork (firewall re-enable money
+    decision, ADR-042 trigger). The root wires outbound_type and the aks-nodes route-table association
+    so any OQ-042 outcome is a config change, not a redesign.
+
+**Alternatives considered:**
+- Keep the v5 family and request a quota increase before B2 - rejected: blocks the wave on a support
+  ticket with refusal history on this offer (ADR-031/032); v4 is equivalent for POC purposes.
+- Standard_B2ms burstable nodes - rejected: burstable CPU on a banking-platform demo undermines the
+  posture story for ~$60/mo savings; BS family stays a fallback if D-family quota is ever consumed.
+- Pattern module avm-ptn-aks-production - rejected at OQ-036 (older, opinionated; composition control).
+- System + user pool split at POC - rejected: 3+2 nodes = 10/10 vCPUs, zero surge headroom, upgrades
+  would deadlock (OQ-043).
+- Free control-plane tier - rejected at OQ-036 (user chose Standard, SLA-backed).
+- AKS-managed private DNS zone (system) - rejected: creates a second, unlinked zone outside the estate's
+  central 89-zone set; hub-side resolution and the B1 links already serve the shared zone.
+- GitOps/Flux at B2 - rejected as speculative scope (CLAUDE.md rule 3).
+
+**Consequences:**
+- Positive: B2 fits the live quota (6/10 steady, 8/10 upgrading); every OQ-036 commitment lands; the
+  cluster is Zero-Trust-shaped on day one (private API, Entra-only, no local accounts, PE-only registry).
+- Negative / trade-offs: the sub is effectively vCPU-full after B2 - B5 Databricks CANNOT fit alongside
+  (OQ-043 disposition required); no user pool at POC; egress inspection depends on OQ-042 (loadBalancer
+  or NAT gateway leaves node egress uninspected - documented POC deviation until the firewalls return).
+- Follow-ups required: OQ-042 + OQ-043 user answers; docs/preclearance/b2-aks.md before any apply
+  (checklist in the design doc section 9); user supplies the AKS admin group object ID (portal, per the
+  ask-user-for-GUIDs rule); implementer verifies module output for the kubelet identity and the
+  oms-agent use_aad_auth DCR requirement at build time.
+
 ### ADR-042: Defer the paid hub appliances - flag-gate Azure Firewalls, VPN Gateway, and DNS Private Resolver out of platform/connectivity (lean B0b = network fabric only), preserve the 10.0.0.4 / 10.1.0.4 firewall-IP contract
 
 - **Date:** 2026-07-17

@@ -1,7 +1,7 @@
 # .github/workflows/_tf-root.yml
 # Purpose: Reusable Terraform workflow for a SINGLE root — plan | apply | destroy.
 # Section: 10 — Pipeline & Tooling (ADR-019). Called by deploy.yml and teardown.yml.
-# Last updated: 2026-07-06
+# Last updated: 2026-07-18
 #
 # Auth: OIDC federated credential — no secrets stored for login. Gated callers
 # pass a GitHub Environment via `gh_environment`; an EMPTY string = ungated
@@ -127,6 +127,8 @@ jobs:
       TF_VAR_honeypot_user_principal_name: ${{ secrets.HONEYPOT_USER_PRINCIPAL_NAME }}
       TF_VAR_cost_pattern_budget_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
       TF_VAR_cost_guardrails_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
+      # Wave B2 - AKS (ADR-043/044)
+      TF_VAR_aks_admin_group_object_ids: '["${{ secrets.AKS_ADMIN_GROUP_OBJECT_ID }}"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v4

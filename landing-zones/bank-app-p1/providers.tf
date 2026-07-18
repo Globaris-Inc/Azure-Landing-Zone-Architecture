@@ -1,6 +1,7 @@
 # Purpose: Provider configuration for the bank-app-p1 landing zone root module.
-# Section: Banking wave B1 - banking network foundation (docs/banking-platform-design.md)
-# Last updated: 2026-07-16
+# Section: Banking waves B1-B2 (docs/banking-platform-design.md,
+#          docs/b2-aks-platform-design.md)
+# Last updated: 2026-07-18
 #
 # Apply order: After platform/connectivity (primary hub VNet ID and firewall IP required).
 #
@@ -14,7 +15,10 @@
 #     parent_id to the correct sub (prevents wrong-sub 404s, LESSON 23)
 
 terraform {
-  required_version = ">= 1.9"
+  # Floor raised from >= 1.9 at wave B2: avm-res-containerservice-managedcluster
+  # 0.6.7 (aks.tf, ADR-043) requires >= 1.11, < 2.0 in its terraform.tf - the root
+  # floor tracks the real minimum. CI pin 1.15.6 satisfies it.
+  required_version = ">= 1.11"
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"

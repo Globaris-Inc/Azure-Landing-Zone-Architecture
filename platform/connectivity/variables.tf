@@ -1,6 +1,6 @@
 # Purpose: Input variables for the Connectivity platform root module.
-# Section: 8 - Standard Platform Components
-# Last updated: 2026-07-17 (ADR-042: enable_firewall / enable_vpn_gateway / enable_dns_resolver deferral flags)
+# Section: 8 - Standard Platform Components (+ Banking wave B2 AKS egress rules, ADR-044)
+# Last updated: 2026-07-18 (ADR-044: aks_egress_source_prefixes for the AKS rule collection group)
 
 variable "tenant_id" {
   description = "Azure Active Directory tenant ID."
@@ -71,6 +71,12 @@ variable "enable_firewall" {
   description = "Deploy the Azure Firewall Premium pair (one per hub) plus their firewall policies, public IPs, AzureFirewallSubnets, and the module-gated hub route tables. Default false per ADR-042 (paid appliances deferred until a workload wave needs real spoke egress, e.g. B2 AKS UDR); ~$2.55k/mo for the Premium pair + PIPs while enabled."
   type        = bool
   default     = false
+}
+
+variable "aks_egress_source_prefixes" {
+  description = "Source address prefixes for the AKS egress rules in rcg-aks-egress-primary (firewall_rules_aks.tf, ADR-044). Defaults to the bank-app-p1 snet-aks-nodes carve (10.30.0.0/24 - see the banking allocation table in envs/poc.tfvars). Only honoured while enable_firewall is true."
+  type        = list(string)
+  default     = ["10.30.0.0/24"]
 }
 
 variable "enable_vpn_gateway" {

@@ -31,7 +31,90 @@
 
 <!-- Newest at the top. -->
 
-### OQ-041: Durable home for the MG-scope Cost Management rights the ADR-021 scoped set never had
+### OQ-043: The landingzones sub is vCPU-full after B2 - quota increase, new banking sub, or B5 design-only?
+
+- **Raised:** 2026-07-18 (B2 design engagement, architect - see ADR-043, docs/b2-aks-platform-design.md)
+- **Section:** Banking waves B2/B5 (bites at B5; B2 itself is NOT blocked)
+- **Blocking:** Not B2. Blocks wave B5 (Databricks compute) and any future AKS user pool / scale-out.
+- **Priority:** High (answer needed before B5 planning; cheap to act on now)
+
+**Question:**
+Live quota check 2026-07-18 in sub-landingzones-poc-01 (eastus2): Total Regional vCPUs limit is **10**,
+every v5 VM family is capped at **0** (the ADR-031/032 offer-cap class), DSv4-class families carry 10.
+B2 as designed consumes 6 of 10 (8 of 10 during node upgrades). The remainder (4 vCPUs) cannot start
+even a minimal Databricks cluster (driver + 1 worker is typically 8 vCPUs), so wave B5 is dead in this
+sub unless something changes. The OQ-035 resolution pre-recorded "new banking sub" as the fallback for
+exactly this. What is the disposition?
+
+**Options being considered:**
+- A (recommended): file the quota increase NOW (Total Regional vCPUs 10 -> 20+ and DSv4/DASv4 family
+  10 -> 20 in eastus2) - free, async, does not block B2; treat refusal as the trigger for Option B.
+  This offer has refused capacity before (SQL, App Service), so refusal is a real possibility, but a
+  vCPU increase on an already-nonzero family is the most commonly granted class.
+- B: create the new banking subscription under the Corp MG for B5+ (the OQ-035 fallback): clean quota
+  slate, cleaner cost separation; costs plumbing (sub creation, MG association, CI SP RBAC, budgets,
+  CI wiring) - roughly a half-wave of work.
+- C: B5 becomes design-only (Databricks documented, not deployed) - zero cost, but a second net-new
+  platform slips from the POC and the banking story thins.
+
+**Recommended default:** A now, B on refusal. Record the outcome in the B5 pre-clearance.
+
+**RESOLVED 2026-07-18 (user):** Option A - file the quota increase NOW (Total Regional vCPUs 10 -> 20+
+and DSv4/DASv4 family 10 -> 20, eastus2), az-side filing attempted immediately with portal filing as the
+fallback. Option B (new banking sub under Corp MG) stays on record as the committed fallback on refusal.
+Does not block B2; outcome recorded in the B5 pre-clearance. Note the ADR-044 synergy: stopping the AKS
+cluster at the EOD re-gate releases its 6 vCPUs while the ticket is pending.
+
+### OQ-042: B2 AKS egress - bring the firewalls back (userDefinedRouting) or ship cheap egress (loadBalancer / NAT gateway)?
+
+- **Raised:** 2026-07-18 (B2 design engagement, architect - see ADR-042 re-enable trigger, ADR-043,
+  docs/b2-aks-platform-design.md section 6)
+- **Section:** Banking wave B2 (Kubernetes platform)
+- **Blocking:** YES - blocks the B2 implementation spec hand-off (outbound_type and the route-table
+  wiring differ per option)
+- **Priority:** High
+
+**Question:**
+ADR-042 gated both Azure Firewalls off and recorded B2 AKS userDefinedRouting as a re-enable trigger.
+The live bank-app-p1 spoke routes 0.0.0.0/0 to 10.0.0.4 (a firewall that does not exist); AKS nodes
+cannot bootstrap through that blackhole, so B2 MUST either bring the firewall back or scope the
+blackhole route away from snet-aks-nodes. Verified fact that shapes the options: a 0.0.0.0/0 UDR to a
+VirtualAppliance overrides BOTH load-balancer egress and an attached NAT gateway, so options (b) and
+(c) each require removing the route-table association from the aks-nodes subnet (the apim and
+private-endpoints subnets keep the blackhole UDR). Which egress does B2 ship?
+
+**Options being considered:**
+- a: `outboundType = userDefinedRouting` + `enable_firewall = true`. Banking-grade: all node/pod egress
+  inspected by Firewall Premium (IDPS/TLS). Cost ~**$2,555/mo** - the ADR-042 flag deliberately brings
+  BOTH hubs' firewalls back as a pair (per-hub flags were explicitly rejected there). Extra work: AKS
+  egress rule set in the firewall policy; firewall must be live BEFORE cluster create. This is the
+  production target posture.
+- a': single-hub variant of (a), ~**$1,280/mo**. NOT currently buildable as designed: it requires
+  superseding ADR-042's one-flag-both-hubs ruling AND verifying in the module source that asymmetric
+  per-hub `enabled_resources.firewall` works (UNVERIFIED; the hub mesh route generation is the risk).
+  Pick only if (a)'s posture is wanted at half cost and the verification passes.
+- b (recommended POC default): `outboundType = loadBalancer`, remove the route table from the aks-nodes
+  subnet. ~**$0/mo** extra (AKS-managed egress PIP ~$4). Egress uninspected - documented POC deviation
+  (same class as the absent DDoS plan). Clean in-place migration path to (a) when the firewalls return
+  (route re-association + outbound_type change, supported without cluster rebuild).
+- c: `outboundType = userAssignedNATGateway` + avm-res-network-natgateway 0.3.2 on snet-aks-nodes.
+  ~**$37/mo** + $0.045/GB. Buys a deterministic egress IP and SNAT scale over (b), still zero
+  inspection. Same route-table change as (b). Middle option; the POC's near-zero egress volume makes
+  its benefits mostly cosmetic.
+
+**Architect recommendation (ADR-022 POC-vs-design split, consistent with the user's ADR-042 deferral):**
+Option **b** at POC; option **a** documented as the production design target; the ADR-042 firewall
+re-enable trigger then moves to B4 (APIM forced tunneling) or a deliberate security-demo milestone,
+whichever the user schedules first. If demonstrating inspected egress IS the point of this wave for the
+portfolio story, pick (a) and accept the ~$2.55k/mo while it runs.
+
+**RESOLVED 2026-07-18 (user):** Option **a** with a TIME-BOX - `outboundType = userDefinedRouting` and
+`enable_firewall = true`, cost accepted at the HOURLY rate (~$3.5/hr for the pair, both hubs; the
+ADR-042 one-flag-both-hubs design stands, no supersede), with the stated intent to stand up the entire
+banking landing zone and RE-GATE (or tear down) the firewalls by end of day. The inspected-egress
+posture is the point; the time-box is the cost control. Mechanics, firewall-rules delta, wave runbook,
+and the two EOD disposition frames are recorded in ADR-044 and docs/b2-aks-platform-design.md section
+6. The B1 spoke route wiring is untouched (no route-scoping change; the blackhole UDR simply goes live).
 
 - **Raised:** 2026-07-12 (B0a redeploy pre-clearance, architect - see ADR-041)
 - **Section:** 10a (bootstrap RBAC) / carries OQ-008 history

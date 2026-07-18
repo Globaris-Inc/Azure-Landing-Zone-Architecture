@@ -172,6 +172,31 @@ bank_data_p1_spoke_address_space = "10.32.0.0/16"
 # (below). No new secret values are introduced by wave B1.
 
 # ---------------------------------------------------------------------------
+# Banking wave B2 - time-boxed firewall sprint (ADR-044)
+# ---------------------------------------------------------------------------
+# Both flags below are the reviewed-commit flag supply ADR-044 rules (visible to
+# plan-on-pr and drift checks - NOT a workflow-dispatch override).
+#
+# enable_firewall = true fires the ADR-042 re-enable trigger: the Azure Firewall
+# Premium pair returns in both hubs (~$3.5/hr for the pair) plus the AKS egress
+# rule collection group on the primary policy. TIME-BOXED: the user re-gates or
+# tears down by END OF DAY (ADR-044 Frames A/B). EOD revert path (Frame A) is the
+# one-line change `enable_firewall = false` + connectivity apply, paired with an
+# out-of-band `az aks stop`.
+#
+# ORDERING IS HARD (ADR-044): apply platform/connectivity first, confirm firewall
+# private IPs are exactly 10.0.0.4 / 10.1.0.4, THEN apply landing-zones/bank-app-p1
+# with enable_kubernetes_platform = true (private AKS + Premium ACR, ADR-043;
+# outbound_type userDefinedRouting rides the B1 UDR). Nodes cannot bootstrap
+# through a blackholed route.
+#
+# aks_admin_group_object_ids is REQUIRED by the bank-app-p1 root and arrives via
+# TF_VAR_aks_admin_group_object_ids from the repo secret (poc.secret.tfvars
+# locally) - never committed here.
+enable_firewall            = true
+enable_kubernetes_platform = true
+
+# ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
 # ---------------------------------------------------------------------------
 

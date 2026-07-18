@@ -1,7 +1,8 @@
 # Purpose: Input variables for the bank-app-p1 landing zone root module (banking
-#          application spoke - network foundation only at wave B1).
-# Section: Banking wave B1 - banking network foundation (docs/banking-platform-design.md)
-# Last updated: 2026-07-16
+#          application spoke - B1 network foundation + B2 Kubernetes platform inputs).
+# Section: Banking waves B1-B2 (docs/banking-platform-design.md,
+#          docs/b2-aks-platform-design.md)
+# Last updated: 2026-07-18
 
 # ---------------------------------------------------------------------------
 # Subscription targeting
@@ -105,6 +106,21 @@ variable "enable_corp_policy_exemptions" {
   description = "Create the RG-scoped Waiver policy exemption for the corp-MG Deny-Public-Endpoints StorageDenyPaasPublicIP member on the flow-log storage account, which cannot be made compliant without breaking flow-log delivery. Default true; set false only if this spoke is moved out from under the corp MG or the governance changes (OQ-024)."
   type        = bool
   default     = true
+}
+
+# ---------------------------------------------------------------------------
+# Kubernetes platform (wave B2 - ADR-043 / ADR-044)
+# ---------------------------------------------------------------------------
+
+variable "enable_kubernetes_platform" {
+  description = "Deploy the wave B2 Kubernetes platform: private AKS cluster (Standard tier, 3x D2s_v4 across zones 1-3, CNI Overlay, Entra-only auth, outbound_type userDefinedRouting) plus the Premium ACR with private endpoint (ADR-043). Default false per the LESSON 42 shippable-network-only flag pattern. ORDERING (ADR-044): flip only after platform/connectivity is applied with enable_firewall = true and the primary firewall private IP is confirmed as 10.0.0.4 - AKS nodes cannot bootstrap through a blackholed default route."
+  type        = bool
+  default     = false
+}
+
+variable "aks_admin_group_object_ids" {
+  description = "Entra ID group object IDs granted the cluster admin role via the AKS aad_profile (Azure RBAC enabled, local accounts disabled - ADR-043). REQUIRED when enable_kubernetes_platform is true; no default on purpose. The value arrives via TF_VAR_aks_admin_group_object_ids from the repo secret in CI (poc.secret.tfvars locally) - never commit the GUIDs."
+  type        = list(string)
 }
 
 # ---------------------------------------------------------------------------
