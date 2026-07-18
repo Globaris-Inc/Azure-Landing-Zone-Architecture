@@ -141,6 +141,33 @@ Hard content histogram:
 - ZERO: changes/destroys/replaces on ANY module.spoke_vnet resource (subnets/RT/NSG/peerings/
   links untouched - the UDR STAYS), PIPs, NAT gateways, subnets, storage accounts.
 
+### 4a. PC-3K disposition, apply 1 (plan run 29652463190, banking @ c1c4520): APPROVED
+
+Recorded shape `37 add, 454 change, 0 destroy`. Adds 37 within bar, histogram exact (2 FW, 2
+PIPs, 1 RCG, zero gated-class resources, zero replaces/destroys): PASS. The 454-change breach of
+the `<=4` line is DISPOSITIONED AS A BAR ERROR, not a plan defect: the bar assumed delta-only
+changes and omitted the STANDING estate noise attested in this morning's drift plan (same-shape
+453 changes, 0/0) - the OQ-032 CreatedDate class plus azapi link computed-output refresh, which
+persists until an apply strips it. Grep-verified attribution: 445 update blocks confined to
+module.private_dns_zones, 274 CreatedDate lines, 2 hub VNet blocks, 3 modtm, RGs, ZERO non-tag
+attribute changes. Bar corrected for the record: `37 add, ~450-460 change (all
+OQ-032/azapi-output class), 0 destroy`. Applying this plan strips the tag estate-wide in
+connectivity - accepted OQ-032 behavior, Section 6 precedent (2026-07-10). Post-apply check
+carried into PC-2K/PC-4K: confirm 0 destroys in the apply stream.
+
+### 4b. PC-3K disposition, apply 2 (plan run 29654717741, post-firewall, PC-2K gate PASSED 10.0.0.4/10.1.0.4): APPROVED
+
+Recorded shape `18 add, 12 change, 0 destroy`. Adds verified by address: exact histogram match
+incl. exactly 3 role assignments and zero functional spoke_vnet changes. Two deviations, both
+dispositioned benign: (1) 12 changes = the SAME standing OQ-032/azapi-output noise class as
+section 4a (13 CreatedDate lines; the sole spoke_vnet block is computed-output refresh + tag
+only; identical to the morning spoke drift attestation) - the 0-change bar repeated the 4a bar
+error, corrected for the record to `18 add, ~10-14 change (noise class), 0 destroy`; (2) 1
+kubeconfig azapi_resource_action (user) vs the histogram's 2 - the histogram over-counted: with
+`disable_local_accounts = true` the module correctly skips the admin-kubeconfig action. That is
+the intended posture surfacing in the plan, not a gap. Post-apply: 0 destroys in the stream,
+then PC-4K QA.
+
 ## 5. Watch-items during the applies (dispositions pre-agreed)
 
 | Symptom | Disposition |
