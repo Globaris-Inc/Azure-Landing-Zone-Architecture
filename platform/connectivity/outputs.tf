@@ -1,6 +1,6 @@
 # Purpose: Outputs for the Connectivity platform root module.
 # Section: 8 - Standard Platform Components
-# Last updated: 2026-06-27 (G6: gated primary_bastion_id/dns_name outputs - ADR-015)
+# Last updated: 2026-07-17 (ADR-042: try() on firewall/gateway/resolver outputs - null while flags off; fix primary_vpn_gateway_id key to "primary-vpn")
 
 output "connectivity_primary_rg_name" {
   description = "Name of the primary connectivity resource group."
@@ -43,30 +43,31 @@ output "secondary_hub_vnet_name" {
 }
 
 output "primary_firewall_id" {
-  description = "ARM resource ID of the primary Azure Firewall Premium."
-  value       = module.hub_and_spoke.firewall_resource_ids["primary"]
+  description = "ARM resource ID of the primary Azure Firewall Premium; null while the ADR-042 enable_firewall flag is off."
+  value       = try(module.hub_and_spoke.firewall_resource_ids["primary"], null)
 }
 
 output "primary_firewall_private_ip" {
-  description = "Private IP address of the primary Azure Firewall. Used as next-hop in spoke UDRs."
-  value       = module.hub_and_spoke.firewall_private_ip_addresses["primary"]
+  description = "Private IP address of the primary Azure Firewall, used as next-hop in spoke UDRs; null while the ADR-042 enable_firewall flag is off (the repo Secret carries the 10.0.0.4 contract, not this output)."
+  value       = try(module.hub_and_spoke.firewall_private_ip_addresses["primary"], null)
 }
 
 output "secondary_firewall_id" {
-  description = "ARM resource ID of the secondary Azure Firewall Premium."
-  value       = module.hub_and_spoke.firewall_resource_ids["secondary"]
+  description = "ARM resource ID of the secondary Azure Firewall Premium; null while the ADR-042 enable_firewall flag is off."
+  value       = try(module.hub_and_spoke.firewall_resource_ids["secondary"], null)
 }
 
 output "secondary_firewall_private_ip" {
-  description = "Private IP address of the secondary Azure Firewall. Used as next-hop in DR spoke UDRs."
-  value       = module.hub_and_spoke.firewall_private_ip_addresses["secondary"]
+  description = "Private IP address of the secondary Azure Firewall, used as next-hop in DR spoke UDRs; null while the ADR-042 enable_firewall flag is off (the repo Secret carries the 10.1.0.4 contract, not this output)."
+  value       = try(module.hub_and_spoke.firewall_private_ip_addresses["secondary"], null)
 }
 
 output "primary_vpn_gateway_id" {
-  description = "ARM resource ID of the primary hub VPN Gateway."
-  # UNVERIFIED: exact nested key path within virtual_network_gateway_resource_ids["primary"].
-  # Verify by running: terraform output -json primary_vpn_gateway_id after first apply.
-  value = try(module.hub_and_spoke.virtual_network_gateway_resource_ids["primary"]["vpn"], null)
+  description = "ARM resource ID of the primary hub VPN Gateway; null while the ADR-042 enable_vpn_gateway flag is off."
+  # Module keys this map by gateway key "<hub_key>-vpn" (module outputs.tf lines 141-144,
+  # v0.17.1), not by a nested ["primary"]["vpn"] path - the prior UNVERIFIED lookup could
+  # never resolve and would have been silently null even with the gateway deployed.
+  value = try(module.hub_and_spoke.virtual_network_gateway_resource_ids["primary-vpn"], null)
 }
 
 output "primary_bastion_id" {
@@ -82,8 +83,8 @@ output "primary_bastion_dns_name" {
 }
 
 output "primary_dns_resolver_inbound_ips" {
-  description = "IP address(es) of the primary hub DNS Private Resolver inbound endpoint. Configure as DNS server in spoke VNets."
-  value       = module.hub_and_spoke.dns_resolver_inbound_endpoint_ip_addresses["primary"]
+  description = "IP address(es) of the primary hub DNS Private Resolver inbound endpoint, for use as DNS server in spoke VNets; null while the ADR-042 enable_dns_resolver flag is off."
+  value       = try(module.hub_and_spoke.dns_resolver_inbound_endpoint_ip_addresses["primary"], null)
 }
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Purpose: Input variables for the Connectivity platform root module.
 # Section: 8 - Standard Platform Components
-# Last updated: 2026-06-27 (G6: enable_bastion on-demand flag - ADR-015)
+# Last updated: 2026-07-17 (ADR-042: enable_firewall / enable_vpn_gateway / enable_dns_resolver deferral flags)
 
 variable "tenant_id" {
   description = "Azure Active Directory tenant ID."
@@ -63,6 +63,24 @@ variable "enable_ddos_standard" {
 
 variable "enable_bastion" {
   description = "Deploy Azure Bastion (Standard SKU) in the PRIMARY hub on demand. Default false so idle cost is $0; operators set true + apply (deploy.yml) to bring Bastion up for no-public-IP management access, false + apply to remove it (~+$140/mo while enabled). Secondary hub never gets Bastion. See ADR-015 / gap-closure G6."
+  type        = bool
+  default     = false
+}
+
+variable "enable_firewall" {
+  description = "Deploy the Azure Firewall Premium pair (one per hub) plus their firewall policies, public IPs, AzureFirewallSubnets, and the module-gated hub route tables. Default false per ADR-042 (paid appliances deferred until a workload wave needs real spoke egress, e.g. B2 AKS UDR); ~$2.55k/mo for the Premium pair + PIPs while enabled."
+  type        = bool
+  default     = false
+}
+
+variable "enable_vpn_gateway" {
+  description = "Deploy the VpnGw1AZ active-active VPN Gateway (and its GatewaySubnet) in the PRIMARY hub. Default false per ADR-042 - no S2S/P2S consumer exists in the POC; ~$260/mo while enabled."
+  type        = bool
+  default     = false
+}
+
+variable "enable_dns_resolver" {
+  description = "Deploy the DNS Private Resolver (inbound + outbound endpoints) in the PRIMARY hub. Default false per ADR-042 - spokes resolve private-endpoint zones via VNet links + Azure-provided DNS; ~$365/mo while enabled."
   type        = bool
   default     = false
 }
