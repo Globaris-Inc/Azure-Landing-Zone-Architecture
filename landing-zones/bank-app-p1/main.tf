@@ -3,8 +3,9 @@
 #          (LESSON 42 shippable-network-only pattern): VNet, subnets, NSGs, firewall UDR,
 #          hub peering, DNS links, VNet flow log. NO workload resources.
 # Section: Banking wave B1 - banking network foundation (docs/banking-platform-design.md
-#          sections 2.0-2.2; placement per OQ-035 resolution)
-# Last updated: 2026-07-16
+#          sections 2.0-2.2; placement per OQ-035 resolution). Wave B4 delta: snet-apim
+#          route-table swap + service endpoints (ADR-047, docs/b4-apim-platform-design.md)
+# Last updated: 2026-07-18
 #
 # Architecture:
 #   - Spoke VNet (default 10.30.0.0/16, eastus2) peered to primary hub VNet
@@ -162,11 +163,12 @@ resource "azurerm_network_security_group" "apim" {
 
 # ---------------------------------------------------------------------------
 # Route Table - default route forces all spoke traffic through Azure Firewall.
-# Applied to ALL subnets including snet-apim.
-# WAVE B4 CAVEAT (flagged for the B4 pre-clearance, not resolved here): APIM stv2
-# with forced tunneling may additionally require an ApiManagement-service-tag route
-# with next hop Internet on its subnet. Verify at B4 before the APIM apply; adding
-# it now would be an unverified guess.
+# WAVE B4 CAVEAT RESOLVED (ADR-047, docs/b4-apim-platform-design.md section 5):
+# while enable_api_platform is true, snet-apim swaps to the dedicated rt-apim
+# (apim.tf) carrying the same 0.0.0.0/0 -> firewall route PLUS the required
+# ApiManagement-service-tag -> Internet management return route. This shared table
+# stays on the AKS and PE subnets ONLY and deliberately does NOT get the service-tag
+# route (it would bypass the firewall for those subnets too).
 # ---------------------------------------------------------------------------
 
 resource "azurerm_route_table" "spoke" {
@@ -223,9 +225,26 @@ module "spoke_vnet" {
       name             = "snet-apim"
       address_prefixes = [local.snet_apim]
 
+      # WAVE B4 (ADR-047): route table swap + service endpoints, both ternary on
+      # enable_api_platform. The subnet is an azapi_resource in the pinned 0.17.1
+      # module (Microsoft.Network/virtualNetworks/subnets@2024-07-01) - routeTable.id
+      # and serviceEndpoints are body properties, so BOTH changes are a single
+      # in-place PUT update (NO subnet replace; verified in the module subnet source).
       route_table = {
-        id = azurerm_route_table.spoke.id
+        id = var.enable_api_platform ? azurerm_route_table.apim["main"].id : azurerm_route_table.spoke.id
       }
+
+      # Microsoft strongly recommends these four on the APIM subnet: the instance's
+      # own managed SQL/Storage/EH/KV dependency traffic rides the Azure backbone
+      # instead of the forced tunnel (design doc section 5b). Posture note in
+      # ADR-047: this exempts APIM PLATFORM dependency traffic from AZFW
+      # inspection, not API/workload traffic.
+      service_endpoints_with_location = var.enable_api_platform ? [
+        { service = "Microsoft.Sql" },
+        { service = "Microsoft.Storage" },
+        { service = "Microsoft.EventHub" },
+        { service = "Microsoft.KeyVault" },
+      ] : null
 
       network_security_group = {
         id = azurerm_network_security_group.apim.id

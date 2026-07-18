@@ -3,7 +3,9 @@
 #          zone via the module-managed zone group (the estate's proven SQL-PE pattern),
 #          AcrPull for the cluster kubelet identity, diagnostics to the platform LAW.
 #          Gated behind var.enable_kubernetes_platform with aks.tf.
-# Section: Banking wave B2 (docs/b2-aks-platform-design.md section 4; ADR-043)
+# Section: Banking wave B2 (docs/b2-aks-platform-design.md section 4; ADR-043).
+#          Wave B4 ride-along: kubelet RA durable fix (B3 PC-3M disposition,
+#          docs/b4-apim-platform-design.md section 8)
 # Last updated: 2026-07-18
 #
 # Module: Azure/avm-res-containerregistry-registry/azurerm 0.5.1 (pin verified on the
@@ -13,6 +15,27 @@
 # public Basic/Standard registry would violate the estate's deny-public posture. Node
 # image pulls from this registry stay in-VNet (PE + zone resolution) and never touch
 # the firewall - one reason the AKS egress rule set needs no ACR FQDNs.
+
+# ---------------------------------------------------------------------------
+# Kubelet identity lookup - MANDATED durable fix (B3 PC-3M disposition, verbatim
+# spec in docs/b4-apim-platform-design.md section 8). Decouples the AcrPull RA
+# principal_id from the AKS module's azapi computed output, which deferred to
+# apply-time on every plan and cascaded a ForceNew replace of the RA. The name and
+# resource_group_name are the root's OWN deterministic strings (literal
+# interpolations of root variables ONLY - NOT azurerm_resource_group.workload.name,
+# NOT any module output, NO depends_on; any of those would re-defer the read), so
+# the data source resolves at refresh time and module-internal churn can no longer
+# cascade. kubelet_identity[0].object_id verified in the azurerm v4.71.0 data-source
+# schema. Gated on the same flag so flag-off plans do not query a missing cluster.
+# The interim one-accepted-replace plan bar is RETIRED with this fix.
+# ---------------------------------------------------------------------------
+
+data "azurerm_kubernetes_cluster" "aks_lookup" {
+  for_each = var.enable_kubernetes_platform ? { main = "main" } : {}
+
+  name                = "aks-bank-app-p1-${var.org_prefix}-${var.environment}"
+  resource_group_name = "rg-bank-app-p1-workload-${var.org_prefix}-${var.environment}"
+}
 
 module "acr" {
   source  = "Azure/avm-res-containerregistry-registry/azurerm"
@@ -47,14 +70,14 @@ module "acr" {
     }
   }
 
-  # AcrPull for the cluster kubelet identity at registry scope, after cluster create
-  # (the reference to the module output orders it). kubelet_identity output name and
-  # its objectId attribute verified in the pinned 0.6.7 module source (outputs.tf,
-  # exported via response_export_values properties.identityProfile.kubeletidentity).
+  # AcrPull for the cluster kubelet identity at registry scope. B4 durable fix
+  # (design doc section 8): principal_id now comes from the static-argument data
+  # source above (plan-time-known), not the AKS module's computed output. Expected
+  # plan impact at this address: ZERO changes (identical value, now known at plan).
   role_assignments = {
     kubelet_acr_pull = {
       role_definition_id_or_name = "AcrPull"
-      principal_id               = module.aks["main"].kubelet_identity.objectId
+      principal_id               = data.azurerm_kubernetes_cluster.aks_lookup["main"].kubelet_identity[0].object_id
       principal_type             = "ServicePrincipal"
     }
   }
