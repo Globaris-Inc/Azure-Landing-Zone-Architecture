@@ -197,6 +197,19 @@ enable_firewall            = true
 enable_kubernetes_platform = true
 
 # ---------------------------------------------------------------------------
+# Banking wave B3 - messaging platform (ADR-045 / ADR-046)
+# ---------------------------------------------------------------------------
+# OQ-044 resolved shape A: Service Bus PREMIUM 1 MU + private endpoint (the only
+# PE-capable tier - compliant with the corp deny initiative by design, NO policy
+# exemption) alongside the Event Hubs Standard namespace (1 TU + PE). Both are
+# public-access-off and AAD-only (local/SAS auth disabled). Sprint posture per
+# ADR-045: the estate stands up through the week, teardown at EOW; B3 adds roughly
+# $24/day while enabled (design doc section 8). Flag defaults false in the root
+# (LESSON 42); this reviewed-commit entry is the flag supply, same pattern as the
+# B2 flags above.
+enable_messaging_platform = true
+
+# ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
 # ---------------------------------------------------------------------------
 
