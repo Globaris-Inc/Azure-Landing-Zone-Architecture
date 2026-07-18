@@ -37,6 +37,123 @@
 
 <!-- Newest at the top. -->
 
+### ADR-046: Wave B3 messaging platform rulings - Service Bus Premium 1 MU + PE (OQ-044 resolution retires the OQ-039 Waiver posture for SB), Event Hubs Standard PE-only, AAD-only data plane, AZFW diagnostics ride-along
+
+- **Date:** 2026-07-18
+- **Section:** Banking wave B3 (messaging/eventing); executes the OQ-044 resolution; refines
+  docs/banking-platform-design.md section 2.2; carries the B2 QA MEDIUM finding fix
+- **Status:** Accepted (user: SB tier; architect: platform rulings)
+- **Decision makers:** user + claude (architect)
+
+**Context:**
+OQ-039 (2026-07-12) resolved Service Bus at Standard behind an RG-scoped Waiver exemption because
+Premium's ~$680/mo was disproportionate under a monthly-run-rate frame, with Premium+PE recorded as
+the production design target. ADR-045 (2026-07-18) collapsed that frame: the estate is a
+build-verify-destroy sprint torn down at end of week, so Premium costs days (~$22.4/day, ~$110-160
+to EOW), not months. Live policy verification today: the corp deny initiative's
+`serviceBusDisablePublicNetworkAccess` and `eventHubNamespacesPublicNetworkAccess` members both
+default to Deny. Full design and verification log: docs/b3-messaging-platform-design.md.
+
+**Decision:**
+1. **Service Bus ships Premium 1 MU + private endpoint** (OQ-044 = A, user): namespace
+   `public_network_access_enabled = false`, PE into snet-private-endpoints against the live
+   privatelink.servicebus.windows.net zone, `premium_messaging_partitions = 1`. Compliant with the
+   Deny member by design - **the OQ-039 Standard+Waiver posture for Service Bus is RETIRED in this
+   build**; no third exemption unit is built, and the POC now deploys the production design shape.
+   The recorded Shape-B trap (a Standard consumer on AKS needing a `*.servicebus.windows.net`
+   firewall app-rule) dies with it.
+2. **Event Hubs ships Standard 1 TU, PE-only, public access off** (avm-res-eventhub-namespace
+   0.1.0, MATURITY FLAG standing: single release 2025-04-28; fallback to native
+   `azurerm_eventhub_namespace` + PE with a `# DEVIATION:` comment is pre-authorized if the module
+   fails on our shape - one consolidated fix-spec, no improvisation).
+3. **AAD-only data plane on both namespaces** (EH `local_authentication_enabled = false`, SB
+   `local_auth_enabled = false`), SB `minimum_tls_version = "1.2"` - the banking no-static-
+   credentials bar, matching the B2 disable_local_accounts posture.
+4. **Placement + gating:** both namespaces + one demo entity each (evh-demo, sbq-demo - minimal QA
+   data-plane surface) in the bank-app-p1 SHARED RG behind `enable_messaging_platform` (bool,
+   default false, LESSON 42). Pins: avm-res-eventhub-namespace 0.1.0, avm-res-servicebus-namespace
+   0.4.0 (both re-verified latest on the registry today).
+5. **Zero new network surface:** PEs into the existing snet-private-endpoints; both use the shared
+   servicebus zone (two distinct A records - QA verifies both); no new zones, subnets, UDR or
+   firewall-rule changes (PE traffic is in-VNet).
+6. **Ride-along:** the B2 QA MEDIUM finding fix - AZFW diagnostic settings on both hub firewalls
+   (for_each over module.hub_and_spoke.firewall_resource_ids gated on enable_firewall, category
+   group allLogs + AllMetrics, log_analytics_destination_type "Dedicated", new
+   platform_law_workspace_id variable; CI TF_VAR already estate-wide) - full spec in the design
+   doc section 6.
+7. Diagnostics on both namespaces to the platform LAW; managed identities/CMK omitted at B3 (CMK
+   is the B9 extension).
+
+**Alternatives considered:**
+- Standard + Waiver as resolved in OQ-039 - rejected by the user via OQ-044: ~$120 of sprint
+  savings against a public data-plane endpoint in a banking POC, a third exemption unit to build
+  and verify, and a latent firewall-rule dependency for future consumers.
+- Gate Service Bus off (OQ-044 option C) - rejected: thins the messaging story for negligible
+  savings once Premium is priced in days.
+- Premium with >1 MU or zone-redundancy tuning - rejected: 1 MU is the smallest Premium unit and
+  POC traffic is nil; scale-unit math is the B10 capacity chapter.
+- Building the AZFW diagnostics as its own wave - rejected: 2-resource change on a root B3 already
+  touches; separate dispatch ceremony for no risk reduction.
+
+**Consequences:**
+- Positive: zero policy exemptions in wave B3; every B2/B3 data-plane service is PE-only and
+  AAD-only; the estate demonstrates the production Service Bus posture live; firewall log evidence
+  unblocked for B4+ QA.
+- Negative / trade-offs: ~$24/day B3 delta while the sprint runs (dominated by the 1 MU); EH rides
+  a maturity-flagged module (mitigated by the pre-authorized fallback); the retired Waiver posture
+  remains referenced in OQ-039 history - superseded here, not edited there.
+- Follow-ups: cloud-engineer one-pass batch (messaging.tf + firewall_diagnostics.tf) per the
+  design doc; architect pre-clearance docs/preclearance/b3-messaging.md before any apply; QA
+  verifies both A records + AZFW tables populating; EOW teardown covers both namespaces with the
+  spoke (no new root).
+
+### ADR-045: Sprint extension - no EOD re-gate; the full banking architecture stands up first, teardown moves to end of week (supersedes the ADR-044 time-box and PC-5K)
+
+- **Date:** 2026-07-18
+- **Section:** Banking waves B2-B10 operating frame; supersedes the EOD framing of ADR-044 (the
+  rest of ADR-044 - outbound_type pin, RCG design, flag mechanics, ordering gate - STANDS)
+- **Status:** Accepted (user directive, 2026-07-18, post-B2-green)
+- **Decision makers:** user (directive), claude (architect - record + consequences)
+
+**Context:**
+ADR-044 framed the firewall return as a same-day sprint: build B2, then re-gate (Frame A) or tear
+down (Frame B) by end of day. With B2 green (both applies exact-shape, QA PC-4K PASS-with-notes,
+firewall IPs on contract), the user superseded the time-box: stand up the ENTIRE banking
+architecture first; teardown moves to END OF WEEK. Firewalls and the AKS cluster stay up through
+the sprint; the firewall pair's ~$85/day is accepted as sprint cost. This aligns with the OQ-039
+clarification (BUILD-VERIFY-DESTROY: the estate exists to be built, verified, and destroyed; the
+ceiling guards the window, spend is prorated).
+
+**Decision:**
+1. NO end-of-day re-gate. `enable_firewall = true` and `enable_kubernetes_platform = true` persist
+   through the sprint. PC-5K of docs/preclearance/b2-aks.md is SUPERSEDED (marked in the doc);
+   Frames A/B remain the documented mechanics for the END-OF-WEEK teardown decision instead.
+2. Waves B3-B10 proceed on the standing cadence against the live estate. Each wave still carries
+   its own pre-clearance, plan-scan bars, and QA gate - the directive changes the clock, not the
+   gates.
+3. Cost frame while the sprint runs: firewall pair ~$85/day + AKS/ACR ~$14-16/day + base estate;
+   every new wave's daily cost is stated in its design doc. The ~$5k/mo OQ-039 ceiling still
+   governs as a guard rail; at sprint duty cycle the estate sits well inside it.
+4. End-of-week closeout: full teardown via the standing spokes-first flow (teardown.yml must be
+   current with every root added by B3+ waves - the OQ-039 clarification's standing requirement),
+   OR a re-gate-and-keep decision if the user changes course; decided and recorded at EOW.
+
+**Alternatives considered:**
+- Hold the ADR-044 EOD re-gate and re-enable per wave - rejected by the user: repeated
+  enable/verify/re-gate cycles add operator ceremony and re-verification risk (each re-enable
+  re-arms the firewall-IP gate) for savings the sprint frame makes marginal.
+- Re-gate firewalls but keep the cluster running - rejected: a blackholed cluster degrades
+  (ADR-044 Frame A analysis); stopping and restarting it daily adds failure surface mid-sprint.
+
+**Consequences:**
+- Positive: B3-B10 build against a live, inspected-egress estate (QA can prove egress rules per
+  wave); no daily stop/start ceremony; the firewall-IP contract is verified once and holds.
+- Negative / trade-offs: sprint burn ~$100+/day while it runs; the EOW teardown is now the single
+  cost backstop and MUST NOT slip silently - if the sprint extends past 2026-07-25, re-affirm the
+  directive and re-run the LESSON 40-41 lifecycle deltas for unapplied waves.
+- Follow-ups: PC-5K marked superseded (done); teardown.yml wiring for each new B3+ root rides
+  each wave's batch; EOW disposition recorded in WORKLOG when taken.
+
 ### ADR-044: B2 egress ruling executed - time-boxed firewall sprint (userDefinedRouting), AKS rule collection group on the primary policy only, poc.tfvars flag supply, EOD re-gate frames
 
 - **Date:** 2026-07-18

@@ -31,6 +31,55 @@
 
 <!-- Newest at the top. -->
 
+### OQ-044: B3 Service Bus tier - does the ADR-045 sprint frame flip OQ-039's Standard-plus-Waiver to Premium-plus-PE?
+
+- **Raised:** 2026-07-18 (B3 design engagement, architect - see docs/b3-messaging-platform-design.md,
+  ADR-045)
+- **Section:** Banking wave B3 (messaging/eventing)
+- **Blocking:** YES - blocks the B3 Service Bus implementation shape (exemption unit vs private
+  endpoint are different code)
+- **Priority:** High
+
+**Question:**
+OQ-039 resolved Service Bus at STANDARD behind an RG-scoped Waiver exemption (the corp deny member
+`serviceBusDisablePublicNetworkAccess` defaults to Deny - member dump re-verified live 2026-07-18),
+with Premium+PE recorded as the production design target. That ruling was made under a monthly-run-rate
+frame BEFORE two things changed: (1) ADR-045 reframed the estate as a time-boxed sprint torn down at
+end of week - Premium's cost is now days, not months; (2) the estate posture hardened (firewalls live,
+B2 shipped PE-only ACR and a private cluster with zero exemptions). Event Hubs is unaffected either way
+(Standard supports PEs; its deny member is satisfied by design). Does Service Bus ship Standard+Waiver
+as resolved, or Premium+PE for the sprint window?
+
+**Options being considered:**
+- A (architect recommendation under ADR-045): **Premium 1 MU + private endpoint,
+  public_network_access_enabled false.** ~$0.93/hr = ~$22.4/day, roughly $110-160 through an
+  end-of-week teardown (vs ~$680/mo that made OQ-039 reject it). Buys: zero policy exemptions in the
+  root (no Waiver unit, no 300s propagation sleep, no LESSON 35 collision surface), the SAME shape as
+  the production design target (the POC then demonstrates the real posture), PE-only symmetry with
+  every other B2/B3 data-plane service, and simpler QA (compliant-by-design, like AKS/ACR). Cost is
+  the only downside.
+- B (the standing OQ-039 resolution): **Standard + RG-scoped Waiver exemption** on the
+  serviceBusDisablePublicNetworkAccess member (ADR-028/LESSON 35 unit: exemption + 300s sleep +
+  depends_on). ~$0.014/hr (~$10/mo base) - about $120 cheaper over the sprint. Costs: a public
+  data-plane endpoint in a banking POC (Standard cannot attach PEs and cannot meaningfully disable
+  public access; IP firewall rules are Premium-only, so the endpoint is open at the network layer with
+  AAD/SAS auth only), one more exemption unit to build/verify/tear down, and a documented deviation in
+  the fidelity map.
+- C: gate Service Bus off (design-only, default-false flag stays false); Event Hubs alone carries the
+  B3 messaging story. Zero cost, thinnest story.
+
+**Architect note:** if B is chosen it remains safe (the exemption pattern is proven twice); the
+recommendation is A purely because ADR-045 collapsed the cost argument that drove OQ-039, and
+sprint-window Premium is the single cheapest way this estate ever demonstrates the production Service
+Bus posture.
+
+**RESOLVED 2026-07-18 (user):** Option **A** - Service Bus **Premium 1 MU + private endpoint,
+public_network_access_enabled false, AAD-only** (~$22.4/day accepted under the ADR-045 sprint frame).
+The OQ-039 Standard+Waiver posture is RETIRED for Service Bus in this build (no third exemption unit
+is ever built); Premium+PE is now both the POC deployment AND the production design shape. Recorded
+in ADR-046; design doc section 4 updated to Shape A only. Event Hubs unaffected (Standard+PE as
+designed).
+
 ### OQ-043: The landingzones sub is vCPU-full after B2 - quota increase, new banking sub, or B5 design-only?
 
 - **Raised:** 2026-07-18 (B2 design engagement, architect - see ADR-043, docs/b2-aks-platform-design.md)
