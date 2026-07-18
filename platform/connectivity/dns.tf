@@ -1,6 +1,6 @@
 # Purpose: Centralised Private DNS zones for Azure Private Link services.
 # Section: 4 - Private Endpoints + Private DNS
-# Last updated: 2026-05-21
+# Last updated: 2026-07-17 (ADR-042 note: zones + VNet links are the resolution path while the resolver is gated)
 #
 # Architecture:
 #   - Dedicated RG (rg-dns-*) in the Connectivity subscription holds all zones.
@@ -9,6 +9,9 @@
 #     private endpoints natively.
 #   - Each spoke landing zone creates its own per-spoke VNet links
 #     (see landing-zones/*/dns_links.tf) using the azurerm.connectivity alias.
+#   - ADR-042: these zones + VNet links are the resolution path while
+#     enable_dns_resolver = false (Azure-provided DNS via linked zones); the
+#     DNS Private Resolver is not required for private-endpoint resolution.
 
 # ---------------------------------------------------------------------------
 # Resource Group - Private DNS zones

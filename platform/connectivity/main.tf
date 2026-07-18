@@ -1,7 +1,9 @@
-# Purpose: Connectivity platform root module - dual-hub hub-and-spoke VNets with
-#          Azure Firewall Premium (IDPS), VPN Gateway, and DNS Private Resolver.
+# Purpose: Connectivity platform root module - dual-hub hub-and-spoke VNets (network
+#          fabric). Azure Firewall Premium (IDPS), VPN Gateway, and DNS Private Resolver
+#          are flag-gated (default OFF) per ADR-042; their config blocks below stay
+#          inert until enable_firewall / enable_vpn_gateway / enable_dns_resolver flip.
 # Section: 8 - Standard Platform Components
-# Last updated: 2026-07-06 (delegate dns-resolver-outbound subnet to Microsoft.Network/dnsResolvers - fixes ARM 400 SubnetMissingRequiredDelegation on apply)
+# Last updated: 2026-07-17 (ADR-042: gate firewalls, VPN gateway, and DNS resolver behind default-false flags - lean B0b hub)
 #
 # Apply order: Independent of platform/management; run before platform/security
 #              (Firewall private IPs are consumed by spoke UDRs in Section 8 Batch 3+).
@@ -63,9 +65,10 @@ resource "azurerm_resource_group" "connectivity_secondary" {
 # Module: Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet v0.17.1
 # Confirmed on registry.terraform.io 2026-05-12.
 #
-# Primary hub:   Firewall Premium + VPN GW (VpnGw1AZ) + DNS Private Resolver
-# Secondary hub: Firewall Premium only - VPN GW and DNS Resolver on primary only
-#                to reduce idle POC cost (~$1.40/hr for VpnGw1AZ).
+# Primary hub:   fabric + (when flags on) Firewall Premium, VPN GW (VpnGw1AZ), DNS Private Resolver
+# Secondary hub: fabric + (when enable_firewall) Firewall Premium only - VPN GW and DNS
+#                Resolver are primary-hub-only even when enabled.
+# ADR-042: all three appliance flags default false (lean hub); config blocks stay inert.
 #
 # DEVIATION: Azure Firewall Premium TLS inspection requires a Key Vault certificate
 # (Key Vault is created in Section 8 Batch 3 - platform/security). The firewall policy
@@ -93,13 +96,13 @@ module "hub_and_spoke" {
       default_parent_id = azurerm_resource_group.connectivity_primary.id
 
       enabled_resources = {
-        firewall                              = true
-        firewall_policy                       = true
-        bastion                               = var.enable_bastion # On-demand (ADR-015 / G6); default off = $0 idle. Module auto-creates the Standard public IP.
+        firewall                              = var.enable_firewall # ADR-042: default off; also gates the policy, PIP, AzureFirewallSubnet, and hub route tables in the module
+        firewall_policy                       = var.enable_firewall # ADR-042: policy travels with the firewall
+        bastion                               = var.enable_bastion  # On-demand (ADR-015 / G6); default off = $0 idle. Module auto-creates the Standard public IP.
         virtual_network_gateway_express_route = false
-        virtual_network_gateway_vpn           = true
-        private_dns_zones                     = false # Managed in Section 4 (Private Endpoints + DNS)
-        private_dns_resolver                  = true
+        virtual_network_gateway_vpn           = var.enable_vpn_gateway  # ADR-042: default off; GatewaySubnet is module-gated with the gateway
+        private_dns_zones                     = false                   # Managed in Section 4 (Private Endpoints + DNS)
+        private_dns_resolver                  = var.enable_dns_resolver # ADR-042: default off; dns-resolver-outbound subnet stays (free, keeps delegation)
         nat_gateway                           = false
       }
 
@@ -175,8 +178,8 @@ module "hub_and_spoke" {
       default_parent_id = azurerm_resource_group.connectivity_secondary.id
 
       enabled_resources = {
-        firewall                              = true
-        firewall_policy                       = true
+        firewall                              = var.enable_firewall # ADR-042: one flag covers both hubs - the mesh routes reference both firewalls, so they return as a pair
+        firewall_policy                       = var.enable_firewall # ADR-042: policy travels with the firewall
         bastion                               = false
         virtual_network_gateway_express_route = false
         virtual_network_gateway_vpn           = false # Primary VPN only; reduces idle POC cost

@@ -37,7 +37,104 @@
 
 <!-- Newest at the top. -->
 
-### ADR-041: Post-teardown MG-scope RBAC bridge for the B0a redeploy - two time-boxed tenant-root grants (UAA + Cost Management Contributor), bootstrap rebind after the MG tree returns, no Owner re-grant ever
+### ADR-042: Defer the paid hub appliances - flag-gate Azure Firewalls, VPN Gateway, and DNS Private Resolver out of platform/connectivity (lean B0b = network fabric only), preserve the 10.0.0.4 / 10.1.0.4 firewall-IP contract
+
+- **Date:** 2026-07-17
+- **Section:** Banking wave B0b (platform/connectivity redeploy); amends the ADR-015 flag pattern; refines the OQ-034 split-B0 resolution
+- **Status:** Accepted (user decision on the deferral itself, 2026-07-17; architect design of the gating)
+- **Decision makers:** user (deferral), claude (architect - flag design, contract, recovery)
+
+**Context:**
+Apply run 29625961118 (B0b, 702 pure adds, PC-1/PC-2 passed) was cancelled by the user about 12
+minutes in. The cancellation was a scope correction, not a fault: the user never intended the paid
+hub appliances to deploy this early. Two Azure Firewall Premium (~$1.28k/mo each), the VpnGw1AZ VPN
+Gateway (~$260/mo), and the DNS Private Resolver (~$365/mo for two endpoints) would idle with zero
+consumers until B2+ workloads exist, against a ~$5k/mo ceiling. That expectation was never recorded
+in any ADR or OQ - this ADR records it. The cancel SIGKILLED Terraform mid-apply: 13 resources
+landed in the connectivity sub with unknown state coverage (the ADR-029 live-but-unstated class);
+the firewall and both firewall PIPs are being deleted out-of-band on the same user decision.
+
+**Decision:**
+Hub network fabric now, paid appliances later, behind three default-false flags in
+platform/connectivity, following the enable_bastion precedent (ADR-015):
+
+1. `enable_firewall` (bool, default false) - wired to `enabled_resources.firewall` AND
+   `enabled_resources.firewall_policy` on BOTH hubs. Verified in the pinned module source
+   (avm-ptn-alz-connectivity-hub-and-spoke-vnet v0.17.1): setting `enabled_resources.firewall =
+   false` nulls the firewall object per hub (locals.firewall.tf line 42), which removes the
+   firewall, its PIP, the firewall policy (policy creation keys off the firewall flag, line 32),
+   the AzureFirewallSubnet (mesh locals.subnet.tf line 45), and BOTH hub route tables - rt-hub-fw
+   and rt-hub-std are each gated on `firewall != null || hub_router_ip_address != null` (mesh
+   locals.routing.tf lines 3-4). One flag covers both hubs: the deferral is estate-wide and the
+   mesh routes reference both firewalls, so they return as a pair.
+2. `enable_vpn_gateway` (bool, default false) - wired to the PRIMARY hub's
+   `enabled_resources.virtual_network_gateway_vpn` (secondary is already hard false). Explicit
+   ruling: nothing in the POC consumes S2S or P2S VPN, there is no on-premises, and the gateway is
+   the longest single create (30-50 min) and the largest apply risk in the root. GatewaySubnet is
+   module-gated with the gateway (locals.subnets.tf line 24); its 10.0.1.0/27 carve stays reserved
+   in the addressing plan so re-enable is a pure add.
+3. `enable_dns_resolver` (bool, default false) - wired to the primary hub's
+   `enabled_resources.private_dns_resolver`. Architect extension of the same principle: ~$365/mo
+   with no consumer - spokes resolve private-endpoint zones via VNet links + Azure-provided DNS,
+   platform/identity derives its DNS servers from AADDS (not the resolver), and the module's
+   firewall-DNS-proxy default never engages in our config. Flipping the flag restores it in place.
+
+The firewall, firewall_policy, virtual_network_gateways, and private_dns_resolver config blocks
+STAY in main.tf, inert while their flags are false - exactly the bastion pattern. The
+dns-resolver-outbound user subnet also stays (free, keeps its delegation, avoids conditional
+subnet-map churn).
+
+**The firewall-IP contract survives gating.** B1 spokes consume the firewall next-hop as plain
+string variables (`primary_firewall_private_ip` / `secondary_firewall_private_ip`) fed from repo
+Secrets, NOT from this root's outputs. Those secrets stay at 10.0.0.4 / 10.1.0.4. Determinism
+verified against the root's subnet layout: main.tf pins the AzureFirewallSubnet carve to
+`cidrsubnet(<hub /16>, 10, 0)` = 10.0.0.0/26 and 10.1.0.0/26; Azure reserves .0-.3, the subnet is
+dedicated to the firewall, so the firewall's private IP is the first usable address = .4 - and the
+2026-07-06 live deploy landed exactly 10.0.0.4 / 10.1.0.4. While gated off, spoke UDRs point
+0.0.0.0/0 at a VirtualAppliance next-hop that does not exist yet: traffic blackholes, which is
+harmless in network-only spokes (no workloads, no traffic) and is itself a deny-by-default
+posture. Root outputs that index firewall/gateway/resolver maps become `try(..., null)` - they
+must NOT hardcode the IP; the secrets carry the contract.
+
+**When the appliances come back:** `enable_firewall = true` no later than the first wave that
+needs real spoke egress. Recorded candidate triggers: B2 AKS with `outboundType =
+userDefinedRouting` (hard dependency - AKS nodes cannot bootstrap through a blackholed default
+route), and B4 APIM forced tunneling (the parked caveat in bank-app-p1 main.tf). The enabling
+wave's pre-clearance re-runs the lifecycle audit (LESSON 40-41) and plan-scans for PURE ADDS into
+the live VNets - subnets are standalone resources in this module, so the flip must never replace a
+VNet; any `-/+ replace` is a STOP (LESSON 26). `enable_vpn_gateway` and `enable_dns_resolver`
+return only on a demonstrated consumer (hybrid/S2S demo, hybrid DNS), possibly never in this POC.
+
+**Alternatives considered:**
+- Deploy firewalls now as originally planned - rejected by the user: ~$3.2k/mo idle spend with no
+  workload to protect until B2+.
+- Split the root (separate firewall root) - rejected: flags achieve the same deferral without a
+  state migration or a new root; ADR-038 favors consolidated composition roots.
+- Per-hub firewall flags - rejected: no scenario deploys one hub's firewall without the other; two
+  flags double the test matrix for zero current need.
+- Hardcode 10.0.0.4 into the root's firewall-IP outputs while gated - rejected: an output claiming
+  an IP for a nonexistent appliance is a lie in live-vs-intent QA; null is honest and the secrets
+  already carry the contract.
+- Import the 10 surviving partial-apply resources - rejected: 12-minute-old, empty, stateless
+  resources; delete-and-recreate is cheaper than import ceremony and guarantees a pure-create
+  plan (recovery runbook in docs/preclearance/b0b-connectivity.md addendum).
+
+**Consequences:**
+- Positive: lean hub runs at roughly $20-40/mo (89 private DNS zones + fabric) vs ~$3.2k/mo
+  deferred (2x FW Premium ~$2.55k, VpnGw1AZ ~$260, resolver ~$365, 4 PIPs ~$15). B1 unblocks on
+  exactly what it needs: hub VNet IDs/names, the 3 lookup zones in rg-dns, and the deterministic
+  IP secrets.
+- Negative / trade-offs: no spoke internet egress and no east-west inspection while gated (all
+  spoke default routes blackhole); every workload wave inherits a hard ordering gate on
+  enable_firewall; hub route tables (rt-hub-std/rt-hub-fw) do not exist while gated, so nothing
+  may assume them.
+- Follow-ups required: cloud-engineer implements the fix-spec (3 variables, enabled_resources
+  wiring, try() on 6 outputs); recovery runbook executed before the rerun (delete the two
+  connectivity RGs after the in-flight firewall/PIP deletions finish, leave NetworkWatcherRG,
+  force-unlock the state lease if stuck); plan-scan expects roughly 675-680 pure adds with 0
+  firewall/PIP/route-table/gateway/resolver resources; PC-3 secret verification per the amended
+  pre-clearance (IP secrets verified against the carve math, not against live outputs, which are
+  null while gated).
 
 - **Date:** 2026-07-12
 - **Section:** Banking wave B0a (redeploy) / refines ADR-021, advances OQ-008

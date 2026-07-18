@@ -1,11 +1,14 @@
 # Purpose: Multi-Region DR Topology - inter-hub connectivity notes.
 # Section: 3 - Multi-Region DR Topology
-# Last updated: 2026-07-06 (hand hub-to-hub peering to the module's native mesh; drop duplicate azurerm peerings)
+# Last updated: 2026-07-17 (ADR-042 note: mesh is firewall-independent; hub route tables absent while gated)
 #
 # Architecture:
 #   - Hub-to-hub transit between primary (eastus2) and secondary (centralus)
 #     enables the corp-a2 DR spoke to reach corp-a1 resources through the firewall
 #     chain without on-premises VPN traversal.
+#   - ADR-042: the mesh peering is firewall-independent and deploys regardless of
+#     enable_firewall; the module-gated hub route tables (rt-hub-fw/rt-hub-std) are
+#     ABSENT while enable_firewall = false, so nothing may assume they exist.
 #
 # Hub-to-hub peering ownership - module native mesh (no standalone peerings here):
 #   The Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet v0.17.1 module AUTO-MESHES

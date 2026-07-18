@@ -214,3 +214,46 @@ mismatch before B1 plans (B1's data lookups also need the 3 private DNS zones in
 which this apply creates, and the network watcher, which already exists). PLATFORM_LAW_* secrets
 stay valid (the LAW was recovered in-window, QA-confirmed 2026-07-16). Separately, OQ-035
 landingzones-sub quota verification remains a B1-apply gate, not a B0b item.
+
+---
+
+## ADDENDUM 2026-07-17: run 29625961118 cancelled, root re-scoped to the lean (no-appliance) hub - ADR-042
+
+**What changed.** The apply this document cleared was dispatched (PC-1/PC-2 passed) and then
+CANCELLED ~12 min in on a user scope decision: hub network fabric now, paid appliances later
+(ADR-042). The root is being re-scoped behind three default-false flags (`enable_firewall`,
+`enable_vpn_gateway`, `enable_dns_resolver`); the firewalls, their PIPs, the firewall policies,
+both per-hub route tables (module-gated with the firewall), the VPN Gateway + GatewaySubnet, and
+the DNS Private Resolver drop out of the next apply. The cancel SIGKILLED Terraform: 13 resources
+landed with unknown state coverage; the firewall and both firewall PIPs are already being deleted
+out-of-band.
+
+**What carries from the original clearance (valid for the lean subset, which is a strict subset
+of the cleared shape):**
+- Check 1/1a policy matrix: unchanged - the lean root creates fewer types, all already cleared.
+- Check 2 soft-delete/name-reuse: unchanged (still no KV, no SA; now also fewer PIP names).
+- Check 4 provider/module pins + known-issues: unchanged pins; firewall-PIP issue #4196 and the
+  VPN GW issues become moot while gated. Lifecycle audit: still current; the 2026-07-25 recheck
+  clock still applies, and the appliance types must be RE-AUDITED at whatever wave re-enables them.
+- Check 5 tenant prereqs/quota: unchanged; PIP quota need drops from 4 to 0.
+- Check 6 duration: improves - the two long poles (firewalls, VPN GW) are gone; expect a much
+  shorter apply dominated by the 89-zone/178-link bulk.
+- Check 7 cost: SUPERSEDED by ADR-042 - lean hub ~$20-40/mo; the ~$2.7-3k/mo reactivation does
+  NOT happen at B0b.
+
+**Void:** PC-1 (code identity with bbde824) and PC-2 (~702-add plan shape) are void - the gating
+change intentionally alters both.
+
+**New preconditions for the lean apply (replace PC-1/PC-2; PC-3 amended):**
+
+| # | Precondition | Lane |
+|---|--------------|------|
+| PC-1L | Recovery runbook complete BEFORE dispatch: (a) confirm the in-flight deletions of fw-hub-eastus2-001 + both fw PIPs finished; (b) delete resource groups `rg-connectivity-primary-globaris-poc` and `rg-connectivity-secondary-globaris-poc` wholesale - this removes all 8 surviving orphans (2 hub VNets, 2 fw policies, 4 route tables) in two operations; do NOT touch `NetworkWatcherRG` (pre-existing, shared, expected by B1); `rg-dns` was never created. Rationale: every survivor is minutes old, empty, and stateless - delete-and-clean-create beats import (ADR-042); the fw policies and route tables are not even in the lean config. (c) Check the state lease; if stuck from the SIGKILL, run the CI force-unlock action with the lock ID. State entries for out-of-band-deleted resources self-resolve at refresh; after (b) nothing in state can still be live, so the plan MUST be pure creates. | operator + devsecops |
+| PC-2L | Dispatch plan/apply from `banking` at the commit carrying the ADR-042 gating change (code-reviewed). Plan-scan: roughly 675-680 to add, 0 to change, 0 to destroy, 0 replace. Specifically: 0 azurerm_firewall, 0 azurerm_firewall_policy, 0 azurerm_public_ip, 0 route tables/routes, 0 VPN gateway, 0 GatewaySubnet, 0 AzureFirewallSubnet, 0 DNS resolver, 0 DDoS plan, 0 bastion; still present: 3 RGs, 2 hub VNets, hub-to-hub mesh peering (both directions), dns-resolver-outbound subnet, 89 zones + 178 links. ANY destroy or replace = STOP (state was not clean - back to PC-1L, architect disposition). One consolidated disposition per failure set (LESSON 59). | devsecops + architect scan |
+| PC-3L | Post-apply, before any B1 plan: qa-engineer live-vs-intent pass against the LEAN intent (absence of the gated resources is intent, not drift). Secret verification amended: the 6 VNet/RG secrets verify against live outputs as before; PRIMARY/SECONDARY_FIREWALL_PRIVATE_IP verify against the carve math (10.0.0.4 / 10.1.0.4 per ADR-042) because the root's firewall-IP outputs are null while gated - do NOT blank or "fix" these secrets. `primary_dns_resolver_inbound_ips` is null while gated: expected. | qa-engineer + operator |
+
+**Watch-item deltas:** the VPN-GW-duration and firewall-PIP-replace rows in the watch-item table
+are moot while gated (the #4196 tripwire re-arms at the wave that flips `enable_firewall`). All
+other rows stand, including the stuck-lease and 429-bulk-zone rows. New row: a 409
+already-exists on ANY create means PC-1L(b) was incomplete - STOP, enumerate the sub, delete the
+survivor, rerun; do not import mid-incident.
