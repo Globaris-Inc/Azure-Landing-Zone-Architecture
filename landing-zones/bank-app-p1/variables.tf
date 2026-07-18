@@ -1,7 +1,8 @@
 # Purpose: Input variables for the bank-app-p1 landing zone root module (banking
-#          application spoke - B1 network foundation + B2 Kubernetes platform inputs).
-# Section: Banking waves B1-B2 (docs/banking-platform-design.md,
-#          docs/b2-aks-platform-design.md)
+#          application spoke - B1 network foundation + B2 Kubernetes platform +
+#          B3 messaging platform inputs).
+# Section: Banking waves B1-B3 (docs/banking-platform-design.md,
+#          docs/b2-aks-platform-design.md, docs/b3-messaging-platform-design.md)
 # Last updated: 2026-07-18
 
 # ---------------------------------------------------------------------------
@@ -121,6 +122,16 @@ variable "enable_kubernetes_platform" {
 variable "aks_admin_group_object_ids" {
   description = "Entra ID group object IDs granted the cluster admin role via the AKS aad_profile (Azure RBAC enabled, local accounts disabled - ADR-043). REQUIRED when enable_kubernetes_platform is true; no default on purpose. The value arrives via TF_VAR_aks_admin_group_object_ids from the repo secret in CI (poc.secret.tfvars locally) - never commit the GUIDs."
   type        = list(string)
+}
+
+# ---------------------------------------------------------------------------
+# Messaging platform (wave B3 - ADR-045 / ADR-046)
+# ---------------------------------------------------------------------------
+
+variable "enable_messaging_platform" {
+  description = "Deploy the wave B3 messaging/eventing backbone: Event Hubs Standard namespace (1 TU, public access off, SAS auth off) plus the Service Bus Premium namespace (1 MU, public access off, local auth off, TLS 1.2 min) per the OQ-044 shape A resolution - Premium is the only Service Bus tier that attaches private endpoints, making both namespaces compliant with the corp deny initiative by design, no exemption (docs/b3-messaging-platform-design.md; rulings ADR-046 under the ADR-045 sprint frame, EOW teardown). Both PE into snet-private-endpoints on the shared privatelink.servicebus.windows.net zone. Default false per the LESSON 42 flag pattern."
+  type        = bool
+  default     = false
 }
 
 # ---------------------------------------------------------------------------
