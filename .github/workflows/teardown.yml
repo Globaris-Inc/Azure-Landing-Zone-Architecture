@@ -1,7 +1,7 @@
 # .github/workflows/teardown.yml
 # Purpose: Manual, guarded teardown of ONE root or the WHOLE environment (reverse order).
 # Section: 10 — Pipeline & Tooling (ADR-019, OQ-012/OQ-013).
-# Last updated: 2026-06-27
+# Last updated: 2026-07-16
 #
 # Guards (destroy is irreversible):
 #   1. `confirm` must be typed exactly as `destroy` (a cheap pre-check before any login).
@@ -34,6 +34,8 @@ on:
           - landing-zones/corp-a1
           - landing-zones/corp-a2
           - landing-zones/online-p1
+          - landing-zones/bank-app-p1
+          - landing-zones/bank-data-p1
           - synthetic
       confirm:
         description: "Type 'destroy' to confirm. Anything else aborts before any login."
@@ -110,8 +112,30 @@ jobs:
       gh_environment: production-destroy
     secrets: inherit
 
+  bank-app-p1:
+    needs: [guard, synthetic]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/bank-app-p1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/bank-app-p1
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
+  bank-data-p1:
+    needs: [guard, synthetic]
+    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/bank-data-p1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/bank-data-p1
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+    secrets: inherit
+
   connectivity:
-    needs: [guard, corp-a1, corp-a2, online-p1]
+    needs: [guard, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1]
     if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/connectivity') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
@@ -122,7 +146,7 @@ jobs:
     secrets: inherit
 
   security:
-    needs: [guard, corp-a1, corp-a2, online-p1]
+    needs: [guard, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1]
     if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/security') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
