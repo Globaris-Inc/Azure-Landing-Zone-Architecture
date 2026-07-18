@@ -2,7 +2,7 @@
 # Purpose: Manual Terraform plan/apply for ONE root or the WHOLE environment (in order).
 # Section: 10 — Pipeline & Tooling (ADR-019). Replaces apply-on-merge.yml (LESSON 17:
 #          deploys are explicit, not merge-triggered).
-# Last updated: 2026-06-27
+# Last updated: 2026-07-16
 #
 # Requirement 1 (per-root): set target=<a single root>.
 # Requirement 2 (full env): set target=all — the needs: graph applies every root in
@@ -40,6 +40,8 @@ on:
           - landing-zones/corp-a1
           - landing-zones/corp-a2
           - landing-zones/online-p1
+          - landing-zones/bank-app-p1
+          - landing-zones/bank-data-p1
           - synthetic
       action:
         description: "plan (dry-run, ungated) | apply (gated by production) | untaint (state op, single target + resource_address) | force-unlock (state op, single target + lock_id)"
@@ -235,8 +237,42 @@ jobs:
       manage_runner_ip: ${{ inputs.target != 'all' }}
     secrets: inherit
 
+  bank-app-p1:
+    needs: [connectivity, security]
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'landing-zones/bank-app-p1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/bank-app-p1
+      action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
+    secrets: inherit
+
+  bank-data-p1:
+    needs: [connectivity, security]
+    if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'landing-zones/bank-data-p1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/bank-data-p1
+      action: ${{ inputs.action }}
+      resource_address: ${{ inputs.resource_address }}
+      lock_id: ${{ inputs.lock_id }}
+      backend_rel: "../../"
+      gh_environment: ${{ inputs.action == 'apply' && 'production' || '' }}
+      # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
+      # only (races on target=all, where sibling roots mutate the same SA firewall).
+      manage_runner_ip: ${{ inputs.target != 'all' }}
+    secrets: inherit
+
   synthetic:
-    needs: [corp-a1, corp-a2, online-p1]
+    # Ordering hygiene only: synthetic does not consume bank-app-p1/bank-data-p1 outputs,
+    # but for target=all it should still run after every landing-zone spoke, not just corp/online.
+    needs: [corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1]
     if: ${{ !failure() && !cancelled() && ((inputs.target == 'all' && inputs.action != 'untaint' && inputs.action != 'force-unlock') || inputs.target == 'synthetic') }}
     uses: ./.github/workflows/_tf-root.yml
     with:

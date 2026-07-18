@@ -2,7 +2,7 @@
 # Purpose: Run terraform plan on every pull request targeting main.
 #          Posts plan output as a PR comment for each root module.
 # Section: 10a — Pipeline & Tooling (bootstrap subset)
-# Last updated: 2026-05-05
+# Last updated: 2026-07-16
 #
 # Authentication: OIDC federated credential — no secrets stored in GitHub.
 # Repository variables required (Settings → Secrets and variables → Variables):
@@ -90,6 +90,8 @@ jobs:
           - landing-zones/corp-a1
           - landing-zones/corp-a2
           - landing-zones/online-p1
+          - landing-zones/bank-app-p1
+          - landing-zones/bank-data-p1
           - synthetic
 
     steps:

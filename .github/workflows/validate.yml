@@ -5,7 +5,7 @@
 #          that makes a 🟢 "Complete" status impossible to outrun an actual
 #          validate (the OQ-011 failure mode).
 # Section: 10a — Pipeline & Tooling (validate gate; ADR-018)
-# Last updated: 2026-06-27
+# Last updated: 2026-07-16
 #
 # Authentication: NONE. Validate-only runs need no OIDC, no secrets, no backend.
 #   `terraform init -backend=false` skips backend config and remote state; the
@@ -86,6 +86,8 @@ jobs:
           - landing-zones/corp-a1
           - landing-zones/corp-a2
           - landing-zones/online-p1
+          - landing-zones/bank-app-p1
+          - landing-zones/bank-data-p1
           - synthetic
 
     steps:
