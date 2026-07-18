@@ -2,7 +2,7 @@
 # Purpose: Run terraform plan on every pull request targeting main.
 #          Posts plan output as a PR comment for each root module.
 # Section: 10a — Pipeline & Tooling (bootstrap subset)
-# Last updated: 2026-07-16
+# Last updated: 2026-07-18
 #
 # Authentication: OIDC federated credential — no secrets stored in GitHub.
 # Repository variables required (Settings → Secrets and variables → Variables):
@@ -73,6 +73,8 @@ env:
   TF_VAR_cost_pattern_budget_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
   # Section 13.6 — Synthetic cost-guardrails budget + action group recipients
   TF_VAR_cost_guardrails_alert_emails:     '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
+  # Wave B2 - AKS (ADR-043/044)
+  TF_VAR_aks_admin_group_object_ids:       '["${{ secrets.AKS_ADMIN_GROUP_OBJECT_ID }}"]'
 
 jobs:
   plan:
