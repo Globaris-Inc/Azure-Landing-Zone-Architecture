@@ -110,6 +110,42 @@ module.acr, or the UAI/role assignments beyond tag noise; ANY policy exemption o
 the plan (shape A has none - an exemption appearing means wrong code); ANY PIP/NSG/subnet/route
 resource; a THIRD private endpoint.
 
+### 4a. PC-3M disposition, apply 2 (plan run 29662551030): APPROVED WITH ONE ACCEPTED REPLACE + a mandated durable fix
+
+Recorded shape `13 add, 18 change, 1 destroy`. Adds: all 13 exact-match the bar, zero
+exemptions/sleeps. Changes: noise-class, zero non-tag attributes. The STOP item:
+`module.acr["main"].azurerm_role_assignment.this["kubelet_acr_pull"]` forced replace, cause
+`principal_id -> (known after apply)`.
+
+**Root cause (architect-confirmed):** the RA's principal_id is wired to
+`module.aks["main"].kubelet_identity.objectId`, an azapi `response_export_values` computed
+output. Whenever the AKS module has ANY pending change (including pure tag-noise plans), its
+computed outputs defer to known-after-apply and cascade a ForceNew replace into a perfectly
+valid role assignment. This is a plan-graph artifact, not drift: the kubelet identity objectId
+is stable for the cluster's life, so the RA is recreated with IDENTICAL values.
+
+**Disposition (LESSON 59, one unit):**
+1. **ACCEPT this single replace for apply 2.** The momentary AcrPull gap during
+   destroy-then-create has zero impact: no workload pulls from this ACR (B2 deployed no pods;
+   system pods pull from MCR through the firewall path). LESSON 26's replace-STOP is satisfied
+   by this disposition: no posture regression, no deprecation-blocked recreate.
+2. **Durable fix MANDATED for the next bank-app-p1-touching batch (fix-spec):** decouple the
+   RA's principal_id from the module's computed output. Specified form: a
+   `data.azurerm_kubernetes_cluster` lookup whose `name`/`resource_group_name` are the ROOT'S
+   OWN deterministic strings (NOT module outputs, NO depends_on on the module - either would
+   re-defer the read), gated on the same flag, with
+   `principal_id = data.azurerm_kubernetes_cluster.<x>.kubelet_identity[0].object_id`
+   (attribute verified against azurerm 4.x docs at build). Data sources with static arguments
+   resolve at refresh time, so module-internal churn can no longer cascade. Alternative if the
+   attribute misbehaves: `data.azurerm_user_assigned_identity` on the deterministic
+   `<cluster>-agentpool` UAI in the node RG.
+3. **Interim bar amendment:** until the fix lands, ANY bank-app-p1 plan may carry EXACTLY this
+   one replace (this address, this cause). Plan scans treat it as a known-accepted deviation,
+   narrowly scoped; a replace at any other address, or this address with any other cause, stays
+   a full STOP.
+4. **PC-4M addition:** post-apply, QA verifies the recreated RA is live (AcrPull, ACR scope,
+   kubelet identity principal) - the replace must land, not just plan.
+
 ## 5. QA checklist (PC-4M, feeds the qa-engineer pass)
 
 1. Both namespaces live in the shared RG: EH Standard/1TU, SB **Premium/1MU/1 partition**; both
