@@ -257,3 +257,34 @@ are moot while gated (the #4196 tripwire re-arms at the wave that flips `enable_
 other rows stand, including the stuck-lease and 429-bulk-zone rows. New row: a 409
 already-exists on ANY create means PC-1L(b) was incomplete - STOP, enumerate the sub, delete the
 survivor, rerun; do not import mid-incident.
+
+### PC-2L scan disposition, 2026-07-17 (architect): APPROVED - single consolidated ruling (LESSON 59)
+
+Plan run 29627562853 (banking @ 6b76623, post-ADR-042 gating, post-PC-1L runbook + force-unlock
+run 29627514245) printed `630 to add, 4 to change, 20 to destroy` against the PC-2L bar of pure
+adds. Deviations dispositioned as ONE unit:
+
+- **20 destroys: APPROVED.** All are `modtm_telemetry`/`random_uuid` pairs inside the five gated
+  firewall submodule chains (fw_default_ips, fw_policies, hub_firewalls, hub_routing_firewall,
+  hub_routing_user_subnets, x2 hubs), recorded in state by the killed apply and config-removed by
+  the gating. These are state-only pseudo-resources; destroying them performs no ARM mutation.
+  The LESSON 26 stop-rule targets live-resource destroys/replaces; none exist here (0 replaces,
+  grep-verified).
+- **4 changes: APPROVED.** rg-dns tag update is the accepted OQ-032 CreatedDate-strip class; the
+  3 modtm payload updates are config-hash noise from the gating.
+- **630 adds vs the 675-680 estimate: RECONCILED, bar amended to the 630/4/20 shape.** The gap is
+  state-satisfied no-ops (surviving telemetry pairs of non-gated submodules, time/random anchors,
+  watchers) plus rg-dns moving from create to change. Zero firewall/VPN-GW/resolver/route-table/
+  PIP/GatewaySubnet/AzureFirewallSubnet resources in the creates (grep-verified), 0 DDoS,
+  0 bastion.
+- **PC-1L runbook deviation RATIFIED:** `rg-dns-globaris-poc` survived the killed apply (RGs were
+  outside the resource-level enumeration) and was correctly LEFT in place - it is empty, in the
+  lean config, and in state, so refresh reconciles it as a benign tag-only change. No action.
+
+Conditions on the apply: (1) destroy set at apply time must remain exactly the 20
+modtm/random_uuid addresses - any azurerm/azapi destroy appearing = STOP; (2) post-apply
+spot-check that the 89 zones (including B1's 3 lookup zones) and 178 links landed in
+`rg-dns-globaris-poc`; (3) PC-3L stands unchanged (lean-intent QA, 6 VNet/RG secrets vs live
+outputs, IP secrets verified against carve math, null resolver output expected); (4) first
+post-apply plan will show OQ-032 CreatedDate drift on new resources - accepted noise, not a
+defect.
