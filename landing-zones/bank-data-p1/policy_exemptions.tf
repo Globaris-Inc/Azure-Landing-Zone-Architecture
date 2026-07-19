@@ -1,8 +1,11 @@
-# Purpose: bank-data-p1 RG-scoped Waiver policy exemption for the corp-MG
-#          Deny-Public-Endpoints (Deny-PublicPaaSEndpoints) StorageDenyPaasPublicIP
-#          member (OQ-024, ADR-028 pattern).
-# Section: Banking wave B1 - banking network foundation / policy
-# Last updated: 2026-07-16
+# Purpose: bank-data-p1 policy exemptions for the corp-MG Deny-Public-Endpoints
+#          (Deny-PublicPaaSEndpoints) StorageDenyPaasPublicIP member:
+#          (1) B1 RG-scoped Waiver for the flow-log SA (OQ-024, ADR-028 pattern);
+#          (2) B5 subscription-scoped EXPIRING Waiver for the Databricks managed-RG
+#              dbstorage* SA create (ADR-048 collision unit, guarantee half).
+# Section: Banking wave B1 (flow-log waiver) + wave B5 (dbstorage waiver,
+#          docs/b5-data-platform-design.md section 4; ADR-048)
+# Last updated: 2026-07-18
 #
 # bank-data-p1 sits under the corp MG in the landingzones subscription (OQ-035
 # resolution), so it inherits the corp archetype Deny-Public-Endpoints initiative.
@@ -57,4 +60,44 @@ resource "time_sleep" "wait_corp_policy_exemptions" {
   create_duration = "300s"
 
   depends_on = [azurerm_resource_group_policy_exemption.corp_paas]
+}
+
+# ---------------------------------------------------------------------------
+# Wave B5: subscription-scoped expiring Waiver for the Databricks managed-RG
+# dbstorage* storage account (ADR-048 / design doc section 4 - the collision
+# unit's GUARANTEE half; the posture half is default_storage_firewall_enabled
+# in databricks.tf). Why SUBSCRIPTION scope: the RP-created managed RG does not
+# exist until the workspace create is already in flight, so an RG-scoped
+# exemption (the OQ-024 shape) cannot exist before the PUT it must admit - racy
+# by construction. Scoped to the single StorageDenyPaasPublicIP member only and
+# SELF-EXPIRING 2026-08-01 (past the ADR-045 EOW teardown). QA records the live
+# dbstorage publicNetworkAccess value post-apply; the exemption may be dropped
+# early if the SA lands Disabled-or-equivalent.
+# Schema (incl. the expires_on argument name - the ARM property is
+# expirationDate) verified against azurerm v4.71.0 docs 2026-07-18.
+# ---------------------------------------------------------------------------
+
+resource "azurerm_subscription_policy_exemption" "dbx_managed_storage" {
+  for_each = var.enable_data_platform ? { main = "main" } : {}
+
+  name                            = "exempt-dbx-managed-storage-bank-data-p1"
+  subscription_id                 = "/subscriptions/${var.landingzones_subscription_id}"
+  policy_assignment_id            = local.deny_public_endpoints_assignment_id
+  policy_definition_reference_ids = ["StorageDenyPaasPublicIP"]
+  exemption_category              = "Waiver"
+  expires_on                      = "2026-08-01T00:00:00Z"
+
+  display_name = "Databricks managed-RG dbstorage create waiver (ADR-048)"
+  # Provider limit: description must be <= 512 chars (validate-enforced).
+  description = "Wave B5 guarantee half of the ADR-048 dbstorage collision unit: the Databricks RP creates the workspace DBFS storage account in its managed RG at workspace create, and the RP PUT sequencing vs the corp StorageDenyPaasPublicIP Deny is not verifiable pre-apply. Subscription-scoped because the managed RG does not exist until the create is in flight. Single-member scope; self-expires 2026-08-01. Posture half: default storage firewall keeps the SA private. See docs/b5-data-platform-design.md section 4."
+}
+
+# 300s async-propagation buffer before the access connector + workspace create
+# (ADR-028 / LESSON 35 unit; databricks.tf depends_on this sleep).
+resource "time_sleep" "wait_dbx_storage_exemption" {
+  for_each = var.enable_data_platform ? toset(["this"]) : toset([])
+
+  create_duration = "300s"
+
+  depends_on = [azurerm_subscription_policy_exemption.dbx_managed_storage]
 }

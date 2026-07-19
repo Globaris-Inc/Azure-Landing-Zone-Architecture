@@ -227,6 +227,30 @@ enable_messaging_platform = true
 enable_api_platform = true
 
 # ---------------------------------------------------------------------------
+# Banking wave B5 - data platform (ADR-048)
+# ---------------------------------------------------------------------------
+# Databricks Premium workspace (VNet-injected into the two B1 delegated subnets,
+# NPIP, default storage firewall + pre-created access connector) plus the ADLS
+# Gen2 data lake (HNS, PE-only blob+dfs) in bank-data-p1, the subscription-scoped
+# EXPIRING dbstorage Waiver exemption (self-expires 2026-08-01; the ADR-048
+# collision unit's guarantee half), and rcg-dbx-egress-primary (priority 320,
+# service-tag-only, rides enable_firewall above) on the primary hub policy.
+# Flags default false in the root (LESSON 42); this reviewed-commit entry is the
+# flag supply (ADR-044 precedent). ORDERING (design doc section 10): apply
+# platform/connectivity FIRST (pattern consistency; not create-blocking - no
+# cluster egress exists), THEN bank-data-p1. ~$1/day at the suspended-Fabric
+# posture. HARD BOUNDARY: no clusters/jobs/warehouses/UC config - the workspace
+# create consumes zero Compute vCPUs.
+enable_data_platform = true
+
+# STAYS FALSE until OQ-045 resolves (Fabric capacity admin principal, supplied
+# via TF_VAR_fabric_admin_members - empty-list ARM acceptance is UNVERIFIED, so
+# the flag keeps an empty admin list from ever reaching ARM). When flipped: F2
+# deploys ACTIVE (~$0.36/hr); ruled posture is suspend same-day post-QA via
+# az fabric capacity suspend (ADR-048).
+enable_fabric_capacity = false
+
+# ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
 # ---------------------------------------------------------------------------
 

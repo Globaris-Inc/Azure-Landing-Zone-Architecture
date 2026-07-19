@@ -1,7 +1,9 @@
 # Purpose: Input variables for the bank-data-p1 landing zone root module (banking
-#          data + AI spoke - network foundation only at wave B1).
+#          data + AI spoke - network foundation at wave B1; data platform flags at
+#          wave B5).
 # Section: Banking wave B1 - banking network foundation (docs/banking-platform-design.md)
-# Last updated: 2026-07-16
+#          + wave B5 - data platform (docs/b5-data-platform-design.md; ADR-048)
+# Last updated: 2026-07-18
 
 # ---------------------------------------------------------------------------
 # Subscription targeting
@@ -105,6 +107,38 @@ variable "enable_corp_policy_exemptions" {
   description = "Create the RG-scoped Waiver policy exemption for the corp-MG Deny-Public-Endpoints StorageDenyPaasPublicIP member on the flow-log storage account, which cannot be made compliant without breaking flow-log delivery. Default true; set false only if this spoke is moved out from under the corp MG or the governance changes (OQ-024)."
   type        = bool
   default     = true
+}
+
+# ---------------------------------------------------------------------------
+# Wave B5 - data platform flags (docs/b5-data-platform-design.md; ADR-048)
+# ---------------------------------------------------------------------------
+
+variable "enable_data_platform" {
+  description = "Deploy the wave B5 data platform: Databricks Premium workspace (VNet-injected, NPIP, default storage firewall + access connector), the subscription-scoped expiring dbstorage Waiver exemption + 300s sleep, and the ADLS Gen2 data lake (HNS, PE-only blob+dfs, raw filesystem). Default false (LESSON 42 flag pattern); the reviewed-commit flag supply lives in envs/poc.tfvars. ~$1/day while enabled with no clusters (design doc section 9)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_fabric_capacity" {
+  description = "Deploy the Microsoft Fabric F2 capacity (fabric.tf). SEPARATE flag from enable_data_platform because Fabric carries an independent offer-availability risk and the OQ-045 admin-principal dependency: stays false until OQ-045 supplies fabric_admin_members (empty-list ARM acceptance is UNVERIFIED). Deploys ACTIVE at ~$0.36/hr; ruled posture is suspend same-day post-QA (ADR-048)."
+  type        = bool
+  default     = false
+
+  # Code-enforces the OQ-045 coupling (reviewer finding, B5 batch): the flag must
+  # not reach ARM with an empty admin list - empty-list PUT acceptance is
+  # UNVERIFIED (design doc section 2) and a capacity without an admin is
+  # unmanageable in the Fabric portal. Cross-variable validation requires
+  # terraform >= 1.9; this root's required_version floor is >= 1.9 (providers.tf).
+  validation {
+    condition     = var.enable_fabric_capacity == false || length(var.fabric_admin_members) > 0
+    error_message = "enable_fabric_capacity = true requires a non-empty fabric_admin_members list (OQ-045: supply the capacity admin principal via TF_VAR_fabric_admin_members / poc.secret.tfvars). Empty-list ARM acceptance is unverified - the flag stays false until OQ-045 resolves."
+  }
+}
+
+variable "fabric_admin_members" {
+  description = "Administrator identities for the Fabric capacity - UPN format for Entra users, object ID for service principals. Supplied via TF_VAR_fabric_admin_members from a GitHub Actions variable (poc.secret.tfvars locally) once OQ-045 resolves; never committed (no personal values in the repo). Default [] is safe only because enable_fabric_capacity gates the resource off until the value arrives."
+  type        = list(string)
+  default     = []
 }
 
 # ---------------------------------------------------------------------------

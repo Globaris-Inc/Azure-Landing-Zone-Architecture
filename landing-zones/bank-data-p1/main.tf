@@ -5,7 +5,8 @@
 #          workload resources.
 # Section: Banking wave B1 - banking network foundation (docs/banking-platform-design.md
 #          sections 2.0, 2.3-2.4; placement per OQ-035 resolution)
-# Last updated: 2026-07-16
+# Last updated: 2026-07-18 (wave B5: NSG drift guard on nsg-databricks, ADR-048;
+#          workload resources live in databricks.tf / datalake.tf / fabric.tf)
 #
 # Architecture:
 #   - Spoke VNet (default 10.32.0.0/16, eastus2) peered to primary hub VNet
@@ -28,8 +29,10 @@
 #     rule is authored here, which does not conflict (LESSON 45 class checked: no
 #     custom Deny-All that would shadow required intra-VNet allows).
 #   - Egress via UDR (secure cluster connectivity + firewall) is supported; the
-#     required firewall allowances for the Databricks control plane are wave B5
-#     pre-clearance scope.
+#     required firewall allowances for the Databricks control plane ship at wave
+#     B5 as rcg-dbx-egress-primary (service-tag-only rules) in
+#     platform/connectivity/firewall_rules_databricks.tf (ADR-048 - the B1-parked
+#     caveat CLOSES there).
 #
 # Address space: ARCHITECT-CONFIRMED (B1 amendment ruling). Banking allocation table:
 #   10.30.0.0/16 - bank-app-p1 (eastus2, landing-zones/bank-app-p1)
@@ -145,6 +148,18 @@ resource "azurerm_network_security_group" "databricks" {
   }
 
   tags = local.common_tags
+
+  # Wave B5 NSG drift guard (ADR-048 / design doc section 3.4): at workspace
+  # create the Databricks RP injects its required rules
+  # (Microsoft.Databricks-workspaces_UseOnly_*) into THIS NSG via the subnet
+  # delegation's Network Intent Policy. Inline security_rule blocks are
+  # authoritative, so without this guard every later apply would try to strip
+  # the RP rules - a permanent fight with the intent policy. The one authored
+  # baseline rule above is static; ignoring rule drift here is the correct
+  # steady state. The spoke NSG is untouched.
+  lifecycle {
+    ignore_changes = [security_rule]
+  }
 }
 
 # ---------------------------------------------------------------------------
