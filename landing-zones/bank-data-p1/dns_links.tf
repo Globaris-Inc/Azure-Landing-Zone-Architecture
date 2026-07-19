@@ -1,19 +1,23 @@
 # Purpose: bank-data-p1 Private DNS VNet links and VNet flow log.
 # Section: Banking wave B1 - banking network foundation (docs/banking-platform-design.md)
-# Last updated: 2026-07-16
+#          + wave B6 services.ai link (docs/b6-ai-platform-design.md; ADR-051)
+# Last updated: 2026-07-19
 #
 # Architecture:
-#   - Zone links registered NOW (B1 network wave, per the design doc B1 scope) for the
-#     zones the bank-data-p1 workload waves resolve through: ADLS Gen2 blob + dfs and
+#   - Zone links registered at B1 (design doc B1 scope) for the zones the
+#     bank-data-p1 workload waves resolve through: ADLS Gen2 blob + dfs and
 #     Databricks front/back-end (wave B5); Foundry/OpenAI, Document Intelligence
-#     (cognitiveservices) and AI Search (wave B6). All six zones are in the estate's
-#     central zone set: platform/connectivity deploys the FULL AVM default zone list
-#     (avm-ptn-network-private-link-private-dns-zones 0.23.1), which includes
-#     privatelink.blob.core.windows.net, privatelink.dfs.core.windows.net,
-#     privatelink.azuredatabricks.net, privatelink.openai.azure.com,
-#     privatelink.cognitiveservices.azure.com and privatelink.search.windows.net
+#     (cognitiveservices) and AI Search (wave B6). Wave B6 adds the ONE missing
+#     link: privatelink.services.ai.azure.com, the required third zone for
+#     Foundry-resource account PEs (design doc section 3). All seven zones are in
+#     the estate's central zone set: platform/connectivity deploys the FULL AVM
+#     default zone list (avm-ptn-network-private-link-private-dns-zones 0.23.1),
+#     which includes privatelink.blob.core.windows.net,
+#     privatelink.dfs.core.windows.net, privatelink.azuredatabricks.net,
+#     privatelink.openai.azure.com, privatelink.cognitiveservices.azure.com,
+#     privatelink.services.ai.azure.com and privatelink.search.windows.net
 #     (verified in the pinned module source
-#     .terraform/modules/private_dns_zones/variables.tf, 2026-07-15).
+#     .terraform/modules/private_dns_zones/variables.tf, re-checked 2026-07-19).
 #   - Single VNet flow log covering the whole spoke VNet with Traffic Analytics to the
 #     platform LAW (NSG flow logs retired 2025-06-30; a VNet supports ONE flow log -
 #     estate template fix, WORKLOG 2026-07-10).
@@ -32,6 +36,7 @@ locals {
     openai            = "privatelink.openai.azure.com"
     cognitiveservices = "privatelink.cognitiveservices.azure.com"
     search            = "privatelink.search.windows.net"
+    servicesai        = "privatelink.services.ai.azure.com" # wave B6 (ADR-051): third zone of the Foundry account PE group
   }
 }
 
