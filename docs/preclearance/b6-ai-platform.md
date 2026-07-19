@@ -91,3 +91,92 @@ Hard bars:
 | **PC-3E** | Single apply, single dispatch; no second dispatch while running |
 | **PC-4E** | QA per section 5 before green; DNS resolution REQUIRED, completion call best-effort |
 | **PC-5E** | Lifecycle clock: model verified GA TODAY; if the apply slips past 2026-07-25 re-list the eastus2 catalog before applying (the model catch is the whole point of this wave) |
+
+### ADDENDUM 2026-07-19 - PC-2E plan-scan disposition (run 29677918828): APPROVED for apply
+
+`18 add / 22 change / 0 destroy`. All 18 adds exact-match the section 3 bar (Foundry azapi
+ai_service + chat deployment + PE + 3-zone group + interfaces + diag + telemetry +
+wait_ai_service_creation sleep; Search service + PE + diag + telemetry; the +1 servicesai zone
+LINK). 0 destroys, 0 replaces. Non-noise change counter = 0 (all 22 changes are OQ-032
+CreatedDate strips).
+
+**Fabric watch-item RESOLVED (the PC-2E STOP guard did its job by forcing the read):** the plan
+DOES carry `azurerm_fabric_capacity.this["main"]` but as `updated in-place`, full diff = exactly
+ONE attribute `tags "CreatedDate" 1970-01-01 -> null` - no sku, no administration_members, no
+state/pause attribute. This is NOT the create/replace the bar stops on; it is the identical
+OQ-032 CreatedDate-strip noise hitting all 22 changed resources, and it independently confirms
+the design prediction that the out-of-band suspend produces ZERO config drift. The "expected
+NO-OP" is functionally met (zero functional change). **CLOSED-BY-RULE under the standing OQ-032
+disposition.** Bar language tightened for future waves: "no fabric FUNCTIONAL change" (a
+tags-only OQ-032 strip is permitted; any sku/members/create/replace remains a STOP).
+
+**Disposition: APPROVED for apply.** PC-1E (Foundry PE race) remains the live watch during the
+apply. NOTE (b12): no deployment gate is operative, so this written disposition is the last
+control before the apply - single-dispatcher discipline applies.
+
+### ADDENDUM 2026-07-19 - apply 29678062833 FAILED (3 classes): diagnosis + ONE consolidated fix-spec
+
+STOP honoured. NOT the PC-1E PE race (zero AccountProvisioningState errors). Partial state
+(live-verified): **Foundry account `aif-bank-data-p1-globaris-poc` LIVE / Succeeded / eastus2**
+(create succeeded - in TF state); **Search: none created**; **Fabric: still Paused, unchanged**.
+Three distinct classes, one bank-data-p1 batch fixes all three (cloud-engineer implements,
+reviewer gates, single rerun).
+
+**CLASS 1 - AI Search eastus2 capacity exhaustion (`InsufficientResourcesAvailable`).** Not a
+code defect; a live regional capacity shortage. RULED (user steer): **deploy Search in centralus.**
+- Fix: new variable `search_location` (string, default `"centralus"`, DEVIATION description
+  mirroring `fabric_location`: eastus2 InsufficientResourcesAvailable 2026-07-19); `ai.tf` Search
+  module `location = var.search_location`.
+- **Cross-region PE CONFIRMED coherent:** a private endpoint is a NIC in ITS subnet's region
+  (eastus2 snet-private-endpoints 10.32.2.0/24); the target Search service may live in centralus;
+  Azure supports cross-region PE and private DNS is region-agnostic (one A record in the
+  spoke-linked search zone regardless of service region). The Search PE STAYS in the eastus2
+  spoke subnet - no PE change beyond the service location. QA verifies the A record resolves to
+  the eastus2 PE IP as before.
+- Register: another eastus2-capacity deviation feeds the B-R region-alignment item (see below).
+
+**CLASS 2 - Foundry PE 3-zone group `DuplicateResourceName` (MODULE BUG, not our input).**
+Diagnosed from v0.11.1 source: the `private_endpoints` variable exposes only
+`private_dns_zone_group_name` (single, default "default") + `private_dns_zone_resource_ids` (a
+set) - NO per-zone config-name field. The interfaces submodule builds one
+`privateDnsZoneConfig` per zone but names them all "default", so a 3-zone set collides
+("two child resources with the same name (default)"). Our input is CORRECT and cannot fix it -
+first-consumption module bug on the multi-zone-single-PE shape (single-zone PEs, as in datalake.tf,
+are unaffected, which is why B5 was clean).
+- Fix (surgical, reuses the LIVE account and the already-created module PE NIC): set
+  `private_endpoints_manage_dns_zone_group = false` on the Foundry module call so the module
+  builds ONLY the account + the PE and STOPS emitting the broken zone group; then author a
+  native **`azapi_resource` privateDnsZoneGroup** (`# DEVIATION:` citing this addendum) against
+  the module PE id, `body.properties.privateDnsZoneConfigs` = THREE explicitly-named configs
+  (`cognitiveservices` / `openai` / `servicesai`, each with its zone id). Explicit names kill the
+  collision. Cloud-engineer verifies the module output exposing the PE id under
+  manage_dns_zone_group=false (the `private_endpoints_unmanaged` path, main.privateendpoint.tf
+  line 73) and the current privateDnsZoneGroups ARM api-version.
+- **Reconciliation of the live account:** `terraform state list` MUST show the Foundry account
+  (create succeeded before the PE step, so it is in state) - expected a NO-OP/OQ-032-tag-strip on
+  rerun, NOT a recreate; if absent (partial state write), IMPORT via the live resource id, do NOT
+  recreate. If the module's azapi PE was created and is in state, it stays (we keep the module
+  PE, only its zone group moves to the native resource); if a PE exists in Azure but NOT in state,
+  delete it out-of-band before rerun to avoid a name collision. A `-/+` on the Foundry ACCOUNT at
+  plan = STOP (must never recreate the live account).
+
+**CLASS 3 - Fabric paused-capacity tag update (`400 Service is not ready to be updated`) -
+HONEST CORRECTION.** The OQ-032 CreatedDate tag-strip we jointly dispositioned as benign CANNOT
+apply to a PAUSED capacity, and would fail EVERY future bank-data-p1 apply while Fabric is paused.
+My B5 "out-of-band suspend produces zero config drift" prediction was WRONG in one respect: the
+suspend produces no drift in the capacity's OWN attributes, but it makes the standing policy-tag
+churn UNAPPLIABLE - recorded as the pause-vs-OQ032 interaction correction.
+- Fix: `lifecycle { ignore_changes = [tags] }` on `azurerm_fabric_capacity.this`. Confirmed no
+  conflict: tags are set at create; we never update them intentionally; the ONLY tag churn is the
+  policy-injected CreatedDate strip we do not want TF fighting anyway; pause state is not a tag,
+  so ignoring tags does not touch the suspend/resume path. Cleanest and correct.
+
+**Consolidated batch (ONE bank-data-p1 change, LESSON 59 - narrows the failure class):**
+`search_location` variable + `ai.tf` Search location; Foundry module
+`private_endpoints_manage_dns_zone_group = false` + native azapi 3-config zone group; fabric
+`lifecycle ignore_changes = [tags]`. Reviewer delta-gates. Rerun plan bar: adds = Search set
+(now centralus) + the native Foundry zone group; the Foundry ACCOUNT + its module PE = no-op (or
+tag-strip only); fabric = NO plan line at all now (tags ignored); 0 destroys/replaces EXCEPT the
+possible removal of the module's broken zone-group address if it reached state (it did not -
+it errored); any Foundry-account or live-PE replace = STOP. Rerun is single-dispatch; PC-1E PE
+race still watched on the (native) PE create.
