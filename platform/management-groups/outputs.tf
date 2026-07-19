@@ -29,3 +29,17 @@ output "alz_module_outputs" {
   value       = module.alz_management_groups
   sensitive   = false
 }
+
+# ---------------------------------------------------------------------------
+# Wave B7 - Operations & Monitoring Phase 1 (AMBA-ALZ) - ADR-052
+# ---------------------------------------------------------------------------
+
+output "amba_architecture_name" {
+  description = "The architecture selected for the avm-ptn-alz module - globaris-amba when wave B7 (enable_om_phase1) is on, else globaris. QA/plan-scan sanity check."
+  value       = var.enable_om_phase1 ? "globaris-amba" : "globaris"
+}
+
+output "amba_byo_managed_identity_id" {
+  description = "Deterministic resource id of the AMBA bring-your-own remediation identity that the Deploy-AMBA-* alert policies reference. MUST equal platform/management output amba_managed_identity_id (the MI the companion avm-ptn-monitoring-amba-alz module actually creates). QA identity-match assertion."
+  value       = local.amba_byo_uami_id
+}

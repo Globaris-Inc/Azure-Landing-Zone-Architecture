@@ -109,6 +109,16 @@ variable "platform_law_daily_quota_gb" {
 }
 
 # ---------------------------------------------------------------------------
+# Wave B7 - Operations & Monitoring Phase 1 (AMBA-ALZ) - ADR-052
+# ---------------------------------------------------------------------------
+
+variable "enable_om_phase1" {
+  description = "Master gate for wave B7 (O&M Phase 1 - AMBA-ALZ). When true, deploys the AMBA supporting infrastructure via avm-ptn-monitoring-amba-alz: rg-amba-monitoring-001, the id-amba-prod-001 user-assigned managed identity, and its Monitoring Reader role at the Globaris root MG. That MI is the bring-your-own remediation identity the Deploy-AMBA-* alert policies (assigned in platform/management-groups) attach to the alert resources they deploy. Default false (LESSON 42). Must be set to the SAME value as platform/management-groups var.enable_om_phase1."
+  type        = bool
+  default     = false
+}
+
+# ---------------------------------------------------------------------------
 # Common
 # ---------------------------------------------------------------------------
 

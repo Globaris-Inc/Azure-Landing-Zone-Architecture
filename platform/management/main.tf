@@ -1,7 +1,7 @@
 # Purpose: Management platform root module - FinOps governance, tag policy, budgets,
 #          cost exports, anomaly alerts, and Carbon Optimization workbook.
 # Section: 7 - FinOps: Tagging & Budgets
-# Last updated: 2026-07-08
+# Last updated: 2026-07-19
 #
 # Apply order: depends on platform/management-groups (policy assignments scope to MGs).
 #
@@ -518,6 +518,44 @@ resource "azurerm_monitor_action_group" "platform" {
   }
 
   tags = local.common_tags
+}
+
+# ---------------------------------------------------------------------------
+# Wave B7 - AMBA-ALZ supporting infrastructure (ADR-052)
+# ---------------------------------------------------------------------------
+#
+# avm-ptn-monitoring-amba-alz 0.4.0 (verified 2026-07-19 against the Terraform
+# Registry + module source at tag v0.4.0). Deploys the three supporting objects the
+# AMBA DINE alert policies require, which the policy layer (platform/management-groups
+# avm-ptn-alz) does NOT create:
+#   - rg-amba-monitoring-001 (resource group, in the management subscription)
+#   - id-amba-prod-001 (user-assigned managed identity)
+#   - a Monitoring Reader role assignment for that MI at the Globaris root MG
+#     (role_definition_id default 43d0d8ad-25c7-4714-9337-8ba259a9fe05 = Monitoring
+#     Reader) via azapi at parent /providers/Microsoft.Management/managementGroups/globaris.
+#
+# The MI is the bring-your-own remediation identity: platform/management-groups
+# references its deterministic resource id in the amba_alz_byo_user_assigned_managed_
+# identity_id policy default, so the alert resources the Deploy-AMBA-* policies deploy
+# run as THIS identity. resource_group_name + user_assigned_managed_identity_name are
+# set explicitly (equal to the module defaults) to make that cross-root coupling
+# greppable and locked - they MUST match platform/management-groups local.amba_*.
+#
+# Gated by enable_om_phase1 (LESSON 42) via for_each over a static-key map so the wave
+# is one revertible unit with the policy assignments. enable_telemetry = false keeps
+# the modtm data source dormant.
+module "amba" {
+  source  = "Azure/avm-ptn-monitoring-amba-alz/azurerm"
+  version = "0.4.0"
+
+  for_each = var.enable_om_phase1 ? { amba = {} } : {}
+
+  location                            = var.primary_location
+  root_management_group_name          = "globaris"
+  resource_group_name                 = "rg-amba-monitoring-001"
+  user_assigned_managed_identity_name = "id-amba-prod-001"
+  enable_telemetry                    = false
+  tags                                = local.common_tags
 }
 
 # ---------------------------------------------------------------------------

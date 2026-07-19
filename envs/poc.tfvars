@@ -271,6 +271,39 @@ enable_fabric_capacity = true
 enable_ai_platform = true
 
 # ---------------------------------------------------------------------------
+# Banking wave B7 - Operations & Monitoring Phase 1 (AMBA-ALZ) - ADR-052
+# ---------------------------------------------------------------------------
+# The full AMBA-for-ALZ baseline alerting pattern, delivered by the two-part
+# current mechanism:
+#   1. platform/management-groups (avm-ptn-alz 0.19.1) selects the globaris-amba
+#      architecture, which attaches the AMBA alerting archetypes (Deploy-AMBA-*
+#      DINE assignments + Alerting-* initiatives + Deploy-AMBA-Res-SvcHlth service/
+#      resource-health alerts) at the Globaris root, platform-family, and
+#      landingzones MGs. AMBA content comes from the SEPARATE ALZ library path
+#      platform/amba @ 2026.06.2 (added to the alz provider - platform/alz stays
+#      2026.04.2). Deploy-Diagnostics DINE is ALREADY live via the existing ALZ root
+#      archetype (Deploy-Diag-LogsCat + Deploy-AzActivity-Log) - NOT re-added here to
+#      avoid a duplicate-assignment collision (pure-adds bar).
+#   2. platform/management (avm-ptn-monitoring-amba-alz 0.4.0) deploys the supporting
+#      rg-amba-monitoring-001 + id-amba-prod-001 user-assigned MI + Monitoring Reader
+#      role - the bring-your-own remediation identity the Deploy-AMBA-* policies use.
+# The SAME flag drives BOTH roots. Default false in each root (LESSON 42); this
+# reviewed-commit entry is the flag supply (ADR-044 precedent). Near-zero cost
+# (~$0-2/day LAW ingestion; alerts + policy + RG + MI are free).
+#
+# ORDERING (design doc section 7): apply platform/management FIRST so the MI + its
+# Monitoring Reader role exist before the platform/management-groups Deploy-AMBA-*
+# DINE assignments begin async remediation (LESSON 35/49 - the remediation identity
+# and its role must pre-exist; a 403 there is a missing role, not a wait). No hard
+# Terraform cross-root dependency exists - the BYO MI id is derived deterministically.
+#
+# The operator notification receiver (om_operator_notification_email) converges the
+# AMBA alert stream onto the same on-call target as the platform action group
+# (ADR-052 section 5). Supplied via TF_VAR_om_operator_notification_email in CI /
+# poc.secret.tfvars locally - NEVER committed here.
+enable_om_phase1 = true
+
+# ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
 # ---------------------------------------------------------------------------
 
