@@ -1,0 +1,140 @@
+# Wave B-R - Production restoration: the deviation register and the return to full deployment
+
+> **Status:** DESIGNED per the user directive of 2026-07-19 (recorded in ADR-049): when the banking
+> build completes, the landing zone returns to FULL deployment with every sprint/cost deviation
+> reversed - the end state must meet a PRODUCTION environment setup, not a POC.
+> **Owner:** Cloud Solutions Architect. **Date:** 2026-07-19.
+> **Placement ruling:** B-R is a DEDICATED wave, after B9 (security/compliance extension) and
+> BEFORE B10 (DR docs + acceptance), so that B10's acceptance validation runs against the
+> production shape - validating the POC shape and then mutating it would invalidate the stamp.
+> **Sequence (ADR-049):** build (B6..B9) -> B-R restoration -> B10 validate/QA at production
+> shape -> THEN the teardown/keep decision. ADR-045's end-of-week teardown is SUPERSEDED as an
+> endpoint; the Frame A/B mechanics survive as the decision's implementation options.
+> **User forks:** consolidated in ONE question, OQ-046 - a single pass, per-item costs, not
+> piecemeal. Plain restores (no fork) proceed on the standing gates without user round-trips.
+
+---
+
+## 0. How to read the register
+
+Every deviation made across the build (ADR trail 015/022/031-048 + the estate-wide `enable_*`
+flag sweep + `envs/poc.tfvars` + the design docs' explicitly-deferred-to-production lists),
+classified:
+
+- **(a) Gated-off infrastructure** - restore = reviewed flag flip + apply (+ pre-clearance).
+- **(b) Posture/process artifacts** - reconcile, drop, or keep-with-justification.
+- **(c) POC-scale sizing vs the recorded production design targets** - SKU/topology changes.
+- **(d) Unbuildable in this tenant/offer** - documented honestly; restore blocked on an external
+  grant/ticket, not on this repo.
+
+Each row: restore mechanic, cost delta per day (approximate list, to be re-verified at the B-R
+pre-clearance), and PLAIN (no fork) vs FORK (user decides in OQ-046).
+
+**Scope boundary ruling (the one framing call in this design):** "production environment setup"
+is read as SINGLE-REGION PRODUCTION-GRADE for the banking workload tier plus the full dual-hub
+platform fabric as originally designed. It does NOT silently pull in the multi-region scale-out
+(second-region banking spokes 10.31/10.33, APIM multi-region, AKS second cluster) that every
+design doc records as documented-not-deployed (ADR-022 split, B10 DR chapter). Going multi-region
+roughly doubles the estate and is therefore surfaced as an explicit OQ-046 fork, not assumed.
+The user's own example (VPN gateway) is a gated-off single-region platform component - class (a).
+
+## 1. Class (a): gated-off infrastructure to restore (flag flips)
+
+| # | Item | Flag / source | Deviation origin | Restore mechanic | ~$/day | Fork? |
+|---|---|---|---|---|---|---|
+| a1 | VPN Gateway (VpnGw1AZ, primary hub) | `enable_vpn_gateway` (default false; unset in tfvars) | ADR-042 (idle-spend deferral; the user's own directive example) | Flag flip in poc.tfvars + connectivity apply. LONG create 30-50 min - isolate the apply (LESSON 46 class); GatewaySubnet 10.0.1.0/27 stayed reserved, pure add | ~$8.7 | **PLAIN** (named by the directive) |
+| a2 | DNS Private Resolver (primary hub) | `enable_dns_resolver` (default false) | ADR-042 | Flag flip + same connectivity apply train as a1; pure add (outbound subnet + delegation kept) | ~$12 | **PLAIN** |
+| a3 | DDoS Network Protection plan | `enable_ddos_standard = false` (explicit tfvars line) | Section-3 recorded POC deviation (fidelity map) | Flag flip + apply; VNet associations follow the existing wiring | ~$98 (~$2,944/mo) | **FORK f1** - the single biggest line item; production-claim-required vs documented-exception |
+| a4 | Azure Bastion | `enable_bastion` (default false, ADR-015 on-demand pattern) | Design choice, not a sprint shortcut | Either keep on-demand (recommended - a legitimate production ops pattern) or always-on | ~$4.6 if always-on | **FORK f2** (recommend: keep on-demand) |
+| a5 | Fabric F2 capacity | `enable_fabric_capacity = false` (OQ-045 + validation guard) | OQ-045 unresolved + suspend-after-QA posture (ADR-048) | Resolve OQ-045, register Microsoft.Fabric RP (PC-5D), flip flag; then active vs pause-schedule | ~$8.6 active / ~$0 paused | **FORK f3** (posture: always-active vs pause automation; recommend pause-schedule - pausing is a production-legitimate Fabric cost practice) |
+| a6 | Firewalls, AKS, messaging, APIM, data platform | `enable_firewall`, `enable_kubernetes_platform`, `enable_messaging_platform`, `enable_api_platform`, `enable_data_platform` | were sprint-gated | ALREADY TRUE - no action; listed for register completeness | in run-rate | n/a |
+| a7 | Synthetic workload layer | `enable_synthetic_workload = false` | ADR-036/037 REPOSITIONED it to the O&M capability | NOT restored as synthetic - B7 builds the O&M Phase 1 slice instead; the flag stays false permanently (design supersession, not a cost deviation) | - | n/a (recorded) |
+
+## 2. Class (b): posture/process artifacts to reconcile
+
+| # | Item | Origin | Production answer | Fork? |
+|---|---|---|---|---|
+| b1 | dbstorage subscription-scoped Waiver (expires 2026-08-01) | ADR-048 collision unit guarantee half | AMENDED per B5 QA (PC-4D, 2026-07-19): the SA is live at publicNetworkAccess=Enabled behind an RP-created NSP + ACL-deny, so the waiver is LOAD-BEARING - early drop is DEAD. It RUNS TO EXPIRY, and BEFORE 2026-08-01 B-R replaces it with a STANDING managed-RG-scoped exemption (the managed RG now exists; verify the deny assignment permits exemption writes at that scope, fallback = renew the sub-scoped waiver with a new expiry). The production shape carries this as a documented flow-log-class permanent exception, not zero exemptions | PLAIN (mechanic changed, still no fork) |
+| b2 | Flow-log SA RG-scoped waivers (bank-app-p1, bank-data-p1, Section-9 spokes) | OQ-024/ADR-028 - Network Watcher is not a storage trusted service | KEEP with standing justification: this is a platform constraint, not a POC shortcut; the production posture documents it as a permanent scoped exception (revisit if flow-log delivery ever supports SecuredByPerimeter) | PLAIN (keep-documented) |
+| b3 | Bootstrap reconcile: ADR-041 temporary tenant-root grants + the github-banking-branch federated credential | B0a carry-over, STILL OPEN | B-R closes it: revoke the temp grants, prune fed creds to the production branch set (main + the standing workflows), re-verify OIDC per root. Revocation strictly AFTER verified estate state (LESSON 54-57 class applies if teardown is ever chosen instead) | PLAIN (devsecops lane) |
+| b4 | Microsoft.Fabric RP NotRegistered | B5 pre-clearance record | Register at the a5 flip (PC-5D) | PLAIN (rides a5) |
+| b5 | OQ-032 CreatedDate tag drift (accepted cosmetic noise) | tag-governance Modify vs TF | RECOMMEND: keep accepting + document as known behavior - the fix (policy parameter surgery or estate-wide tags ignore_changes) buys cosmetic cleanliness at real blast radius. Surfaced once in OQ-046 for an explicit production-answer sign-off | **FORK f4** (recommend: accept-documented) |
+| b6 | NSP QA query-path limitation (standing could-not-verify class in QA) | B2+ QA notes | devsecops tooling item on the B-R checklist (fix or formally document the alternative evidence path); not infrastructure | PLAIN |
+| b7 | Branch state: banking -> main promotion of the whole build | process | Final promotion PR at build completion; ruleset already on main | PLAIN |
+| b8 | KV publicNetworkAccess=Enabled finding (Section 12) + CMK breadth + CA report-only mode | B9 SCOPE (already planned: KV network fix, CMK on data stores, CA enforcement decision, regulatory initiatives) | B-R VALIDATES B9 delivered them; not B-R scope itself. The CA enforce flip remains the recorded user decision inside B9 | (B9) |
+
+## 3. Class (c): POC-scale sizing vs recorded production targets
+
+| # | Item | POC shape (live) | Production target (recorded where) | Restore mechanic | ~$/day delta | Fork? |
+|---|---|---|---|---|---|---|
+| c1 | APIM | Developer_1, no SLA, no zones (~$1.6/day) | Premium w/ zones (founding 2.2, ADR-047) | In-place SKU upgrade Developer -> Premium (stv2; verify current upgrade-path support at B-R pre-clearance; long operation, isolate) | +~$93/day per unit (~$95/day total) | **FORK f5** - the second biggest line |
+| c2 | Service Bus | Premium 1 MU + PE | SAME - production shape ALREADY deployed (ADR-046) | none for the base; optional geo-DR pair (target lists it) = second Premium namespace | +~$22/day if geo-DR | **FORK f6** (geo-DR only; base is done) |
+| c3 | Event Hubs | Standard 1 TU, auto-inflate off | auto-inflate/TU scale-out (founding 2.2) | enable auto-inflate + max TU bound; config-only change | ~$0 idle (burst-priced) | PLAIN (config) |
+| c4 | AKS | 3x D2s_v4 single system pool, zones 1-3, Standard tier, autoscaler off | + user node pool, autoscaler bounds (founding 2.1/ADR-043; OQ-043 quota trail now allows it: 24-core cap, 6 used, non-DSv4 v4 family required) | add user pool (3x 2-vCPU v4, family live-verified at pre-clearance) + enable autoscaler with bounds | +~$7/day | **FORK f7** |
+| c5 | Databricks network | front-end public (AAD), NPIP, firewall egress | front+back-end Private Link, pna false (ADR-048 section 8) | back-end + front-end + browser-auth PEs, NSG rules mode change, pna false; OPERATIONAL DEPENDENCY: a private access path for humans (a1's restored VPN GW P2S, or Bastion) must exist FIRST or the UI goes dark | +~$0.7/day + ops | **FORK f8** (sequenced after a1) |
+| c6 | Fabric SKU | F2 | F2 stands (right-size later per usage) | none | - | n/a |
+| c7 | Multi-region scale-out: second-region banking spokes (10.31/10.33 reserved), AKS second cluster, APIM multi-region, data geo-replication | single-region + dual-hub fabric | founding design section 3 / B10 chapter: DOCUMENTED-not-deployed | full second-spoke builds (B1-class waves each) | roughly doubles workload-tier run-rate | **FORK f9** - explicitly NOT assumed by this design's production reading |
+
+## 4. Class (d): unbuildable in this tenant/offer (honest record)
+
+| # | Item | Blocker | What unblocks it |
+|---|---|---|---|
+| d1 | corp-a1/a2 SQL workload (`enable_sql`) | Offer restriction: SQL ProvisioningDisabled in eastus2 (ADR-031) | Offer change/support ticket; NOT this repo. Stays gated with the flag as the re-enable |
+| d2 | corp-a1/a2 App Service workload (`enable_app_service`) | Dedicated compute quota 0 (ADR-032); ticket history | Quota grant; flag is the re-enable |
+| d3 | v5 VM families | Capped 0 estate-wide on this offer (ADR-043) | Offer/quota change; v4 substitution is the standing production-acceptable answer |
+| d4 | Tenant-gated security features: UEBA, aad-diagnostics, dc-aad, dc-ti, MDE connector, firewall TI rule (`enable_ueba`, `enable_aad_diagnostics`, `enable_aad_connector`, `enable_ti_connector`, `enable_mde_connector`, `enable_firewall_ti_rule` - all false) | Tenant Security Administrator grant absent (ADR-033/034, OQ-027/028) - authorization, not propagation (LESSON 49) | THE USER CAN FIX THIS ONE: grant Security Admin to the deploying identity, then the flags flip as a normal B-R item | **FORK f10** (grant + flip vs remain documented-gated) |
+| d5 | GHAS (CodeQL/secret-scanning/environment approvals) | Org billing entitlement (OQ-015/OQ-040) | B8 scope; org billing decision - carried there, not B-R |
+
+## 5. Restoration wave mechanics
+
+1. **Pre-clearance:** B-R gets a full pre-clearance doc (policy matrix refresh, lifecycle
+   re-audit MANDATORY - by B-R the estate will be near or past the 2-week re-audit clock, and
+   the dbstorage waiver expiry 2026-08-01 sits inside the window; VPN GW SKU lifecycle re-check).
+2. **Order:** (i) plain restores first: a1+a2 in one connectivity apply (VPN GW isolated timing),
+   b1 waiver drop after B5 QA evidence, b3 bootstrap reconcile, c3 auto-inflate; (ii) OQ-046
+   outcomes next, cost-descending only after the user's single-pass answer; (iii) c5 strictly
+   after a1 (access path); (iv) B10 acceptance runs LAST against the final shape.
+3. **Plan bars per apply:** pure adds or exact-shape config changes only; any replace = STOP
+   (LESSON 26); VPN GW and APIM-upgrade applies are isolated long-runs.
+4. **Cost statement:** current sprint run-rate ~$112-125/day. Plain restores add ~$21/day.
+   The OQ-046 forks, if ALL accepted (excl. f9 multi-region), add roughly ~$135-145/day more -
+   a full production posture around ~$270/day (~$8k/mo) before multi-region. Each fork carries
+   its own line so the user can compose the exact end state.
+5. **Teardown decision:** AFTER B10 validation, per ADR-049 - keep-running (production claim
+   live) vs teardown (the build is proven and repeatable via CI). The Frame A/B mechanics and
+   the spokes-first destroy order remain the implementation; revocation timing rules (LESSONS
+   54-57) apply only if teardown is chosen.
+
+## 6. OQ-046 RESOLUTION (2026-07-19, user: "take the recommendations"; implementation deferred to B-R)
+
+All ten forks resolved to the recommended positions - the register's fork cells now read through
+this table. Decision record: ADR-050 (incl. the delegated f1 collapse).
+
+| Fork | Resolved state |
+|---|---|
+| f1 DDoS | **NO DEPLOY** (architect ruling under delegation): production design target + plan-attach mechanics documented; `enable_ddos_standard` stays the re-enable; DDoS IP Protection noted as the targeted alternative. The production claim carries this as a documented, costed exception |
+| f2 Bastion | keep ON-DEMAND (ADR-015 pattern is the production ops answer) |
+| f3 Fabric | pause-schedule posture once OQ-045 resolves the admin principal |
+| f4 OQ-032 | keep accepting, documented |
+| f5 APIM | **YES - Premium with zones at B-R** (+~$93/day, isolated in-place stv2 upgrade) |
+| f6 SB geo-DR | NO (base Premium+PE already production shape) |
+| f7 AKS user pool | **YES at B-R** (+~$7/day; non-DSv4 v4 family, quota live-verified at B-R pre-clearance) |
+| f8 Databricks PL | **YES at B-R**, strictly after the a1 VPN GW restore (private access path first) |
+| f9 Multi-region | NO - stays the B10-documented DR design |
+| f10 Security-Admin | **YES - user grants Security Administrator to the CI deploy SP** (exact steps in the OQ-046 resolution); then the six ADR-033/034 flags flip at B-R |
+
+Resolved B-R cost picture: plain restores ~$21/day + resolved forks (~$100/day: f5 ~$93 + f7 ~$7
++ f8 ~$0.7) on top of the ~$112-125/day estate = **~$235-250/day (~$7-7.5k/mo) production shape**,
+with DDoS documented-not-deployed and multi-region documented-not-deployed.
+
+## 7. Where the remaining waves fit
+
+| Wave | Status | Relation to B-R |
+|---|---|---|
+| B5 | applying now | its QA evidence feeds b1 (waiver drop) |
+| B6 (AI platform) | next build wave | builds POC-scale per its own design; its deviations (if any) append to THIS register at design time |
+| B7 (O&M Phase 1) | planned | absorbs a7 permanently; the production monitoring bar B-R validates against |
+| B8 (DevSecOps) | planned | owns d5; b3 can ride B8's devsecops lane if sequencing suits |
+| B9 (security/compliance) | planned | owns b8's content (KV fix, CMK, CA decision, regulatory initiatives) |
+| **B-R (this design)** | after B9 | the restoration wave; consumes the OQ-046 answers |
+| B10 (DR docs + acceptance) | last | validates the PRODUCTION shape; DR chapter documents f9 whether or not it is bought |

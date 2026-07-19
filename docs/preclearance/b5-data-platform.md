@@ -140,6 +140,59 @@ Hard bars:
 | # | Condition |
 |---|---|
 | **PC-1D** | **Pre-dispatch code change:** widen `azurerm_subscription_policy_exemption.dbx_managed_storage` `policy_definition_reference_ids` to `["StorageDenyPaasPublicIP", "Deny-Storage-Public-Access"]` (same assignment - one-line list edit; update the comment/description accordingly). Cloud-engineer + reviewer per standing gates. Rationale: section 1 row 2 |
+
+### ADDENDUM 2026-07-18 - apply 2 plan-scan disposition (PC-2D bar amendment): APPROVED
+
+Apply 1 went green (1 added, RCG live @320 Succeeded). bank-data-p1 plan run 29673424352 came in
+at `28 add / 15 change / 0 destroy` vs the section 5 estimate of ~14-18 adds. Diagnosis of the
+excess: entirely ONE class - the storage module 0.7.3 fans its telemetry out PER
+diagnostic-submodule interface (blob/file/queue/table/storage_account x modtm_telemetry +
+random_uuid = 10 telemetry stubs), which the estimate undercounted. modtm/random telemetry
+resources are config-only no-ops with zero ARM PaaS surface and zero policy exposure - a benign,
+fully attributable class, not scope creep.
+
+Every HARD bar holds on the enumerated plan: 0 destroys, 0 replaces, ZERO `fabric` addresses,
+all 15 changes noise-class (0 non-tag attribute changes), no changes at pre-existing functional
+addresses, both PE zone groups against the existing central blob/dfs zones.
+
+**Disposition: APPROVED for apply. The PC-2D add-bar for apply 2 is AMENDED from "~14-18 by
+class" to the enumerated 28-address list of run 29673424352; that list is now the exact-shape
+bar - a rerun/retry plan must match it address-for-address (LESSON 59: the retry class only
+narrows).** Estimation lesson carried: first-consumption AVM modules get their telemetry fan-out
+counted from source at bar-setting time.
+
+### ADDENDUM 2026-07-19 - PC-4D QA closure dispositions (verdict: PASS-with-notes)
+
+QA live-verified the full wave intent (workspace/ADLS/RCG/exemption/Fabric-absence exact; zero
+policy errors; the ADR-048 unit admitted the create first try). Three findings, dispositioned:
+
+**Finding 1 (MEDIUM) - connectivity plan-vs-apply delta CONFIRMED and closed as the standing
+reconciliation rule.** Apply 29672760685: 463 planned changes, 282 applied Modifies, zero errors.
+Arithmetic confirmed: 463 - 282 = 181 = **178 azapi zone-link computed-`output` refreshes + 3
+modtm telemetry payload re-reads**. The 178 is structurally exact, not a coincidence count: 89
+private DNS zones x 2 hub VNet links = 178 zone-link resources, one evaporating output-refresh
+each - the same evaporation class dispositioned at B0b and decomposed by the drift attestation.
+**STANDING RULE for platform/connectivity plan-scans and QA passes from now on:**
+`planned-changes = applied-Modifies (OQ-032 CreatedDate strips, ~274-282) + azapi
+computed-output evaporations (178 zone-links + ~3 modtm)`. A delta matching this identity is
+CLOSED-BY-RULE and must not be re-flagged; a delta NOT matching it is a real finding.
+
+**Finding 2 (LOW, doc-impacting) - the ADR-048 "posture half" does NOT hold live.** The
+dbstorage SA has `publicNetworkAccess = Enabled`, protected instead by an RP-created NSP +
+network ACL defaultAction=Deny. Consequences ruled: (i) the storage firewall still delivers the
+real network posture (public access is blocked in effect), but the SA is NOT compliant with the
+b2982f36 member's letter (requires Disabled/SecuredByPerimeter) - **the exemption is
+LOAD-BEARING, not dormant insurance**; (ii) **the early-drop path is DEAD - the waiver runs to
+its 2026-08-01 expiry**; (iii) NEW RISK RULED FORWARD: after expiry, any RP-driven dbstorage PUT
+(e.g. a workspace update touching the SA) can be DENIED again. Disposition: at B-R (before
+2026-08-01), replace the expiring sub-scoped waiver with a STANDING managed-RG-scoped exemption -
+now possible because the managed RG EXISTS, killing the create-time race argument; VERIFY at B-R
+that the Databricks deny assignment does not block Microsoft.Authorization exemption writes at
+that scope (fallback: renew the sub-scoped waiver with a new expiry). ADR-048 carries a dated
+post-QA correction; the restoration register item b1 is amended run-to-expiry-then-replace.
+
+**Finding 3 (record):** ONE shared Databricks NSG serves both delegated subnets (the B1-authored
+shape - nsg-databricks attached to host AND container); recorded so nobody "fixes" it to two.
 | **PC-2D** | Plan-scan BOTH applies against section 5 bars; any breach = STOP |
 | **PC-3D** | Apply order: connectivity first, RCG live-confirmed @320, then bank-data-p1; sequential, no parallel dispatch |
 | **PC-4D** | QA live-vs-intent before green per design doc section 11, INCLUDING: managed-RG inventory enumerated and recorded; the live `dbstorage*` `publicNetworkAccess` AND `allowBlobPublicAccess` values recorded (closes the unverifiable item; feeds the exemption early-drop decision); NSG `UseOnly` rules counted; re-plan shows zero drift (lifecycle guard proof) |

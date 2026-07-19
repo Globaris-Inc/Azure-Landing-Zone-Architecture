@@ -37,6 +37,201 @@
 
 <!-- Newest at the top. -->
 
+### ADR-051: Wave B6 AI platform rulings - Foundry resource (kind AIServices) with gpt-5.4-nano on DataZoneStandard (deprecating-catalog catch), AI Search basic, single account PE with a three-zone group, compliant-by-design (zero exemptions), zero firewall delta
+
+- **Date:** 2026-07-19
+- **Section:** Banking wave B6 (AI platform); executes the OQ-038 resolution (shape B); full spec
+  and verification log in docs/b6-ai-platform-design.md
+- **Status:** Accepted (architect technical rulings; no user fork - OQ-038 fixed the shape, and
+  the model/SKU calls below are technical selections inside it)
+- **Decision makers:** claude (architect)
+
+**Context:**
+Live verification today: both module pins unchanged since the founding design
+(avm-res-cognitiveservices-account 0.11.1 - its input surface is Foundry-resource-aware: kind,
+cognitive_deployments, network_acls, custom_subdomain, PE zone groups; avm-res-search-searchservice
+0.3.0). The eastus2 model catalog shows every founding-design example model
+(gpt-4o-mini, gpt-4.1-nano/mini, o3-mini, o4-mini) as DEPRECATING - the exact LESSON 40 class the
+lifecycle audit exists to catch; gpt-5-nano and gpt-5.4-nano are the GA nano-class chat options.
+All three corp Deny members touching this wave (cognitive pna, cognitive networkAcls, search pna)
+default to Deny; both RPs Registered; quota clean (accounts 0/100, model K-TPM free at both
+deployment SKUs); all four AI private DNS zones live centrally, with services.ai NOT yet linked
+to the spoke.
+
+**Decision:**
+1. **Foundry:** ONE Microsoft.CognitiveServices account, kind `AIServices`, S0, module 0.11.1,
+   workload RG of bank-data-p1, custom subdomain, `public_network_access_enabled = false` AND
+   `network_acls.default_action = "Deny"` (the 037eea7a member checks the ACL, not just pna),
+   `local_auth_enabled = false`, system identity, diagnostics to law-platform, flag
+   `enable_ai_platform` (default false).
+2. **Model:** ONE deployment - `gpt-5.4-nano` version 2026-03-17 (newest current-GA nano-class
+   chat model; the deprecating catalog forbids the founding examples), SKU **`DataZoneStandard`**
+   capacity 10 (US data-zone processing = the banking residency posture; 2000 K-TPM verified
+   free), GlobalStandard recorded as fallback if DataZone ever caps.
+3. **PE/DNS:** ONE account PE into snet-private-endpoints with a THREE-zone group
+   (cognitiveservices + openai + services.ai) per current Foundry PE guidance; dns_links.tf gains
+   the one missing services.ai link (zone live centrally, verified).
+4. **AI Search:** module 0.3.0, `basic`, 1 partition/1 replica, pna false, local auth off,
+   system identity, ONE PE on the live search zone, diagnostics to LAW.
+5. **Zero exemptions** (compliant by design on all three Deny members) and **zero
+   firewall/UDR/NSG delta** (PE-carried traffic; inference rides the account PE; ARM control
+   plane rides the CI runner).
+6. **Boundary:** no projects/agents, no RAG pipeline/indexes/shared private links, no Document
+   Intelligence resource (design-only per OQ-038), no PTU, no second model. QA bar: ARM
+   live-vs-intent + in-cluster DNS resolution REQUIRED; one in-cluster AAD completion call
+   best-effort (NSP query-path caveat).
+7. B6's production-target items appended to the ADR-049 deviation register as documentation-only
+   (no flags, nothing for B-R to restore).
+
+**Alternatives considered:**
+- Deploying a founding-design example model (gpt-4o-mini class) - rejected: Deprecating in the
+  live catalog; deploying into a deprecation window is the LESSON 40 failure class.
+- gpt-5-nano (2025-08-07) - viable, rejected for the older lifecycle date; 5.4-nano is the same
+  class, newer, same quota picture.
+- GlobalStandard as primary deployment SKU - rejected: global routing undercuts the banking
+  data-residency story for cents of difference at QA volume; recorded as fallback.
+- OpenAI-kind account instead of AIServices - rejected: the founding naming audit anchored
+  Foundry-resource-first; AIServices is the current model and the module supports it natively.
+- Building a Foundry default project at POC - rejected: adds surface with no QA value; the
+  boundary keeps projects design-only.
+- Search free tier - rejected: no PE support; basic is the smallest PE-capable tier.
+- Two PEs on the account (openai + cognitiveservices separately) - rejected: one account PE with
+  a multi-zone group is the documented current pattern; fewer moving parts.
+
+**Consequences:**
+- Positive: the AI tier lands compliant-by-design with zero exemptions, zero network deltas, and
+  ~$3/day; the model selection is deprecation-safe as of today; the RAG story has both halves
+  (Foundry + Search) private and AAD-only.
+- Negative / trade-offs: Search basic bills from create (~$2.5/day) regardless of use; the
+  completion-call QA proof is best-effort behind the standing NSP caveat; model catalogs churn
+  fast - if the apply slips past 2026-07-25 the catalog must be re-listed (lifecycle clock).
+- Follow-ups: cloud-engineer one-pass batch (ai.tf + dns_links key + variables + poc.tfvars
+  flip); architect pre-clearance docs/preclearance/b6-ai-platform.md before any apply (name
+  availability, matrix refresh, telemetry fan-out counted from source per the B5 lesson); QA per
+  design doc section 7.
+
+### ADR-050: OQ-046 resolved as recommended (single pass, deferred to B-R) - and the delegated f1 collapse: DDoS Network Protection stays documented-not-deployed
+
+- **Date:** 2026-07-19
+- **Section:** Wave B-R (executes within the ADR-049 frame); resolves OQ-046
+- **Status:** Accepted (user: "take the recommendations", implementation deferred to B-R;
+  architect: the delegated f1 ruling)
+- **Decision makers:** user + claude (architect)
+
+**Context:**
+OQ-046 consolidated the ten production-restoration forks with per-item costs. The user resolved
+the whole pass by adopting the recommendations, deferring all implementation to wave B-R, and
+delegated the one conditional (f1 DDoS, "yes if the claim must be literal") to architect judgment
+against their demonstrated cost posture.
+
+**Decision:**
+1. Resolved states (full table: OQ-046 resolution + docs/b-restoration-design.md section 6):
+   f2 Bastion on-demand; f3 Fabric pause-schedule; f4 keep the OQ-032 acceptance; **f5 APIM
+   Premium with zones YES**; f6 SB geo-DR no; **f7 AKS user pool + autoscaler YES**; **f8
+   Databricks front+back Private Link YES, strictly after the VPN GW restore**; f9 multi-region
+   NO (stays the B10-documented DR design); **f10 Security Administrator grant YES** - a user
+   action, exact steps recorded in the OQ-046 resolution (grant to the CI deploy SP; identifiers
+   fetched from the portal, never written into the repo), after which the six ADR-033/034 flags
+   flip at B-R.
+2. **f1 ruled NO DEPLOY (architect, delegated):** DDoS Network Protection (~$2,944/mo) is ~35
+   percent of the current estate run-rate for one control, on an estate whose only public
+   ingress is the online-p1 App Gateway WAF_v2 - everything else is PE-only or internal. It
+   remains the PRODUCTION DESIGN TARGET, documented with plan-attach mechanics
+   (`enable_ddos_standard` is the standing one-flag re-enable; VNet associations follow the
+   existing wiring), and DDoS IP Protection (per-public-IP SKU) is recorded as the cheaper
+   targeted alternative if a literal claim is ever required. This is consistent with the
+   estate's treatment of DDoS since Section 3 and with the documented-exception pattern the
+   user has repeatedly chosen.
+3. Resolved production cost picture: ~$235-250/day (~$7-7.5k/mo) at B-R completion - plain
+   restores ~$21/day + resolved forks ~$100/day on the ~$112-125/day estate, with DDoS and
+   multi-region as the two documented-not-deployed exceptions.
+
+**Alternatives considered:**
+- f1 YES (deploy DDoS Standard) - rejected under the delegation: disproportionate spend for the
+  live ingress surface; the acceptance documentation gains honesty, not risk, from the recorded
+  exception.
+- f1 DDoS IP Protection now (per-IP on the App GW PIP) - noted, not adopted: still adds run-rate
+  for a POC-window estate; recorded as the first escalation step in the production design.
+- Re-litigating any recommended fork - rejected: the user's single-pass adoption is exactly the
+  decision pattern OQ-046 was built for.
+
+**Consequences:**
+- Positive: B-R is now fully specified with zero open user decisions except OQ-045 (Fabric
+  admin) and the f10 grant execution; the production claim has an exact, costed, honest shape.
+- Negative / trade-offs: the production claim carries two documented exceptions (DDoS,
+  multi-region); the f10 grant and OQ-045 are user actions that can lag - both are
+  non-blocking until B-R.
+- Follow-ups: register updated (done, section 6); B-R pre-clearance re-verifies every cost and
+  the f7 family quota; f10 grant executed by the user before B-R's security slice; OQ-045
+  still open.
+
+### ADR-049: Production restoration directive - the build ends at FULL deployment (every sprint/cost deviation reversed), a dedicated B-R wave lands between B9 and B10, and the ADR-045 EOW teardown becomes a post-validation decision instead of an endpoint
+
+- **Date:** 2026-07-19
+- **Section:** Banking build closure frame (waves B6..B10 + new wave B-R); supersedes the
+  teardown-as-endpoint framing of ADR-045 (its gates, cadence, and Frame A/B mechanics STAND);
+  builds on ADR-042 (the flags it gated are now scheduled restores) and the ADR-022
+  designed-now/built-later split (which now gets a built-at-B-R resolution per item)
+- **Status:** Accepted (user directive 2026-07-19; architect design of the wave, register, and
+  fork consolidation)
+- **Decision makers:** user (directive), claude (architect)
+
+**Context:**
+The estate was built under two successive cost frames: monthly-run-rate POC (ADR-015/031/032/042
+era gating) and the ADR-045 build-verify-destroy sprint (EOW teardown as the cost backstop). The
+user has now directed: when the banking build completes, the landing zone must return to FULL
+deployment with every sprint/cost deviation reversed - the end state must meet a PRODUCTION
+environment setup, not a POC (the user's own example: the VPN gateway gated off under ADR-042).
+
+**Decision:**
+1. **Sequence:** build (B6..B9) -> **B-R restoration wave** -> B10 validate/QA at the production
+   shape -> THEN the teardown/keep decision. B-R is a dedicated wave BEFORE B10 so the acceptance
+   stamp applies to the production shape, not a mutated-after-validation one.
+2. **ADR-045 supersession is narrow:** the EOW teardown stops being the scheduled endpoint; it
+   becomes one of two outcomes of a decision taken AFTER B10 validation. Everything else in
+   ADR-045 (per-wave gates, plan bars, QA-before-green, cost-per-wave statements) stands
+   unchanged through B6..B-R.
+3. **The deviation register** (docs/b-restoration-design.md) is the authoritative enumeration:
+   class (a) gated-off infrastructure (VPN GW, DNS resolver, DDoS plan, Bastion, Fabric flag),
+   class (b) posture/process artifacts (dbstorage waiver early-drop, flow-log waivers
+   keep-documented, ADR-041 bootstrap reconcile, Fabric RP, OQ-032 stance, NSP QA path, final
+   promotion), class (c) POC-sizing vs recorded production targets (APIM Premium, EH
+   auto-inflate, SB geo-DR option, AKS user pool + autoscaler, Databricks Private Link,
+   multi-region as an explicit opt-in), class (d) honest unbuildables (SQL/App Service offer
+   caps, v5 families, tenant-Security-Admin-gated features, GHAS billing).
+4. **Production reading:** single-region production-grade workload tier + full dual-hub platform
+   fabric. Multi-region scale-out is NOT silently assumed - it is fork f9 in OQ-046.
+5. **One consolidated fork pass:** every user decision in the register is collected in OQ-046
+   with per-item cost/day, so the user composes the end state in a single answer. Plain restores
+   proceed on standing gates without user round-trips.
+6. **Register maintenance:** B6..B9 append any new deviation to the register at their design
+   time; B-R's pre-clearance re-runs the lifecycle audit (the build will be at or past the
+   2-week clock) and re-verifies every cost figure.
+
+**Alternatives considered:**
+- Fold restoration into B10 - rejected: B10's value is validating a FINISHED shape; mixing
+  mutation and validation in one wave blurs the stamp and the failure attribution.
+- Restore-as-you-go (flip each deferred flag inside B6..B9) - rejected: interleaves long-create,
+  high-cost applies with feature waves, multiplies plan-scan surface per wave, and denies the
+  user the single-pass cost decision.
+- Read "production" as multi-region scale-out - rejected as a silent default: roughly doubles the
+  estate; surfaced as explicit fork f9 instead (the directive's own example is a single-region
+  platform component).
+- Piecemeal OQs per fork - rejected: ten sequential user round-trips; one costed pass is the
+  recorded preference pattern (OQ-034/039 class).
+
+**Consequences:**
+- Positive: the build closes at a defensible production claim; every deviation has a written
+  disposition instead of silent drift; the acceptance validation (B10) gains meaning; the
+  teardown decision is made once, with full information, against a validated estate.
+- Negative / trade-offs: restoration adds ~$21/day (plain) up to ~$270/day-class (all forks,
+  pre-multi-region) run-rate while the estate lives; B-R adds one wave of applies including two
+  isolated long-runs (VPN GW create, APIM SKU upgrade); the dbstorage waiver expiry (2026-08-01)
+  now sits inside the build window and must be handled by evidence, not by lapse.
+- Follow-ups: OQ-046 single-pass user answer; register append duty on B6..B9 designs; B-R
+  pre-clearance (lifecycle re-audit mandatory); b3 bootstrap reconcile ownership (B8 or B-R);
+  B10 acceptance criteria updated to the production bar.
+
 ### ADR-048: Wave B5 data platform rulings - Databricks Premium VNet-injected + NPIP, the managed-RG dbstorage policy collision ruled as one unit (create-time storage firewall + expiring subscription-scoped waiver), service-tag-only rcg-dbx-egress-primary, ADLS Gen2 compliant-by-design, Fabric F2 deploy-active-then-suspend
 
 - **Date:** 2026-07-18
@@ -133,6 +328,23 @@ pause argument, and rejects hyphens in names.
   pre-clearance docs/preclearance/b5-data-platform.md before any apply; QA per design doc
   section 11 incl. recording the live dbstorage publicNetworkAccess value; suspend runbook step
   post-QA.
+
+**POST-QA CORRECTION (2026-07-19, appended - original text above unedited per the append-only
+rule; this corrects a factual expectation, it does not reverse the decision):** B5 QA (PC-4D,
+PASS-with-notes) live-verified that the "posture half" expectation does NOT hold as written: the
+dbstorage SA deploys with `publicNetworkAccess = Enabled`, protected by an RP-created network
+security perimeter + network ACL defaultAction=Deny - public access is blocked IN EFFECT, but the
+SA does not satisfy the b2982f36 member's letter (Disabled/SecuredByPerimeter). Therefore the
+exemption half is LOAD-BEARING, not dormant insurance - the defense-in-depth ruling is VINDICATED
+(the unit won the create first try precisely because both halves existed). The recorded
+early-drop path is DEAD: the waiver runs to its 2026-08-01 expiry, and BEFORE expiry wave B-R
+replaces it with a standing managed-RG-scoped exemption (the managed RG now exists, so the
+create-time race argument that forced subscription scope no longer applies; deny-assignment
+compatibility with exemption writes at that scope is a B-R verify item, fallback = renew the
+sub-scoped waiver). The section-8 production framing "firewall + CMK + no exemption anywhere" is
+corrected accordingly: production carries a standing, documented, narrowly-scoped exception for
+the RP-managed SA (flow-log-waiver class) unless Microsoft moves the RP to SecuredByPerimeter.
+Full disposition: docs/preclearance/b5-data-platform.md PC-4D addendum.
 
 ### ADR-047: Wave B4 API platform rulings - APIM Developer stv2 internal mode, scoped-FQDN DNS zone (apex azure-api.net pattern rejected), forced-tunneling unit (dedicated route table + service endpoints + rcg-apim-egress-primary), no public IP, kubelet RA fix rides the batch
 

@@ -31,7 +31,66 @@
 
 <!-- Newest at the top. -->
 
-### OQ-045: B5 Fabric capacity admin principal - who administers the F2 capacity, supplied how?
+### OQ-046: B-R production restoration - the consolidated fork list (one answer composes the end state)
+
+- **Raised:** 2026-07-19 (ADR-049 / docs/b-restoration-design.md; architect)
+- **Section:** Wave B-R (restoration, between B9 and B10)
+- **Blocking:** Not the current build waves (B5 applying, B6..B9 proceed). Blocks only the B-R
+  fork items; plain restores proceed regardless.
+- **Priority:** Medium now, High by B9 (answer needed before B-R starts)
+
+**Question:**
+Your directive (ADR-049): the build ends at FULL production deployment with every deviation
+reversed. The plain restores need no decision and will happen: VPN Gateway (~$8.7/day), DNS
+Private Resolver (~$12/day), EH auto-inflate (~$0), dbstorage waiver early-drop, bootstrap
+reconcile, flow-log waivers kept as documented platform constraints. TEN items are genuine forks.
+Answer each with yes/no (or the noted option letter); costs are approximate list per day, to be
+re-verified at the B-R pre-clearance. Current sprint run-rate is ~$112-125/day; all-yes (except
+f9) lands around ~$270/day (~$8k/mo).
+
+| Fork | Item | ~$/day delta | Recommendation |
+|---|---|---|---|
+| **f1** | DDoS Network Protection plan (the Section-3 POC deviation; biggest single line) | +$98 | YES if the production claim must be literal; documented-exception otherwise |
+| **f2** | Bastion always-on vs the ADR-015 on-demand pattern | +$4.6 if always-on | KEEP ON-DEMAND (a legitimate production ops pattern, not a shortcut) |
+| **f3** | Fabric F2 posture once OQ-045 resolves: always-active vs pause-schedule automation | +$8.6 active / ~$0 paused | PAUSE-SCHEDULE (production-legitimate Fabric cost practice) |
+| **f4** | OQ-032 CreatedDate tag drift: keep accepting (documented) vs fix (policy surgery or estate-wide ignore_changes) | $0 either way | KEEP ACCEPTING - the fix buys cosmetics at real blast radius |
+| **f5** | APIM Developer_1 -> Premium with zones (in-place stv2 SKU upgrade, isolated long-run) | +~$93/unit | YES for the production claim (SLA + zones live only in Premium); this is the second biggest line |
+| **f6** | Service Bus geo-DR pair (base Premium+PE is ALREADY production shape) | +~$22 | NO at single-region scope; pulls in automatically if f9 = yes |
+| **f7** | AKS user node pool + autoscaler bounds (quota now fits: 24-core cap, 6 used; non-DSv4 v4 family per the OQ-043 trail) | +~$7 | YES - cheap, and workloads-off-system-pool is a real production bar |
+| **f8** | Databricks front+back-end Private Link, pna false (SEQUENCED after the VPN GW restore - humans need a private path to the UI first) | +~$0.7 + ops | YES for a banking posture claim; the P2S access path must be proven first |
+| **f9** | Multi-region scale-out: second-region banking spokes (10.31/10.33), AKS second cluster, APIM multi-region, data geo-replication | roughly DOUBLES the workload tier | NO - keep as the B10-documented DR design (the ADR-022 split); your directive's example was a single-region platform component, so this is not silently assumed |
+| **f10** | Tenant Security-Admin-gated features (UEBA, aad-diagnostics, dc-aad, dc-ti, MDE connector, firewall TI rule): grant the role to the deploying identity and flip the flags, vs remain documented-gated | ~$0 (small LAW ingestion) | GRANT + FLIP - this is the one class (d) item YOU can unblock, and a production security claim is thin without the TI/identity connectors |
+
+**Also note (no decision needed):** SQL/App Service in corp spokes and v5 families stay honestly
+unbuildable on this offer (ADR-031/032/043) unless tickets/offer change - flags remain the
+re-enable; GHAS entitlement rides B8/OQ-040.
+
+**RESOLVED 2026-07-19 (user: "take the recommendations"; implementation DEFERRED to wave B-R -
+nothing changes now):** every fork adopts the architect recommendation. Recorded per item:
+- **f1 DDoS: NO DEPLOY** (conditional collapsed by architect ruling under the delegation, ADR-050):
+  ~$2,944/mo would be ~35 percent of the current run-rate for one control on an estate whose only
+  public ingress is the online-p1 App Gateway WAF_v2; stays the PRODUCTION DESIGN TARGET with
+  plan-attach mechanics documented and `enable_ddos_standard` as the one-flag re-enable; DDoS IP
+  Protection (per-IP SKU) recorded as the cheaper targeted alternative if a literal claim is ever
+  required. Consistent with the estate's treatment since Section 3.
+- **f2:** Bastion stays ON-DEMAND (ADR-015 pattern). **f3:** Fabric pause-schedule posture.
+- **f4:** OQ-032 CreatedDate acceptance KEPT (documented).
+- **f5:** APIM Developer -> **Premium with zones: YES** at B-R (+~$93/day; in-place stv2 upgrade,
+  isolated long-run). **f6:** SB geo-DR: NO (single-region scope; base already production shape).
+- **f7:** AKS user node pool + autoscaler bounds: **YES** at B-R (+~$7/day; non-DSv4 v4 family
+  per the OQ-043 trail, live-verified at B-R pre-clearance).
+- **f8:** Databricks front+back-end Private Link: **YES**, sequenced strictly AFTER the VPN GW
+  restore (private access path first).
+- **f9:** multi-region scale-out: **NO** - remains the B10-documented DR design (ADR-022 split).
+- **f10:** tenant Security Administrator grant: **YES - USER ACTION, ready-to-run when B-R
+  needs it:** in Entra ID > Roles and administrators > **Security Administrator** > Add
+  assignment, assign to the CI deploy service principal (the GitHub-OIDC enterprise application
+  used by deploy.yml - grab its name/object ID from the portal; not written here per the
+  no-personal-values rule). Directory-scope, Active (or PIM-eligible + activated for the B-R
+  window). After the grant lands, B-R flips enable_ueba / enable_aad_diagnostics /
+  enable_aad_connector / enable_ti_connector / enable_mde_connector / enable_firewall_ti_rule
+  per ADR-033/034 with their standing plan bars.
+Register updated (docs/b-restoration-design.md section 7); decision record ADR-050. - who administers the F2 capacity, supplied how?
 
 - **Raised:** 2026-07-18 (B5 design engagement, architect - see ADR-048,
   docs/b5-data-platform-design.md section 7.2)
