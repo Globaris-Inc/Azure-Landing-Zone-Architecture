@@ -51,4 +51,18 @@ resource "azurerm_fabric_capacity" "this" {
   administration_members = var.fabric_admin_members
 
   tags = local.common_tags
+
+  # Fix-spec CLASS 3 (docs/preclearance/b6-ai-platform.md addendum 2026-07-19;
+  # ADR-051 post-apply correction): the policy-injected OQ-032 CreatedDate tag
+  # strip CANNOT be applied to a SUSPENDED capacity - ARM returns
+  # "400 Service is not ready to be updated" and would fail every future
+  # bank-data-p1 apply while Fabric is paused (the B5 "suspend = zero drift"
+  # prediction held for the capacity's own attributes but not for the standing
+  # policy-tag churn). Ignoring tags is correct regardless: tags are set at
+  # create and never intentionally updated, the only churn is the CreatedDate
+  # strip we do not want TF fighting, and pause state is not a tag - so this does
+  # not touch the suspend/resume path.
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
