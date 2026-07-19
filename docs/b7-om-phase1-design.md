@@ -54,6 +54,18 @@
 
 ## 1. Scope and boundary
 
+### CLARIFICATION - Deploy-Diagnostics-at-scale is SATISFIED by the pre-existing B0a assignments (not a B7 gap)
+
+Recorded post-B7-QA (2026-07-19, QA finding #2 resolved-by-design): the "diagnostic-settings-at-
+scale (DINE)" line below is delivered by the **pre-existing B0a archetype assignments**
+(`Deploy-Diag-LogsCat`, `Deploy-AzActivity-Log`, the `Deploy-MDFC-*`/`Deploy-MCSB2` DINEs) that
+already inherit to every MG. B7 deliberately did NOT re-add a Deploy-Diagnostics assignment via the
+AMBA archetype: doing so would collide with the live assignments and force a replace, breaking the
+pure-adds bar (engineer + reviewer established this; QA confirmed no new Deploy-Diag assignment
+live). So the diag-at-scale requirement is MET by inheritance, and the non-observation of a NEW
+Deploy-Diag assignment is the intended collision-avoidance, not a miss. Future readers: this row is
+satisfied, not outstanding.
+
 ### In scope (B7 = ADR-037 Phase 1)
 
 | Item | Root / mechanism |
