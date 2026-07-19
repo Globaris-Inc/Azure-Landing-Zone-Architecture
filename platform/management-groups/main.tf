@@ -61,7 +61,9 @@ locals {
       amba_alz_byo_user_assigned_managed_identity_id = jsonencode({ value = local.amba_byo_uami_id })
     },
     var.om_operator_notification_email == "" ? {} : {
-      amba_alz_action_group_email = jsonencode({ value = var.om_operator_notification_email })
+      # AMBA ALZMonitorActionGroupEmail is Array-typed (ARM validates at PUT; apply
+      # 29703492492 InvalidPolicyParameterType); empty-guard avoids a [""] bogus receiver.
+      amba_alz_action_group_email = jsonencode({ value = var.om_operator_notification_email == "" ? [] : [var.om_operator_notification_email] })
     }
   )
 }
