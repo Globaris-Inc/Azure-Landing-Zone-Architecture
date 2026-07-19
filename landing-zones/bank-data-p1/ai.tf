@@ -218,7 +218,16 @@ module "search" {
 
   private_endpoints = {
     search = {
-      name                            = "pe-srch-bank-data-p1-${var.org_prefix}-${var.environment}"
+      name = "pe-srch-bank-data-p1-${var.org_prefix}-${var.environment}"
+      # The PE NIC MUST match its subnet region (eastus2 snet-private-endpoints);
+      # the Search SERVICE stays centralus per the CLASS 1 capacity deviation
+      # above. Without this the per-PE location (v0.3.0 variables.tf line 218,
+      # consumed at main.privateendpoint.tf line 5 as
+      # coalesce(each.value.location, var.location)) defaults to the service
+      # location centralus and collides with the eastus2 subnet - the actual
+      # apply 29678062833 PE failure (architect rerun-addendum correction). This
+      # makes it a correct cross-region PE: eastus2 NIC -> centralus service.
+      location                        = var.primary_location
       subnet_resource_id              = module.spoke_vnet.subnets["private-endpoints"].resource_id
       private_dns_zone_resource_ids   = [data.azurerm_private_dns_zone.linked["search"].id]
       private_service_connection_name = "psc-srch-bank-data-p1"
