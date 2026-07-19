@@ -77,6 +77,8 @@ env:
   TF_VAR_aks_admin_group_object_ids:       '["${{ secrets.AKS_ADMIN_GROUP_OBJECT_ID }}"]'
   # Wave B5 - Fabric capacity admin (OQ-045)
   TF_VAR_fabric_admin_members:             '["${{ secrets.FABRIC_ADMIN_UPN }}"]'
+  # Wave B7 - O&M AMBA action-group notification (ADR-052)
+  TF_VAR_om_operator_notification_email:   ${{ secrets.OM_OPERATOR_NOTIFICATION_EMAIL }}
 
 jobs:
   plan:
