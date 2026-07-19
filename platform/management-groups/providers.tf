@@ -53,7 +53,21 @@ provider "alz" {
       ref  = "2026.04.2"
     },
     {
-      # Custom Globaris hierarchy - defines the globaris architecture,
+      # AMBA (Azure Monitor Baseline Alerts for ALZ) library - wave B7 / ADR-052.
+      # SEPARATE library path from platform/alz: the AMBA policy definitions,
+      # Alerting-* initiatives, and Deploy-AMBA-* assignments are NOT bundled in the
+      # platform/alz 2026.04.2 library above - they live in their own path with an
+      # independent release stream. Verified 2026-07-19 against the ALZ Library repo:
+      # git tag `platform/amba/2026.06.2` is the latest AMBA release (the provider forms
+      # the tag as `{path}/{ref}`, matching the platform/alz entry above). This entry
+      # only makes the amba_* archetypes AVAILABLE; they activate solely when the
+      # selected architecture attaches them (globaris-amba, gated by enable_om_phase1) -
+      # so this is inert while the wave flag is false.
+      path = "platform/amba"
+      ref  = "2026.06.2"
+    },
+    {
+      # Custom Globaris hierarchy - defines the globaris + globaris-amba architectures,
       # overriding root MG id "alz" with "globaris".
       custom_url = "${path.root}/lib"
     }

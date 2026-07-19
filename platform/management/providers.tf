@@ -24,6 +24,14 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.8.1"
     }
+    # Wave B7 (ADR-052): avm-ptn-monitoring-amba-alz 0.4.0 and its AVM sub-modules
+    # (resourcegroup, managedidentity) declare modtm for usage telemetry. Required in
+    # the provider set even with enable_telemetry = false so terraform init can resolve
+    # the module graph. No provider "modtm" block is needed - it self-configures.
+    modtm = {
+      source  = "azure/modtm"
+      version = "~> 0.3"
+    }
   }
 
   backend "azurerm" {}
@@ -51,6 +59,12 @@ provider "azurerm" {
 }
 
 # azapi authenticates via the same ARM_* OIDC env vars as azurerm - no CI changes needed (ADR-027).
-provider "azapi" {}
+# Wave B7 (LESSON 23): anchor the default azapi provider with the management subscription
+# id. The AMBA companion module's role-assignment azapi_resource uses an explicit MG-scope
+# parent_id (no client_config derivation), but anchoring keeps every root consistent and
+# avoids cross-subscription 404s on any client_config-derived call.
+provider "azapi" {
+  subscription_id = var.management_subscription_id
+}
 
 provider "random" {}

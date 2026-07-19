@@ -125,3 +125,17 @@ output "platform_dashboard_id" {
   description = "ARM resource ID of the shared platform portal dashboard."
   value       = azurerm_portal_dashboard.platform.id
 }
+
+# ---------------------------------------------------------------------------
+# Wave B7 - Operations & Monitoring Phase 1 (AMBA-ALZ) - ADR-052
+# ---------------------------------------------------------------------------
+
+output "amba_resource_group_name" {
+  description = "Name of the AMBA supporting resource group (rg-amba-monitoring-001), or null when enable_om_phase1 is false. The AMBA DINE alert policies deploy their alert resources here."
+  value       = var.enable_om_phase1 ? one([for m in module.amba : m.resource_group_name]) : null
+}
+
+output "amba_managed_identity_id" {
+  description = "Resource id of the AMBA user-assigned managed identity (Monitoring Reader), or null when disabled. MUST equal platform/management-groups output amba_byo_managed_identity_id - this is the identity-match assertion proving the Deploy-AMBA-* alert policies run as the MI this module actually creates."
+  value       = var.enable_om_phase1 ? one([for m in module.amba : m.user_assigned_managed_identity_resource_id]) : null
+}

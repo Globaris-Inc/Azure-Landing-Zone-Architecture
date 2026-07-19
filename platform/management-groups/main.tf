@@ -1,7 +1,7 @@
 # Purpose: Management Group hierarchy - calls avm-ptn-alz to create the Globaris MG tree
 #          and places all 5 POC subscriptions under their respective management groups.
 # Section: 2 - Management Group Hierarchy
-# Last updated: 2026-07-06
+# Last updated: 2026-07-19
 #
 # Architecture (defined in lib/globaris.alz_architecture_definition.json):
 #
@@ -25,6 +25,48 @@
 data "azapi_client_config" "current" {}
 
 # ---------------------------------------------------------------------------
+# Wave B7 - Operations & Monitoring Phase 1 (AMBA-ALZ) locals - ADR-052
+# ---------------------------------------------------------------------------
+
+locals {
+  # AMBA-ALZ well-known resource names. These are the DEFAULTS of
+  # avm-ptn-monitoring-amba-alz 0.4.0 (deployed by platform/management); they are
+  # repeated here so the Deploy-AMBA-* policy assignments target the exact resource
+  # group + user-assigned MI the companion module creates. MUST stay in lock-step
+  # with platform/management/main.tf module "amba" (resource_group_name +
+  # user_assigned_managed_identity_name).
+  amba_resource_group_name   = "rg-amba-monitoring-001"
+  amba_managed_identity_name = "id-amba-prod-001"
+
+  # Deterministic resource id of the AMBA user-assigned MI. The companion module
+  # creates it at management-sub / rg-amba-monitoring-001 / id-amba-prod-001, so the
+  # id is fully derivable here without a cross-root state dependency. This is the
+  # bring-your-own remediation identity the Deploy-AMBA-* DINE alert policies attach
+  # to the alert resources they deploy (Monitoring Reader, granted by the companion
+  # module). Identity/scope match is the hard correctness point (design doc 3.1).
+  amba_byo_uami_id = "/subscriptions/${var.management_subscription_id}/resourceGroups/${local.amba_resource_group_name}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${local.amba_managed_identity_name}"
+
+  # policy_default_values for avm-ptn-alz 0.19.1: each value is jsonencode({ value = X }).
+  # Keys are the AMBA library default_names (platform/amba 2026.06.2
+  # alz_policy_default_values.json, verified 2026-07-19). Applied only when
+  # enable_om_phase1 selects the globaris-amba architecture; the operator email key is
+  # merged in only when supplied (never committed - TF_VAR / secret).
+  amba_policy_default_values = merge(
+    {
+      amba_alz_management_subscription_id            = jsonencode({ value = var.management_subscription_id })
+      amba_alz_resource_group_name                   = jsonencode({ value = local.amba_resource_group_name })
+      amba_alz_resource_group_location               = jsonencode({ value = var.primary_location })
+      amba_alz_resource_group_tags                   = jsonencode({ value = { _deployed_by_amba = true } })
+      amba_alz_user_assigned_managed_identity_name   = jsonencode({ value = local.amba_managed_identity_name })
+      amba_alz_byo_user_assigned_managed_identity_id = jsonencode({ value = local.amba_byo_uami_id })
+    },
+    var.om_operator_notification_email == "" ? {} : {
+      amba_alz_action_group_email = jsonencode({ value = var.om_operator_notification_email })
+    }
+  )
+}
+
+# ---------------------------------------------------------------------------
 # Management Group hierarchy + subscription placement
 # ---------------------------------------------------------------------------
 
@@ -32,8 +74,12 @@ module "alz_management_groups" {
   source  = "Azure/avm-ptn-alz/azurerm"
   version = "0.19.1"
 
-  # "globaris" matches the name field in globaris.alz_architecture_definition.json.
-  architecture_name = "globaris"
+  # Wave B7 (ADR-052): select the AMBA-extended architecture when O&M Phase 1 is
+  # enabled. "globaris" and "globaris-amba" both live in lib/ and share an identical
+  # 11-MG topology; globaris-amba only ADDS the amba_* archetypes to the root,
+  # platform-family, and landingzones MGs. Default (false) = the exact B0a-green
+  # "globaris" architecture, so the policy engine is unchanged until the wave lands.
+  architecture_name = var.enable_om_phase1 ? "globaris-amba" : "globaris"
 
   location = var.primary_location
 
@@ -112,4 +158,11 @@ module "alz_management_groups" {
       }
     }
   }
+
+  # Wave B7 (ADR-052): supply the AMBA library default values (RG name/location, the
+  # management subscription, the AMBA MI name, the BYO remediation-identity resource id,
+  # and the converged operator notification email) to the Deploy-AMBA-* assignments.
+  # Only applied when the globaris-amba architecture is selected; null otherwise so the
+  # B0a-green globaris path is untouched.
+  policy_default_values = var.enable_om_phase1 ? local.amba_policy_default_values : null
 }

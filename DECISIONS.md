@@ -37,6 +37,75 @@
 
 <!-- Newest at the top. -->
 
+### ADR-052: Wave B7 O&M Phase 1 build rulings - AMBA delivered by the TWO-part current mechanism (avm-ptn-alz assignments + avm-ptn-monitoring-amba-alz 0.4.0 supporting infra), DINE at platform + landingzones MG scopes, AMBA notifications converge to the operator stream (Phase 1); extends two existing platform roots, no new root
+
+- **Date:** 2026-07-19
+- **Section:** Banking wave B7 (Operations & Monitoring Phase 1); BUILDS the ADR-037 Phase-1 MVP;
+  resolves the two OQ-033 build-time sub-decisions; full spec docs/b7-om-phase1-design.md
+- **Status:** Accepted (architect technical rulings within the accepted ADR-037 target; no user
+  fork - OQ-033 resolved scope/placement, ADR-037 accepted the target)
+- **Decision makers:** claude (architect)
+
+**Context:**
+ADR-037 accepted the O&M target architecture (platform-anchored, policy-propagated via DINE,
+AMBA-based, MVP-bounded) with the build deferred and TWO sub-decisions left to build time in
+OQ-033: the AMBA delivery form and the DINE MG scopes. B7 is that build time. Anti-hallucination
+sweep today: the current AVM AMBA-for-ALZ mechanism is TWO-part - avm-ptn-alz (the estate already
+runs 0.19.1) carries the AMBA policy definitions/initiatives/assignments via the ALZ library
+references, and a companion module avm-ptn-monitoring-amba-alz (0.4.0, published 2026-07-06)
+deploys the supporting rg-amba-monitoring-001 + user-assigned MI + Monitoring Reader role that the
+DINE alert policies run as. The ADR-037 doc's "assigned via avm-ptn-alz" phrasing under-specified
+the companion module. Platform action group + LAW are live (B0a). Both target roots are B0a-green.
+
+**Decision:**
+1. **AMBA delivery form (OQ-033 sub-decision a):** the full AMBA-ALZ pattern via the two modules -
+   avm-ptn-alz (extend the policy-assignment config with the AMBA alerting initiatives + the
+   Deploy-Diagnostics DINE initiatives, pinned library reference) + avm-ptn-monitoring-amba-alz
+   0.4.0 (supporting identity/RG). NOT a bespoke hand-rolled subset. Behind `enable_om_phase1`
+   (default false, LESSON 42).
+2. **DINE / assignment MG scopes (OQ-033 sub-decision b):** AMBA alerting initiatives +
+   Deploy-Diagnostics assigned at the **platform MG** (management/connectivity/identity resource
+   types) and **landingzones MG** (all spokes inherit automatically), Globaris root only for
+   genuinely tenant-wide initiatives. Not per-spoke.
+3. **Action-group convergence (Phase 1):** accept AMBA's own per-subscription notification action
+   group + APR (endorsed pattern) but point its receiver at the SAME operator target as the
+   existing platform action group so one on-call stream results; full single-action-group
+   convergence + maintenance/business-hours APRs are Phase 2. Receiver values referenced
+   abstractly, never committed.
+4. **Roots:** extend `platform/management-groups` (policy) + `platform/management` (AMBA module +
+   action-group receiver) - NO new root, NO spoke (ADR-036/037). Risk class is POLICY (assignment
+   collisions, remediation-identity RBAC, library-reference version) not resource-create; the
+   plan-scan bar on the policy-engine root is PURE ADDS, zero change/replace to existing MG/policy
+   objects (LESSON 26 blast-radius).
+5. **Bounded:** Phase 1 only - no DCR/AMA, no availability probes, no workbook fills, no custom
+   per-component alerts beyond AMBA, no Update Manager/Grafana/ITSM (all Phase 2/3).
+
+**Alternatives considered:**
+- Fold AMBA into avm-ptn-alz alone (per the ADR-037 doc phrasing) - rejected: the current pattern
+  REQUIRES the companion module for the remediation identity/RG; avm-ptn-alz alone deploys the
+  policy but not the identity the DINE alerts run as (remediation would fail silently).
+- Bespoke hand-rolled alert set - rejected: AMBA is the named/endorsed library; hand-rolling is
+  the unbounded reinvention ADR-037 exists to avoid.
+- Force all AMBA alerts onto the single existing platform action group at Phase 1 - rejected as
+  Phase-1 scope: fights the pattern defaults for no bounded-MVP value; convergence via receiver
+  alignment achieves the one-stream goal cheaply, full convergence is Phase 2.
+- Per-spoke assignment - rejected: defeats the DINE inheritance model (OQ-033).
+- A new monitoring root/spoke - rejected (ADR-036/037: O&M is a platform capability, not a spoke).
+
+**Consequences:**
+- Positive: the estate becomes observable/alertable end to end via policy inheritance; near-zero
+  cost (~$0-2/day); reuses the live LAW + action group + avm-ptn-alz engine; the current mechanism
+  is pinned correctly (anti-hallucination catch on the companion module).
+- Negative / trade-offs: two AMBA action groups exist until Phase-2 full convergence (mitigated by
+  receiver alignment); a first-consumption module (0.4.0) rides a high-blast-radius policy-engine
+  root (mitigated by the pure-adds plan bar + known-issues sweep); AMBA content churns fast
+  (lifecycle-clock re-verify if the apply slips).
+- Follow-ups: cloud-engineer extends both roots (verify the avm-ptn-alz AMBA library-reference
+  wiring at 0.19.1 + library 2026.04.2, and the 0.4.0 module input surface + MI/assignment id
+  match, per CLAUDE.md rule 4); architect pre-clearance docs/preclearance/b7-om-phase1.md
+  (collision sweep, remediation-identity RBAC, pure-adds bar); QA per design doc section 8; the
+  operator receiver value supplied via CI, never committed.
+
 ### ADR-051: Wave B6 AI platform rulings - Foundry resource (kind AIServices) with gpt-5.4-nano on DataZoneStandard (deprecating-catalog catch), AI Search basic, single account PE with a three-zone group, compliant-by-design (zero exemptions), zero firewall delta
 
 - **Date:** 2026-07-19
