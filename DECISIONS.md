@@ -110,6 +110,21 @@ to the spoke.
   availability, matrix refresh, telemetry fan-out counted from source per the B5 lesson); QA per
   design doc section 7.
 
+**POST-APPLY CORRECTION (2026-07-19, appended - original above unedited per append-only):** apply
+29678062833 surfaced three fixes to this design (full fix-spec: docs/preclearance/
+b6-ai-platform.md failure addendum). (1) AI Search deploys in **centralus** via a `search_location`
+variable (eastus2 InsufficientResourcesAvailable, live capacity shortage); the PE stays in the
+eastus2 spoke subnet (cross-region PE, Azure-supported) - register d7. (2) The Foundry PE
+three-zone group must be a native `azapi_resource` with explicitly-named configs
+(`# DEVIATION:`), because avm-res-cognitiveservices-account 0.11.1 names every
+privateDnsZoneConfig "default" and collides on a multi-zone set - a module bug on the
+3-zones-one-PE shape, not our input (single-zone module PEs are unaffected). The module still
+builds the account + PE with `private_endpoints_manage_dns_zone_group = false`; the live Foundry
+account is reused (in-state no-op, never recreate). (3) `lifecycle ignore_changes = [tags]` on the
+Fabric capacity - the OQ-032 CreatedDate tag-strip cannot apply to a PAUSED capacity
+(400 "not ready to be updated"); this corrects the B5 "zero drift" prediction (the suspend leaves
+capacity attributes undrifted but makes the standing policy-tag churn unappliable while paused).
+
 ### ADR-050: OQ-046 resolved as recommended (single pass, deferred to B-R) - and the delegated f1 collapse: DDoS Network Protection stays documented-not-deployed
 
 - **Date:** 2026-07-19

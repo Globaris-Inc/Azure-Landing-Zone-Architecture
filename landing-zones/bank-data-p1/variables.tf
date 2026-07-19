@@ -162,6 +162,12 @@ variable "enable_ai_platform" {
   default     = false
 }
 
+variable "search_location" {
+  description = "Azure region for the AI Search service ONLY. DEVIATION from primary_location: AI Search returned InsufficientResourcesAvailable (regional capacity exhaustion) in eastus2 on 2026-07-19 apply 29678062833; centralus has capacity (fix-spec CLASS 1, docs/preclearance/b6-ai-platform.md addendum; ADR-051 post-apply correction). Cross-region PE is coherent - the Search PE NIC STAYS in the eastus2 snet-private-endpoints and private DNS is region-agnostic (one A record in the spoke-linked search zone regardless of service region); only the service location moves. Shares the eastus2-capacity B-R region-alignment revisit with fabric_location (deviation register d6/d7)."
+  type        = string
+  default     = "centralus"
+}
+
 # ---------------------------------------------------------------------------
 # Common
 # ---------------------------------------------------------------------------

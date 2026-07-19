@@ -81,22 +81,28 @@ module "foundry" {
     }
   }
 
-  # ONE account PE with the THREE-zone group (cognitiveservices + openai +
-  # services.ai) per current Foundry PE guidance - one PE serves all three FQDN
-  # families. The module hardcodes the PE subresource to "account" (verified in
-  # the v0.11.1 main.privateendpoint.tf source). Zones looked up in dns_links.tf;
-  # openai/cognitiveservices spoke-linked since B1, services.ai linked at B6.
-  private_endpoints_manage_dns_zone_group = true
+  # ONE account PE (module builds the NIC + subresource "account", hardcoded in
+  # the v0.11.1 main.privateendpoint.tf source). The THREE-zone group
+  # (cognitiveservices + openai + services.ai) is authored NATIVELY below, NOT by
+  # the module.
+  #
+  # MODULE BUG WORKAROUND (fix-spec CLASS 2, docs/preclearance/b6-ai-platform.md
+  # addendum 2026-07-19; ADR-051 correction): 0.11.1's PE interfaces submodule
+  # names EVERY privateDnsZoneConfig "default"
+  # (.terraform/modules/foundry.private_endpoint_interfaces/locals.private_endpoints.tf
+  # line 15), so a multi-zone set on ONE PE collides with DuplicateResourceName
+  # ("two child resources with the same name (default)"). Single-zone PEs (e.g.
+  # datalake.tf) are unaffected, which is why B5 was clean. Setting the
+  # module-level toggle false makes the module build ONLY the account + PE NIC
+  # (azapi_resource.private_endpoints_unmanaged) and emit NO zone group; the
+  # native azapi_resource.foundry_pe_dns_zone_group below supplies the group with
+  # three explicitly-named configs, killing the collision.
+  private_endpoints_manage_dns_zone_group = false
 
   private_endpoints = {
     account = {
-      name               = "pe-aif-bank-data-p1-${var.org_prefix}-${var.environment}"
-      subnet_resource_id = module.spoke_vnet.subnets["private-endpoints"].resource_id
-      private_dns_zone_resource_ids = [
-        data.azurerm_private_dns_zone.linked["cognitiveservices"].id,
-        data.azurerm_private_dns_zone.linked["openai"].id,
-        data.azurerm_private_dns_zone.linked["servicesai"].id,
-      ]
+      name                            = "pe-aif-bank-data-p1-${var.org_prefix}-${var.environment}"
+      subnet_resource_id              = module.spoke_vnet.subnets["private-endpoints"].resource_id
       private_service_connection_name = "psc-aif-bank-data-p1"
       tags                            = local.common_tags
     }
@@ -114,6 +120,60 @@ module "foundry" {
 }
 
 # ---------------------------------------------------------------------------
+# Foundry account PE - native private DNS zone group (3 configs)
+# ---------------------------------------------------------------------------
+# DEVIATION (fix-spec CLASS 2, docs/preclearance/b6-ai-platform.md addendum
+# 2026-07-19; ADR-051 post-apply correction): native privateDnsZoneGroup for the
+# Foundry account PE, replacing the module-managed group disabled above. The
+# 0.11.1 module cannot express a multi-zone group without a DuplicateResourceName
+# collision (every config named "default"). Here each config carries a UNIQUE
+# name, so the three-zone set (cognitiveservices + openai + services.ai) is legal.
+#
+# Body shape mirrors the module's own interfaces submodule
+# (.terraform/modules/foundry.private_endpoint_interfaces/locals.private_endpoints.tf):
+# type Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01 (the
+# api-version the module itself pins for this child), body =
+# properties.privateDnsZoneConfigs[] of { name, properties.privateDnsZoneId }; a
+# zone group is a child proxy resource with no location. parent_id is the
+# module-created PE (module output private_endpoints returns the unmanaged PE map
+# when zone-group management is off - verified in v0.11.1 outputs.tf). Zone IDs
+# come from the existing data.azurerm_private_dns_zone lookups in dns_links.tf
+# (central connectivity sub) - never hardcoded. Uses the root's anchored default
+# azapi provider (LESSON 23).
+resource "azapi_resource" "foundry_pe_dns_zone_group" {
+  for_each = var.enable_ai_platform ? { main = "main" } : {}
+
+  name      = "default"
+  type      = "Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01"
+  parent_id = module.foundry[each.key].private_endpoints["account"].id
+
+  body = {
+    properties = {
+      privateDnsZoneConfigs = [
+        {
+          name = "cognitiveservices"
+          properties = {
+            privateDnsZoneId = data.azurerm_private_dns_zone.linked["cognitiveservices"].id
+          }
+        },
+        {
+          name = "openai"
+          properties = {
+            privateDnsZoneId = data.azurerm_private_dns_zone.linked["openai"].id
+          }
+        },
+        {
+          name = "servicesai"
+          properties = {
+            privateDnsZoneId = data.azurerm_private_dns_zone.linked["servicesai"].id
+          }
+        },
+      ]
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------
 # AI Search basic + PE
 # ---------------------------------------------------------------------------
 
@@ -127,7 +187,13 @@ module "search" {
   # hyphen legal, 30 chars rendered at poc defaults (limit 60).
   name                = "srch-bank-data-p1-${var.org_prefix}-${var.environment}"
   resource_group_name = azurerm_resource_group.workload.name
-  location            = var.primary_location
+  # DEVIATION (fix-spec CLASS 1, docs/preclearance/b6-ai-platform.md addendum
+  # 2026-07-19; ADR-051 correction): var.search_location (default centralus), NOT
+  # var.primary_location - AI Search returned InsufficientResourcesAvailable in
+  # eastus2 on apply 29678062833. The Search PE below STAYS in the eastus2
+  # snet-private-endpoints (cross-region PE is coherent; private DNS is
+  # region-agnostic) - only the service location moves. B-R region-alignment revisit.
+  location = var.search_location
 
   # Smallest PE-capable tier (free has no PE support), smallest basic topology.
   sku             = "basic"
