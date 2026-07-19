@@ -31,7 +31,39 @@
 
 <!-- Newest at the top. -->
 
-### OQ-044: B3 Service Bus tier - does the ADR-045 sprint frame flip OQ-039's Standard-plus-Waiver to Premium-plus-PE?
+### OQ-045: B5 Fabric capacity admin principal - who administers the F2 capacity, supplied how?
+
+- **Raised:** 2026-07-18 (B5 design engagement, architect - see ADR-048,
+  docs/b5-data-platform-design.md section 7.2)
+- **Section:** Banking wave B5 (data platform, Fabric slice only)
+- **Blocking:** Only the `enable_fabric_capacity` flag flip. The rest of B5 (Databricks + ADLS +
+  firewall RCG) is NOT blocked and ships with the Fabric flag false.
+- **Priority:** Medium (cheap to answer; the wave is shippable without it)
+
+**Question:**
+`azurerm_fabric_capacity` takes `administration_members` - the identities allowed to administer
+the capacity in the Fabric portal (assign workspaces, manage settings). The provider marks it
+optional, but a capacity with no admin is unmanageable from the Fabric side, and whether ARM even
+accepts an empty admin list is UNVERIFIED - so the design keeps `enable_fabric_capacity = false`
+until a principal is supplied. Format rules (verified): an Entra USER is given as a UPN; a
+service principal as its OBJECT ID. Per the no-personal-values rule, the value must NOT be
+committed (not in poc.tfvars); the design feeds it via `TF_VAR_fabric_admin_members` from a
+GitHub Actions repo variable. Note pause/resume does NOT need capacity admin - it is an ARM
+action covered by Azure RBAC, so the suspend runbook works either way.
+
+**Options being considered:**
+- A (recommended): your own account as UPN - grab it from the portal (Entra ID > Users, or it is
+  simply your sign-in email) and set the GitHub Actions variable `TF_VAR_FABRIC_ADMIN_MEMBERS`
+  (JSON list form, exact wiring per the implementer). One-line setup; you can then see and manage
+  the capacity in the Fabric portal for the demo.
+- B: the CI service principal's OBJECT ID (portal: Entra ID > Enterprise applications > the CI
+  SP > Object ID - the ask-user-for-GUIDs rule applies). Keeps humans out, but then NO human can
+  administer the capacity in the Fabric portal, which undercuts the BI demo face.
+- C: both A and B (list takes multiple members).
+
+**Architect note:** A or C recommended; the demo value of Fabric is a human opening the portal.
+Until resolved, B5 applies run with `enable_fabric_capacity = false` - zero Fabric cost, zero
+blocked scope elsewhere. - does the ADR-045 sprint frame flip OQ-039's Standard-plus-Waiver to Premium-plus-PE?
 
 - **Raised:** 2026-07-18 (B3 design engagement, architect - see docs/b3-messaging-platform-design.md,
   ADR-045)

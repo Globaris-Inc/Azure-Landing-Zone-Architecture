@@ -1,8 +1,8 @@
 # Purpose: Input variables for the Connectivity platform root module.
 # Section: 8 - Standard Platform Components (+ Banking wave B2 AKS egress rules, ADR-044;
 #          wave B3 ride-along: platform_law_workspace_id for the firewall diagnostics;
-#          wave B4 APIM egress rules, ADR-047)
-# Last updated: 2026-07-18 (B4: apim_egress_source_prefixes, docs/b4-apim-platform-design.md section 6)
+#          wave B4 APIM egress rules, ADR-047; wave B5 Databricks egress rules, ADR-048)
+# Last updated: 2026-07-18 (B5: dbx_egress_source_prefixes, docs/b5-data-platform-design.md section 5)
 
 variable "tenant_id" {
   description = "Azure Active Directory tenant ID."
@@ -85,6 +85,12 @@ variable "apim_egress_source_prefixes" {
   description = "Source address prefixes for the APIM egress rules in rcg-apim-egress-primary (firewall_rules_apim.tf, ADR-047). Defaults to the bank-app-p1 snet-apim carve (10.30.1.0/24 - see the banking allocation table in envs/poc.tfvars). Only honoured while enable_firewall is true."
   type        = list(string)
   default     = ["10.30.1.0/24"]
+}
+
+variable "dbx_egress_source_prefixes" {
+  description = "Source address prefixes for the Databricks egress rules in rcg-dbx-egress-primary (firewall_rules_databricks.tf, ADR-048). Defaults to the two bank-data-p1 Databricks subnet carves (snet-databricks-host 10.32.0.0/24 + snet-databricks-container 10.32.1.0/24 - see the banking allocation table in envs/poc.tfvars). Only honoured while enable_firewall is true."
+  type        = list(string)
+  default     = ["10.32.0.0/24", "10.32.1.0/24"]
 }
 
 variable "enable_vpn_gateway" {
