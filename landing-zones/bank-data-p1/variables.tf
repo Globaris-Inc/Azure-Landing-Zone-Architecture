@@ -1,9 +1,10 @@
 # Purpose: Input variables for the bank-data-p1 landing zone root module (banking
 #          data + AI spoke - network foundation at wave B1; data platform flags at
-#          wave B5).
+#          wave B5; AI platform flag at wave B6).
 # Section: Banking wave B1 - banking network foundation (docs/banking-platform-design.md)
 #          + wave B5 - data platform (docs/b5-data-platform-design.md; ADR-048)
-# Last updated: 2026-07-18
+#          + wave B6 - AI platform (docs/b6-ai-platform-design.md; ADR-051)
+# Last updated: 2026-07-19
 
 # ---------------------------------------------------------------------------
 # Subscription targeting
@@ -127,11 +128,15 @@ variable "enable_fabric_capacity" {
   # Code-enforces the OQ-045 coupling (reviewer finding, B5 batch): the flag must
   # not reach ARM with an empty admin list - empty-list PUT acceptance is
   # UNVERIFIED (design doc section 2) and a capacity without an admin is
-  # unmanageable in the Fabric portal. Cross-variable validation requires
-  # terraform >= 1.9; this root's required_version floor is >= 1.9 (providers.tf).
+  # unmanageable in the Fabric portal. Hardened at the B6 batch (B5 delta re-gate
+  # carry-over): every member must also be a non-blank string, because an UNSET
+  # GitHub Actions secret renders as an empty string - TF_VAR_fabric_admin_members
+  # would then arrive as [""], which passes a length-only check but PUTs a
+  # blank admin to ARM. Cross-variable validation requires terraform >= 1.9;
+  # this root's required_version floor is >= 1.9 (providers.tf).
   validation {
-    condition     = var.enable_fabric_capacity == false || length(var.fabric_admin_members) > 0
-    error_message = "enable_fabric_capacity = true requires a non-empty fabric_admin_members list (OQ-045: supply the capacity admin principal via TF_VAR_fabric_admin_members / poc.secret.tfvars). Empty-list ARM acceptance is unverified - the flag stays false until OQ-045 resolves."
+    condition     = var.enable_fabric_capacity == false || (length(var.fabric_admin_members) > 0 && alltrue([for m in var.fabric_admin_members : length(trimspace(m)) > 0]))
+    error_message = "enable_fabric_capacity = true requires a non-empty fabric_admin_members list whose members are all non-blank strings (OQ-045: supply the capacity admin principal via TF_VAR_fabric_admin_members / poc.secret.tfvars). An unset GitHub secret renders as an empty string, so [\"\"] is rejected too - empty/blank admin ARM acceptance is unverified."
   }
 }
 
@@ -145,6 +150,16 @@ variable "fabric_admin_members" {
   description = "Administrator identities for the Fabric capacity - UPN format for Entra users, object ID for service principals. Supplied via TF_VAR_fabric_admin_members from a GitHub Actions variable (poc.secret.tfvars locally) once OQ-045 resolves; never committed (no personal values in the repo). Default [] is safe only because enable_fabric_capacity gates the resource off until the value arrives."
   type        = list(string)
   default     = []
+}
+
+# ---------------------------------------------------------------------------
+# Wave B6 - AI platform flag (docs/b6-ai-platform-design.md; ADR-051)
+# ---------------------------------------------------------------------------
+
+variable "enable_ai_platform" {
+  description = "Deploy the wave B6 AI platform (ADR-051): Microsoft Foundry account (kind AIServices, S0) with ONE gpt-5.4-nano DataZoneStandard deployment (capacity 10), plus an AI Search basic service - both PE-only into snet-private-endpoints, AAD-only (local auth off), diagnostics to the platform LAW, compliant by design with all three corp Deny members (zero exemptions). Default false (LESSON 42 flag pattern); the reviewed-commit flag supply lives in envs/poc.tfvars. ~$3/day while enabled (design doc section 7)."
+  type        = bool
+  default     = false
 }
 
 # ---------------------------------------------------------------------------

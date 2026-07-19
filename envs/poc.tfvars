@@ -255,6 +255,22 @@ enable_data_platform = true
 enable_fabric_capacity = true
 
 # ---------------------------------------------------------------------------
+# Banking wave B6 - AI platform (ADR-051)
+# ---------------------------------------------------------------------------
+# Microsoft Foundry account (kind AIServices, S0) in bank-data-p1 carrying ONE
+# chat model deployment - gpt-5.4-nano 2026-03-17 on DataZoneStandard capacity 10
+# (the founding-design example models are Deprecating in the live eastus2 catalog;
+# DataZone = US data-zone residency posture) - plus an AI Search basic service
+# (1 partition / 1 replica). Both PE-only into snet-private-endpoints (account PE
+# carries the three-zone group cognitiveservices + openai + services.ai; Search
+# rides the search zone), AAD-only (local auth off), diagnostics to the platform
+# LAW. Compliant BY DESIGN with all three corp Deny members - zero exemptions,
+# zero firewall/UDR/NSG delta. Flag defaults false in the root (LESSON 42); this
+# reviewed-commit entry is the flag supply (ADR-044 precedent). ~$3/day while
+# enabled under the sprint frame (design doc section 7).
+enable_ai_platform = true
+
+# ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
 # ---------------------------------------------------------------------------
 
