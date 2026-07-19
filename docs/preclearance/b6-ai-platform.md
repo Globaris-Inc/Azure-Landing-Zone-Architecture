@@ -180,3 +180,143 @@ tag-strip only); fabric = NO plan line at all now (tags ignored); 0 destroys/rep
 possible removal of the module's broken zone-group address if it reached state (it did not -
 it errored); any Foundry-account or live-PE replace = STOP. Rerun is single-dispatch; PC-1E PE
 race still watched on the (native) PE create.
+
+### ADDENDUM 2026-07-19 - rerun 29694639634: 3 of 4 landed, SEARCH PE region bind - feasibility ruling + FIX-vs-DEFER
+
+Landed: Foundry (account + PE + native 3-config zone group all Succeeded - class 2 DONE); Fabric
+(ignore_changes worked, no plan line - class 3 DONE). FAILED: the Search service DID create in
+centralus (provisioningState "None" - orphaned/incomplete, in TF state) but its PE errored
+`InvalidResourceReference: [eastus2 spoke VNET] referenced by [pe-srch] ... both resources must
+be in the same region`.
+
+**(a) Is cross-region PE supported for Search? YES (generic Azure Private Link capability) - and
+the diagnosis was mis-attributed.** The error is NOT a Search RP rejection of cross-region PE. It
+is the PE-vs-SUBNET region rule: a PE NIC must sit in ITS SUBNET's region (eastus2). The
+avm-res-search-searchservice 0.3.0 module put the PE in CENTRALUS because
+`location = coalesce(each.value.location, var.location)` and we did NOT set the per-PE
+`location`, so it defaulted to the SERVICE location (centralus) - a PE in centralus against an
+eastus2 subnet is the violation. **Correction to the class-1 assumption AND to the "module does
+not decouple" read: the module's `private_endpoints` object HAS a per-PE `location` field
+(verified in v0.3.0 variables.tf line 25 + main.privateendpoint.tf line 5).** Honest residual:
+MS docs do not carry an explicit "Search supports a cross-region private-link connection"
+statement (the how-to is same-region-tutorial-shaped), so whether the Search RP accepts the
+eastus2-PE-to-centralus-service link is a PUT-time unknown on the fixed rerun - but if it fails
+it will be a DIFFERENT error (a private-link-service rejection), not this region-reference one.
+
+**(b) FIX-spec (module-native, NO native PE, NO deviation - cheaper than class 2's fix):** add
+`location = var.primary_location` to the Search PE entry in the `private_endpoints` map. The
+module's coalesce then places the PE in eastus2 (matching snet-private-endpoints) while
+`var.search_location = "centralus"` drives the service. One-line addition to the existing block.
+
+**(c) Orphan reconciliation (do regardless of fix-vs-defer):** the centralus Search service is
+in state, live, provisioningState "None" (abnormal - it will likely NOT converge on a plain
+re-apply). Delete the live orphan out-of-band AND `terraform state rm` the Search service address
+(or `-replace`/taint) so the rerun creates it clean; leaving a "None" service in state risks a
+refresh error. Cost of the orphan: Search basic bills ~$2.5/day from creation - delete promptly
+either way.
+
+**(d) RECOMMENDATION - ONE bounded fix attempt, hard-fallback to DEFER:** the fix is now a genuine
+one-line module-native change (the earlier "no decoupling" framing was wrong), so it is cheap
+enough to try once. **If the fixed rerun throws a NEW cross-region private-link rejection from the
+Search RP, STOP and DEFER - do not open a 5th cycle.** If the user has zero appetite for even one
+more Search cycle, DEFER now is fully legitimate: Foundry + the chat model (already live) deliver
+the core AI story; Search RAG is demo polish. Search is the single most troublesome resource in
+the build (eastus2 no-capacity + the module PE-location default), and that history justifies a
+hard stop after this attempt.
+
+**DEFER mechanics (if chosen now or as the fallback):** new flag `enable_ai_search` (bool, default
+false) gating the Search module + its PE + its diagnostics; `enable_ai_platform` keeps
+Foundry+model. Delete the orphan + state rm per (c). Register: Search moves to a B-R item with a
+region-matched design (eastus2 capacity retry at B-R, OR a centralus PE subnet, OR accept
+centralus service + confirmed cross-region PE) - a proper design, not a 4th reactive patch.
+
+### ADDENDUM 2026-07-19 - USER DECISION supersedes fix-vs-defer: same-region (Search centralus + PE in a centralus HUB subnet). Cross-role fix-spec
+
+User ruling: do NOT defer, do NOT attempt cross-region PE. Deploy Search in centralus AND put its
+PE in a centralus subnet so both are same-region. Use the secondary hub
+`vnet-hub-secondary-globaris-poc` (10.1.0.0/16, centralus - the only existing centralus network).
+Once proven in centralus, the PRODUCTION pattern replicates the same Search+PE in the eastus2
+spoke when eastus2 capacity returns.
+
+**Live facts verified this session (they SIMPLIFY the spec):**
+- Secondary hub VNet 10.1.0.0/16, centralus, rg-connectivity-secondary-globaris-poc; ONLY subnet
+  present = `AzureFirewallSubnet` 10.1.0.0/26 (firewall live at 10.1.0.4). Vast free space.
+  Chosen PE subnet CIDR: **10.1.1.0/27** (clean, no collision with the /26 firewall carve or any
+  gated-off GatewaySubnet/resolver carve).
+- **The search zone `privatelink.search.windows.net` (rg-dns-globaris-poc) is ALREADY LINKED to
+  the secondary hub AND to the bank-data-p1 spoke** (live-verified links:
+  vnet-hub-primary, vnet-hub-secondary, vnet-spoke-bank-data-p1). So NO new zone link is needed -
+  the PE's A record resolves from the centralus hub AND from the eastus2 spoke automatically.
+- Search zone name confirmed = `privatelink.search.windows.net` (searchService subresource).
+
+**MECHANISM RULING (correcting the coordinator's "disable module PE + native" framing to the
+cleaner path):** do NOT author a native PE. The Search module PE was only broken by REGION, and
+Search has a SINGLE zone (no duplicate-"default" bug - that was the 3-zone Foundry case). The
+module `private_endpoints` object exposes BOTH a per-PE `location` AND `subnet_resource_id`, so
+retarget the existing module PE:
+- `subnet_resource_id` = the NEW secondary-hub PE subnet (connectivity sub) - see role 1
+- `location` = `var.search_location` (centralus) => PE region == subnet region == centralus, no
+  mismatch
+- `private_dns_zone_resource_ids` = [the search zone id] unchanged (module inline zone group,
+  single zone, no bug)
+Native PE is the documented FALLBACK only if the module PE's cross-sub subnet join misbehaves at
+apply.
+
+**Cross-sub note (ruled):** the module PE resource is created by the ROOT default provider
+(landingzones sub) into the bank-data-p1 workload RG, with its NIC injected into the
+connectivity-sub hub subnet by `subnet_resource_id`. This is a cross-sub PE (PE resource in
+landingzones, subnet in connectivity) - supported. PREREQUISITE (pre-clearance gate): the CI
+deploy SP must hold `Microsoft.Network/virtualNetworks/subnets/join/action` on the new hub subnet
+(it already has Network Contributor on the connectivity hub RGs from the return-peering wiring -
+VERIFY the scope covers the secondary hub subnet; if not, add a scoped role assignment in role 1).
+
+**ROLE 1 - platform/connectivity (applies FIRST):**
+1. Add PE subnet `snet-ai-search-pe` 10.1.1.0/27 to the secondary hub VNet with
+   `private_endpoint_network_policies = "Disabled"`. BUILD-TIME VERIFY: whether the pinned
+   avm-ptn-alz-connectivity-hub-and-spoke-vnet 0.17.1 exposes a hub-subnet input to add this
+   cleanly (PREFERRED - avoids drift) vs a standalone `azurerm_subnet` on the module-managed VNet
+   (check the module does not reconcile-delete extra subnets; AVM VNet uses standalone
+   azurerm_subnet so coexistence is typical - confirm in source).
+2. NO zone link needed (already linked - verified). NO firewall rule needed for B6 (PE data-plane
+   is in-VNet; see QA note).
+3. Gating: prefer behind `enable_ai_platform` (the subnet exists only for this wave's PE); if the
+   module-subnet-map makes conditional entries awkward, an unconditional harmless empty /27 is
+   acceptable - rule at build.
+
+**ROLE 2 - landing-zones/bank-data-p1 (applies AFTER connectivity):**
+1. Retarget the Search module PE per the mechanism ruling (subnet_resource_id = the new hub
+   subnet id, location = var.search_location). Service `location = var.search_location`
+   (centralus) unchanged.
+2. The hub subnet id crosses subs - pass it into the root as a variable (like the existing
+   `primary_hub_*` inputs), fed from a connectivity output or a repo variable; do NOT hardcode.
+
+**(3) ORPHAN reconciliation:** the retarget touches only the PE's subnet+location - it does NOT
+change the Search SERVICE config, so TF will NOT recreate the service. BUT the live service is
+provisioningState "None" (abnormal, never became functional). GATE: `az search service show`
+must read Succeeded before the PE apply; if still "None"/stuck, this service (unlike the Foundry
+account which is Succeeded and MUST NOT be recreated) is a clean delete target - delete it
+out-of-band + `terraform state rm` the service address so the role-2 apply recreates it clean in
+centralus, THEN the PE attaches. A `-/+` on the Search service from the PE-only change = STOP
+(would mean the service config drifted unexpectedly).
+
+**(4) ARCHITECTURAL DEVIATION (documented):** a spoke workload's PE living in the HUB breaks the
+estate's spoke-owns-its-PEs pattern. Recorded as a POC-proves-the-pattern DEVIATION; the
+PRODUCTION target is the identical Search+PE co-located in the eastus2 bank-data-p1 spoke once
+eastus2 Search capacity returns (register d7). DNS implication: none blocking - the hub-placed
+PE's A record lands in the shared search zone, already linked to the eastus2 spoke, so spoke
+resolvers get it. **REACHABILITY honesty (feeds QA):** DNS RESOLUTION from the eastus2 spoke is
+satisfied (shared zone). Actual TCP data-plane reach from eastus2 AKS to the centralus-hub PE IP
+(10.1.1.x) requires spoke->primary-hub-firewall->hub-to-hub-peering->secondary-hub routing, which
+is NOT wired/verified at B6 - so the Search data-plane completion call stays BEST-EFFORT/deferred
+(on top of the standing NSP caveat), and clean reachability is itself part of why the eastus2-spoke
+co-location is the production target. QA bar for Search at B6: service Succeeded + PE Succeeded +
+A record present in the search zone; in-spoke resolution best-effort.
+
+**Ordering + gates:** multi-root batch. Cloud-engineer implements both roots; reviewer
+delta-gates; **connectivity applies FIRST (subnet + any SP role), confirm subnet live, THEN
+bank-data-p1** (PE references the subnet id - a missing subnet fails the PE PUT). Single-dispatch
+each; PC-1E-class PE-race watch not applicable (Search, not Foundry). Plan bars: connectivity =
++1 subnet (+ maybe 1 role assignment), 0 destroy/replace; bank-data-p1 = Search PE now
+centralus/hub-subnet (an in-place PE update or a PE add if the failed PE never reached state) +
+possibly the service recreate IF the orphan was deleted per (3), 0 OTHER destroys/replaces, NO
+Foundry/Fabric plan line.
