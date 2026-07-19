@@ -280,7 +280,7 @@ for Fabric capacities (monitoring is in-Fabric, OOS).
 | Area | POC (B5) | Production design |
 |---|---|---|
 | Databricks network | NPIP + VNet injection + AZFW service-tag egress; front-end public (AAD) | Front-end AND back-end Private Link (browser_auth PE, pna false, NSG rules `NoAzureDatabricksRules`, AzureDatabricks tag dropped from firewall per UDR doc), IP access lists |
-| Workspace storage | default storage firewall + expiring waiver belt | firewall + CMK (DBFS root + managed disks) + no exemption anywhere |
+| Workspace storage | default storage firewall + expiring waiver belt | firewall + CMK (DBFS root + managed disks) + a STANDING managed-RG-scoped documented exception for the RP-managed SA (CORRECTED per B5 QA 2026-07-19: the storage firewall protects via NSP + ACL-deny with publicNetworkAccess still Enabled, so the b2982f36 member is never satisfied by the RP shape - "no exemption anywhere" was wrong; see the PC-4D addendum and ADR-048 post-QA correction) |
 | Compute | none (boundary) | cluster policies, pools, spot strategy, non-DSv4 v4 or freed v5 families, autoscaling bounds; capacity math in B10 |
 | Lakehouse | ADLS ZRS, one filesystem, PE-only | GZRS/paired-region, UC external locations + storage credentials via access connector, lifecycle management, CMK (B9) |
 | Fabric | F2 suspended between demos | right-sized F-SKU or reservation, Fabric workspaces/items via `microsoft/fabric` provider, gateway wiring for firewalled-SA Cloud Fetch |
