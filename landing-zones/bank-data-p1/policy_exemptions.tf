@@ -69,10 +69,15 @@ resource "time_sleep" "wait_corp_policy_exemptions" {
 # in databricks.tf). Why SUBSCRIPTION scope: the RP-created managed RG does not
 # exist until the workspace create is already in flight, so an RG-scoped
 # exemption (the OQ-024 shape) cannot exist before the PUT it must admit - racy
-# by construction. Scoped to the single StorageDenyPaasPublicIP member only and
-# SELF-EXPIRING 2026-08-01 (past the ADR-045 EOW teardown). QA records the live
-# dbstorage publicNetworkAccess value post-apply; the exemption may be dropped
-# early if the SA lands Disabled-or-equivalent.
+# by construction. Scoped to the TWO Deny members the PC-1D pre-clearance live
+# dump found evaluating the dbstorage PUT (byte-exact reference ids from the
+# architect's dump):
+#   - StorageDenyPaasPublicIP (publicNetworkAccess not Disabled/SecuredByPerimeter)
+#   - Deny-Storage-Public-Access (builtin 4fa4b6c0, allowBlobPublicAccess
+#     notEquals false, default Deny)
+# and SELF-EXPIRING 2026-08-01 (past the ADR-045 EOW teardown). QA records the
+# live dbstorage publicNetworkAccess value post-apply; the exemption may be
+# dropped early if the SA lands Disabled-or-equivalent.
 # Schema (incl. the expires_on argument name - the ARM property is
 # expirationDate) verified against azurerm v4.71.0 docs 2026-07-18.
 # ---------------------------------------------------------------------------
@@ -83,7 +88,7 @@ resource "azurerm_subscription_policy_exemption" "dbx_managed_storage" {
   name                            = "exempt-dbx-managed-storage-bank-data-p1"
   subscription_id                 = "/subscriptions/${var.landingzones_subscription_id}"
   policy_assignment_id            = local.deny_public_endpoints_assignment_id
-  policy_definition_reference_ids = ["StorageDenyPaasPublicIP"]
+  policy_definition_reference_ids = ["StorageDenyPaasPublicIP", "Deny-Storage-Public-Access"]
   exemption_category              = "Waiver"
   expires_on                      = "2026-08-01T00:00:00Z"
 
