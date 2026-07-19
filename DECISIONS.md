@@ -37,6 +37,103 @@
 
 <!-- Newest at the top. -->
 
+### ADR-048: Wave B5 data platform rulings - Databricks Premium VNet-injected + NPIP, the managed-RG dbstorage policy collision ruled as one unit (create-time storage firewall + expiring subscription-scoped waiver), service-tag-only rcg-dbx-egress-primary, ADLS Gen2 compliant-by-design, Fabric F2 deploy-active-then-suspend
+
+- **Date:** 2026-07-18
+- **Section:** Banking wave B5 (data platform); executes the OQ-037 resolution; closes the
+  B1-parked Databricks firewall-allowances caveat in landing-zones/bank-data-p1/main.tf; full
+  spec and verification log in docs/b5-data-platform-design.md
+- **Status:** Accepted (architect technical rulings; the single user fork - the Fabric capacity
+  admin principal - is routed to OQ-045 and gates ONLY the Fabric flag flip)
+- **Decision makers:** claude (architect)
+
+**Context:**
+B1 shipped the bank-data-p1 network with both Databricks subnets delegated and a parked caveat
+(control-plane egress rules = B5 scope). Verified today: the AVM module is still 0.5.0 (now
+azapi-based) and its input surface covers VNet injection, NPIP, default storage firewall, and
+diagnostics; the module docs mark the Databricks `standard` SKU deprecated Oct 2026; current
+Databricks guidance RECOMMENDS service tags over IP/FQDN lists for UDR/firewall egress; new VNets
+after 2026-03-31 require an explicit outbound method (our UDR-to-AZFW qualifies); the workspace
+create places a dbstorage account in an RP-created managed RG, and the corp Deny-Public-Endpoints
+StorageDenyPaasPublicIP member (live Deny, proven by the B1 flow-log collision) evaluates that RP
+PUT - the classic Databricks-vs-policy first-apply killer. deny-pub-net-globaris storage member is
+Audit-only (B1 live dump). azurerm_fabric_capacity exists in the pinned azurerm 4.71 line, has no
+pause argument, and rejects hyphens in names.
+
+**Decision:**
+1. **Databricks:** avm-res-databricks-workspace 0.5.0, `premium` (deprecation-ruled, not
+   preference), VNet-injected into the two live delegated subnets, `no_public_ip = true` (NPIP),
+   compute_mode Hybrid, deterministic managed-RG name, diagnostics to the platform LAW, behind
+   `enable_data_platform` (default false, LESSON 42). Front-end `public_network_access_enabled =
+   true` at POC (no private access path exists this sprint; front/back-end Private Link is the
+   production design target). NO clusters, jobs, warehouses, UC config, or databricks provider -
+   hard demo boundary; the workspace create consumes ZERO Compute vCPUs, so the OQ-043 family
+   question is moot for B5-as-designed.
+2. **The dbstorage collision is ONE defense-in-depth unit:** (a) create-time
+   `default_storage_firewall_enabled = true` + a pre-created access connector (posture half:
+   the managed SA deploys with public access blocked per current MS Learn); (b) a
+   subscription-scoped Waiver exemption on the landingzones sub scoped to the single
+   StorageDenyPaasPublicIP member with `expiration_date` 2026-08-01, plus the standing 300s
+   propagation sleep and depends_on (guarantee half: admits the create regardless of the RP's
+   unverifiable PUT sequencing). QA records the live dbstorage publicNetworkAccess value; the
+   exemption may be dropped early if the SA lands Disabled, else it self-expires.
+3. **Firewall delta:** one RCG `rcg-dbx-egress-primary` priority 320 on the PRIMARY hub policy
+   only, enable_firewall-gated, source = both Databricks subnets; service-tag-only network rules
+   (AzureDatabricks 443/3306/8443-8451, Storage GLOBAL 443, EventHub 9093, Sql 3306,
+   AzureActiveDirectory 443); no FQDN rules so DNS proxy stays off; no bypass routes. Dormant
+   until a cluster exists, by design.
+4. **NSG drift guard:** `lifecycle ignore_changes = [security_rule]` on nsg-databricks - the RP
+   injects its UseOnly rules into our inline-rule NSG at workspace create; without the guard every
+   later apply fights the Network Intent Policy.
+5. **ADLS Gen2:** avm-res-storage-storageaccount 0.7.3 (azapi-shaped, first estate consumption),
+   `is_hns_enabled = true`, module secure defaults stated explicitly (pna false, shared-key false,
+   ACL Deny, TLS1_2, ZRS), one `raw` filesystem, blob + dfs PEs into snet-private-endpoints on the
+   live zones with module-managed zone groups, diagnostics to LAW, CMK deferred to B9. Compliant
+   by design - zero exemption for this SA.
+6. **Fabric:** native azurerm_fabric_capacity (no AVM module exists - re-verified), F2/Fabric,
+   lowercase-alnum name (provider name constraint breaks the hyphen convention - documented
+   deviation), administration_members fed via TF_VAR from a GitHub variable (OQ-045 ask-user; no
+   personal values committed), behind its OWN flag `enable_fabric_capacity` (default false, stays
+   false until OQ-045 resolves). Deploys ACTIVE (~$0.36/hr; ARM has no create-paused); ruled
+   posture = suspend same-day post-QA via `az fabric capacity suspend`; out-of-band suspend
+   causes no plan drift; EOW teardown deletes it in any state.
+7. **Wave cost:** ~$1/day at the suspended posture (~$9-10/day if F2 left active); Premium
+   workspace with zero clusters is DBU-idle at $0.
+
+**Alternatives considered:**
+- RG-scoped exemption on the managed RG (OQ-024 shape) - rejected: the RG does not exist until
+  the create is in flight; racy by construction.
+- Pre-creating the managed RG to anchor the exemption - rejected: RP acceptance of a pre-existing
+  managed RG is UNVERIFIED; not betting a first apply on it.
+- notScopes/resourceSelectors on the corp assignment - rejected: mutates the avm-ptn-alz-owned
+  assignment for a one-week need.
+- Exemption-only without the storage firewall - rejected: leaves the managed SA public-enabled;
+  weaker banking posture for the saving of one cheap connector resource.
+- Front/back-end Private Link at POC (founding design 2.3 wording) - rejected for B5: 3+ extra
+  PEs, browser-auth wiring, and NSG-mode changes for a workspace hosting zero clusters in a
+  one-week sprint; recorded as the production design target.
+- FQDN/IP firewall rules per region - rejected: Databricks explicitly recommends service tags;
+  IP/FQDN lists rot (LESSON 40 class) and FQDN rules would force DNS proxy on.
+- Synapse deployment - rejected at OQ-037 (satisfied-by-successor; lifecycle audit).
+- One shared flag for Databricks+ADLS+Fabric - rejected: Fabric carries an independent
+  offer-availability and OQ-045 risk; its own flag keeps the wave shippable without it.
+
+**Consequences:**
+- Positive: the likeliest first-apply killer is pre-ruled with a race-free mitigation; the B1
+  parked caveat closes; zero exemptions on OUR resources (only the RP-created SA gets the
+  expiring belt); the estate gains its first data-platform tier at ~$1/day; every rule object is
+  service-tag-maintained.
+- Negative / trade-offs: a subscription-scoped (member-scoped, expiring) exemption exists for up
+  to ~2 weeks; the Databricks front end is public (AAD-gated) at POC; two first-consumption AVM
+  modules ride one wave (mitigated by pre-clearance known-issues sweeps); Fabric may be blocked
+  by the offer at PUT time (flag-protected watch item).
+- Follow-ups: OQ-045 user answer (Fabric admin principal + GitHub variable); cloud-engineer
+  one-pass batch (databricks.tf, datalake.tf, fabric.tf, policy_exemptions.tf extension, NSG
+  lifecycle guard, firewall_rules_databricks.tf, variables, poc.tfvars flip); architect
+  pre-clearance docs/preclearance/b5-data-platform.md before any apply; QA per design doc
+  section 11 incl. recording the live dbstorage publicNetworkAccess value; suspend runbook step
+  post-QA.
+
 ### ADR-047: Wave B4 API platform rulings - APIM Developer stv2 internal mode, scoped-FQDN DNS zone (apex azure-api.net pattern rejected), forced-tunneling unit (dedicated route table + service endpoints + rcg-apim-egress-primary), no public IP, kubelet RA fix rides the batch
 
 - **Date:** 2026-07-18
