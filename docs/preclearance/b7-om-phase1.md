@@ -143,6 +143,101 @@ Duration: management apply ~2-4 min (RG + MI + role); management-groups plan + a
 | **PC-5F** | No regression: existing assignments (tag-gov, deny-public, b11/b13 staged guardrails) and the 11-MG topology unchanged (falls out of PC-2F Plan B zero-tolerance) |
 | **PC-6F** | alz-provider plan-time library fetch succeeds; a fetch failure is a plan rerun (no state impact), not an estate event |
 
+## 7a. PC-2F disposition (plan run 29702944518) - GO for the management-groups apply
+
+management plan clean (3 adds = RG + MI + role, 0/0). MG plan `223 add / 1 change / 2 destroy`,
+fully characterized and DISPOSITIONED:
+
+- **223 adds = the AMBA policy objects** (definitions/initiatives/assignments from the globaris-amba
+  archetype) - inside the previewed ~150-260 range, PURE content adds.
+- **2 "destroys"(replaces)** = `module.alz_management_groups.time_sleep.after_policy_definitions`
+  + `.after_policy_set_definitions` ONLY - the alz-module's INTERNAL orchestration WAIT resources,
+  which re-trigger because the policy-definition/set COUNT changed (AMBA added). **Not policy
+  objects.** BENIGN module-internal churn.
+- **1 "change"** = `module.alz_management_groups.modtm_telemetry.telemetry[0]` - telemetry noise.
+- **THE DOUBLE-DUTY PC-2F BAR IS SATISFIED:** zero change/replace to any EXISTING policy
+  ASSIGNMENT / DEFINITION / INITIATIVE / MG / ARCHETYPE (every replace/change address enumerated =
+  only the two time_sleeps + telemetry). The 11-MG topology and every existing alz object are
+  untouched -> flag-off-preservation proven AND B7 adds cleanly. No Deploy-Diagnostics collision.
+
+**The 70 PolicyRoleAssignmentError diagnostics = ACCEPTED pre-existing class, structurally
+unamplifiable by B7 (RULED):**
+- They are WARNINGS (the plan SUCCEEDED) - the avm-ptn-alz module's DOCUMENTED known-limitation
+  class ("known limitation, do not raise issues; suppress via
+  `suppress_warning_policy_role_assignments`"). The B0a management-groups apply (run 28794721094,
+  WORKLOG) already emitted "many PolicyRoleAssignmentError blocks... the module's
+  known-limitation warnings, not failures" - the same OQ-021/OQ-016 class (built-in policies like
+  Deploy-MCSB2-Monitoring / Deploy-Diag whose role assignment the provider cannot auto-generate
+  from an unparseable ARM-function param / empty resource id).
+- The reviewer verified **ZERO of the 70 are AMBA** (0 Deploy-AMBA-* in the error text): B7's own
+  remediation-identity wiring (the BYO `id-amba-prod-001` MI) WORKS - the thing B7 actually
+  introduced is clean.
+- **Amplification ruling:** B7 added ZERO non-AMBA policies. The globaris-amba architecture =
+  globaris + the amba archetypes, sharing the IDENTICAL non-AMBA policy set and 11-MG topology, so
+  the non-AMBA role-assignment-error surface is IDENTICAL BY CONSTRUCTION - the provider re-emits
+  the full-set evaluation on every plan. A literal pre-B7 count diff would require the
+  flag-revert plan already ruled out (churn); the structural identity makes the exact count moot,
+  and the items are non-fatal warnings regardless. **Not a B7-introduced regression - proceed.**
+
+**CONSOLIDATED RULING: GO for the management-groups apply.** 223 pure AMBA policy adds;
+time_sleep/telemetry churn = benign module-internal; 70 role-assignment diagnostics = pre-existing
+OQ-021/known-limitation non-fatal class, B7-clean on its own content. Ordering STANDS (PC-3F):
+apply `platform/management` FIRST (the 3-add MI/RG/role), verify `id-amba-prod-001` live, THEN
+`platform/management-groups`. PC-1F (email TF_VAR) and the async remediation watch (PC-4F) carry
+into QA unchanged.
+
+## 7b. APPLY FAILED (run 29703492492) - ARM param-TYPE mismatch: fix-spec + re-apply reconciliation
+
+**Error (ARM PUT-time, not plan):** `InvalidPolicyParameterType: policy parameter
+'ALZMonitorActionGroupEmail' ... Expected: Array. Actual: String` on
+`azapi_resource.policy_assignments["globaris/Deploy-AMBA-Notification"]`. Root cause: we wired the
+email as a plain STRING (`om_operator_notification_email` type=string ->
+`jsonencode({ value = var.om_operator_notification_email })`), but the AMBA Notification-Assets
+policy expects an ARRAY of emails. A policy-assignment param TYPE is validated by ARM only at PUT,
+never at plan - the plan-passes/apply-fails-on-ARM-param class (extends OQ-016 from allowed-VALUES
+to param-TYPE).
+
+**HONEST note (own it):** the code review + this pre-clearance verified the param NAME exists
+(`policy_default_values` keys match) but NOT its Array-vs-String TYPE. See the LESSON below.
+
+**Expected shape VERIFIED (AMBA docs, today):** `ALZMonitorActionGroupEmail` = **array of plain
+email STRINGS** (`"value": [ "action1@contoso.com" ]`), NOT an array of objects. Siblings are also
+arrays - `ALZArmRoleId` (`["Owner"]`), `ALZWebhookServiceUri` (`["https://..."]`), Event Hubs -
+but **we supply NONE of them** (only the email); they take their definition defaults (empty
+arrays), which are valid and will not 400. So ONLY the email param needs the fix.
+
+**FIX-SPEC (cloud-engineer, minimal):** keep `om_operator_notification_email` as a string
+TF_VAR/secret (simple to supply); wrap it as an array in the `policy_default_values` wiring, and
+guard the empty-default case so an unwired email yields an EMPTY array (no bogus empty-string
+receiver), not `[""]`:
+```
+# was: value = var.om_operator_notification_email
+value = var.om_operator_notification_email == "" ? [] : [var.om_operator_notification_email]
+```
+(jsonencoded as before). Plain array of strings - NOT objects. Verify no OTHER supplied
+`policy_default_value` is array-typed: the AMBA action-group NAME/GUID params are strings (fine);
+the only array-typed notification targets are email/armrole/webhook/eventhub, and we supply only
+email. If the code supplies any additional notification-target default, apply the same array wrap.
+
+**RE-APPLY RECONCILIATION (partial state: 178 of 223 created, in state):** after the fix, re-apply
+= the 178 landed AMBA objects NO-OP (already in state, config unchanged - the fix touches only the
+email default value which only `Deploy-AMBA-Notification` consumes), and the failed/unreached ~45
+(incl. Deploy-AMBA-Notification) CREATE clean. **Bar:** ~45 adds, 0 destroys, **ZERO `-/+` replace
+on any of the 178** (a replace on a landed AMBA object = STOP - would mean the fix perturbed
+content it should not). An in-place UPDATE limited to an assignment that legitimately consumes the
+corrected email default is acceptable-if-scanned (the default value changed from a broken string
+to an array); any replace, or an update to a policy object that does NOT consume that default =
+STOP. Ordering unchanged: management (already applied its 3) stays; re-dispatch management-groups
+only. Single-dispatch. Confirm `id-amba-prod-001` MI still live (PC-3F) before the re-dispatch.
+
+**LESSON (for landing-zone-kit/LESSONS.md - devsecops/architect):** plan-passes/apply-fails on
+policy-assignment param TYPE, not just allowed-VALUES (OQ-016 class extended). Verifying a
+`policy_default_values` KEY NAME exists is NOT sufficient - the VALUE must match the policy
+definition's parameter TYPE (Array vs String vs Object). ARM validates param type only at PUT.
+Pre-clearance/review of any policy-assignment param wiring must check the definition's parameter
+`type` (via `az policy [set-]definition show` -> parameters.<name>.type), not just the name. AMBA
+notification targets (email/armRole/webhook/eventHub) are all ARRAYS.
+
 ## 8. QA feed (before green)
 
 - Plan A/B proof archived (the inertness + pure-adds evidence).
