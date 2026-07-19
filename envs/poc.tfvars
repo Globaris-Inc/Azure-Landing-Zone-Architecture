@@ -243,12 +243,16 @@ enable_api_platform = true
 # create consumes zero Compute vCPUs.
 enable_data_platform = true
 
-# STAYS FALSE until OQ-045 resolves (Fabric capacity admin principal, supplied
-# via TF_VAR_fabric_admin_members - empty-list ARM acceptance is UNVERIFIED, so
-# the flag keeps an empty admin list from ever reaching ARM). When flipped: F2
-# deploys ACTIVE (~$0.36/hr); ruled posture is suspend same-day post-QA via
-# az fabric capacity suspend (ADR-048).
-enable_fabric_capacity = false
+# OQ-045 RESOLVED (2026-07-19): the capacity admin UPN arrived and is supplied
+# via TF_VAR_fabric_admin_members from the FABRIC_ADMIN_UPN repo secret in CI
+# (poc.secret.tfvars locally) - never committed here. The root's cross-variable
+# validation still hard-fails any plan where the flag is true and the list is
+# empty (unwired TF_VAR = blocked before ARM). PRECONDITION: Microsoft.Fabric RP
+# registration in the landingzones sub (first Fabric resource in the estate -
+# pre-clearance item, in flight). F2 deploys ACTIVE (~$0.36/hr); pause-schedule
+# posture per OQ-046 f3: suspend post-QA via az fabric capacity suspend
+# (ADR-048; out-of-band suspend causes no plan drift).
+enable_fabric_capacity = true
 
 # ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
