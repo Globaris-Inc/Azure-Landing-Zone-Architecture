@@ -193,6 +193,94 @@ post-QA correction; the restoration register item b1 is amended run-to-expiry-th
 
 **Finding 3 (record):** ONE shared Databricks NSG serves both delegated subnets (the B1-authored
 shape - nsg-databricks attached to host AND container); recorded so nobody "fixes" it to two.
+
+### ADDENDUM 2026-07-19 (later) - Fabric activation failure: a DISCOVERED PRECONDITION CLASS
+
+Fabric activation apply 29674988323 FAILED clean: ARM PUT reached the Fabric RP and was rejected
+400 "Tenant ... wasn't recognized by Microsoft Fabric. Sign up for Microsoft Fabric and try
+again." Nothing created, no orphans, no state entry. Root cause: **tenant-level SERVICE
+onboarding is a DISTINCT precondition from ARM resource-provider registration.** PC-5D checked
+(and correctly gated on) `Microsoft.Fabric` RP registration; the tenant had additionally never
+been onboarded to the Fabric SERVICE (one-time first-admin sign-in at app.fabric.microsoft.com,
+a SaaS-side control-plane prerequisite invisible to `az provider show`). Not a code defect; a
+pre-clearance checklist gap, now closed:
+
+**NEW STANDING CHECK (step-2 class, all future pre-clearances):** for any service whose control
+plane spans ARM + a SaaS tenant (Microsoft Fabric / Power BI capacities today; watch the same
+class on any future Purview-, Dataverse-, or GitHub-entitlement-backed resource), verify
+TENANT-LEVEL SERVICE ENABLEMENT separately from RP registration. Where no CLI probe exists,
+record it as a named PUT-time watch item with the one-time onboarding step pre-written. B6 note:
+CognitiveServices/Search carry no such tenant signup today (verified shape; no action).
+
+**Rerun ruling:** the user performs the one-time onboarding; ONE rerun follows per the standing
+disposition. **No new plan scan is required**: same commit, the failure was RP-side pre-create
+with zero resources created, and the plan shape is unchanged - the pipeline's own pre-apply plan
+must simply match the prior shape (the single fabric-capacity add) address-for-address; any
+other shape = STOP. A second identical 400 after onboarding = STOP, full diagnosis (LESSON 59).
+
+**Hygiene note for the record:** plan/apply logs carry an undeclared-variable warning for
+`enable_aad_connector` in the shared poc.tfvars when applied against roots that do not declare
+it - the established harmless shared-tfvars class; queued for the next tfvars hygiene pass, no
+action this wave.
+
+### ADDENDUM 2026-07-19 (later still) - Fabric rerun STOP: CU quota 0 - the offer-cap class again, and a LAYERED-precondition lesson
+
+Rerun 29675392192 failed on a DIFFERENT 400 - STOP honoured per the standing ruling, full
+diagnosis: tenant onboarding SUCCEEDED (first error class cleared and stays cleared), but the
+create now fails on "sum total of CapacityUnits must not exceed the regional quota.
+TotalCapacityUnits: 0, RegionalQuota: 0, RequestedSku: F2" - **the landingzones sub has ZERO
+Microsoft Fabric CU quota in eastus2. Fabric CU regional quota hereby JOINS the offer-cap
+register** (the ADR-031/032/043 class: SQL ProvisioningDisabled, App Service dedicated 0, v5
+families 0, now Fabric CU 0). CLI raise path currently blocked (az quota on the Microsoft.Fabric
+scope returns ServiceUnavailable; resource-name enumeration failed) - the portal path (Quotas >
+Microsoft Fabric > eastus2) is the workable channel.
+
+**Standing Fabric preconditions are now THREE, layered:** (1) Microsoft.Fabric RP Registered,
+(2) tenant SERVICE onboarding done, (3) **regional CU quota > requested SKU CUs**. LAYERED-
+PRECONDITION LESSON for the checklist: precondition (3) was INVISIBLE until (2) existed - the
+quota surface only became reachable after tenant onboarding, so a single-pass precondition sweep
+CANNOT see the whole stack for ARM+SaaS services; re-probe the next layer after each layer
+clears, and treat any "quota: 0" discovered late as the normal shape of this class, not a
+surprise.
+
+**CRITICAL SEQUENCING FLAG (LESSON 42 class - recorded before the user fork resolves):**
+`enable_fabric_capacity = true` is MERGED on banking. While CU quota is 0, EVERY future
+bank-data-p1 apply - INCLUDING wave B6, which targets this same root - dies at the Fabric
+create. The flag-true state violates the LESSON 42 bar (an offer cap must never strand a wave).
+**Architect recommendation on the user fork: (B)+(A) COMBINED - flip the flag back to false NOW
+(one-line reviewed revert; Fabric joins the offer-blocked class d) AND pursue the portal quota
+raise IN PARALLEL (the OQ-043 pattern: file now, act on refusal); re-flip only after the grant
+lands, under a mini-pre-clearance verifying all THREE preconditions.** Choosing (A) alone is
+safe ONLY if the raise is granted before any next bank-data-p1 apply is dispatched; that timing
+bet is exactly what LESSON 42 exists to refuse. Outcome to be recorded here and in the
+restoration register when the user decides.
+
+**FORK OUTCOME + REGION RULING (2026-07-19, user finding + architect ruling):** the user
+portal-verified that this sub's Fabric CU quota exists in **CENTRALUS only** (eastus2 = 0).
+RULED: **the F2 capacity deploys in centralus.** Rationale: (1) centralus is the estate's
+established secondary/DR region, so the deviation is architecturally coherent, not arbitrary;
+(2) the capacity is a STANDALONE ARM resource with zero VNet/PE/DNS surface in B5 - region
+carries no network coupling; (3) data-residency considerations are moot for an empty POC
+capacity with no Fabric items (the B5 boundary); (4) it converts the offer-cap block into a
+same-day deploy with no ticket dependency - the LESSON 42-compliant outcome. The THREE-layer
+precondition stack stands, now with layer 3 satisfied IN CENTRALUS (verify quota in the TARGET
+region, not the estate default - checklist wording updated by this note). **REGISTER ITEM for
+B-R (production posture): revisit region alignment - either an eastus2 CU quota ticket to bring
+Fabric home to the primary region, or accept centralus permanently as the documented Fabric
+region (it remains coherent with the DR posture); decided at B-R, recorded in
+b-restoration-design.md a5/d6.** The flag stays true; the fix is a one-variable code change
+(fix-spec below), reviewer delta-gated, then a FRESH plan (this IS a code change - the earlier
+no-new-plan-scan ruling was same-commit-only): bar = EXACTLY 1 add, the capacity with location
+centralus, 0 destroys/replaces (prior failures created nothing; still a pure add).
+
+**Fix-spec (cloud-engineer, minimal):** (1) `landing-zones/bank-data-p1/variables.tf` - new
+variable `fabric_location` (type string, **default "centralus"**, description carrying the
+DEVIATION rationale: Fabric CU quota is 0 in eastus2 on this sub and available in centralus,
+portal-verified 2026-07-19; region alignment revisited at B-R). (2) `fabric.tf` - `location =
+var.fabric_location` replacing the `var.primary_location` reference, plus a `# DEVIATION:`
+comment citing this addendum. Variable over hardcode: the B-R region decision then becomes a
+reviewed tfvars/default change, not a code edit. Nothing else changes (name carries no region
+encoding; an RG's region does not constrain member-resource regions).
 | **PC-2D** | Plan-scan BOTH applies against section 5 bars; any breach = STOP |
 | **PC-3D** | Apply order: connectivity first, RCG live-confirmed @320, then bank-data-p1; sequential, no parallel dispatch |
 | **PC-4D** | QA live-vs-intent before green per design doc section 11, INCLUDING: managed-RG inventory enumerated and recorded; the live `dbstorage*` `publicNetworkAccess` AND `allowBlobPublicAccess` values recorded (closes the unverifiable item; feeds the exemption early-drop decision); NSG `UseOnly` rules counted; re-plan shows zero drift (lifecycle guard proof) |

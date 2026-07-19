@@ -135,6 +135,12 @@ variable "enable_fabric_capacity" {
   }
 }
 
+variable "fabric_location" {
+  description = "Azure region for the Fabric capacity ONLY. DEVIATION from the estate primary_location: Fabric CU quota is 0 in eastus2 on this subscription/offer while centralus has availability (portal-verified 2026-07-19, B5 pre-clearance addendum). Fabric capacities are a control-plane/CU-billing surface with no VNet or data-plane coupling to the eastus2 spoke at B5 (no Fabric items exist), so the region split carries no network impact. Region alignment is revisited at wave B-R."
+  type        = string
+  default     = "centralus"
+}
+
 variable "fabric_admin_members" {
   description = "Administrator identities for the Fabric capacity - UPN format for Entra users, object ID for service principals. Supplied via TF_VAR_fabric_admin_members from a GitHub Actions variable (poc.secret.tfvars locally) once OQ-045 resolves; never committed (no personal values in the repo). Default [] is safe only because enable_fabric_capacity gates the resource off until the value arrives."
   type        = list(string)

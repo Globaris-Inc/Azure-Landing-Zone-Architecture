@@ -33,7 +33,12 @@ resource "azurerm_fabric_capacity" "this" {
   # non-alphanumeric characters.
   name                = "fabbankdata${var.org_prefix}${var.environment}"
   resource_group_name = azurerm_resource_group.shared.name
-  location            = var.primary_location
+  # DEVIATION: var.fabric_location (default centralus), NOT var.primary_location -
+  # Fabric CU quota is 0 in eastus2 on this subscription/offer, available in
+  # centralus (portal-verified 2026-07-19; B5 pre-clearance addendum). The RG
+  # stays eastus2 (RG location does not constrain member-resource regions).
+  # Region alignment revisited at wave B-R.
+  location = var.fabric_location
 
   sku {
     name = "F2"
