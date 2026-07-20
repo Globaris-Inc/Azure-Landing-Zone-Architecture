@@ -12,7 +12,51 @@
 
 ---
 
-## OUTCOME - run 29749656053 (this dispatch): teardown SUCCEEDED; workflow-red is a VERIFY 1 false-positive
+## OUTCOME - attempt 4, run 29753193590: the section-11 `show` fix was the WRONG oracle (principal-dependent); corrected to the `az account management-group list` snapshot
+
+Attempt 4 applied the section-11 per-MG `az account management-group show` existence gate (DISARM +
+VERIFY) and re-dispatched mode=az-sweep, remove_mg_hierarchy=true against the already-empty estate.
+It FAILED at Phase 0 DISARM, Phase 2 az-sweep step 4, AND Phase 3 VERIFY (VERIFY 1 + VERIFY 4) - four
+sites - even though the estate was, and remains, fully torn down.
+
+- **Root cause (principal-dependent oracle).** The teardown runs as the SCOPED OIDC SP, whose MG-read
+  grants were scoped to the globaris subtree (identity.tf) and were DELETED with it. For the SP, a
+  `show` on a DELETED globaris-tree MG returns HTTP-403 `AuthorizationFailed` (no grant left over that
+  scope), NOT the 404 `ManagementGroupNotFound` section 11 assumed. `is_auth_error` matches the 403,
+  so the point-11 gate failed loud on benign already-gone MGs. Section 11 looked correct only because
+  in run 29749656053 DISARM ran while the MGs were still live (a `show` there succeeded).
+- **Empirical proof (probe run 29756715840, run AS THE SP - a read-only diagnostic in the
+  production-destroy environment; cited by run number, no GUIDs):**
+  - `az account management-group list -o table` -> SUCCEEDS for the SP, returns ONLY the tenant root
+    (all deleted globaris-tree MGs ABSENT).
+  - `az account management-group list --query "[].name" -o tsv` -> only the tenant-root name.
+  - `az account management-group show --name globaris` -> 403 `AuthorizationFailed` (root cause
+    reproduced).
+  - `az account management-group show --name <tenant-root>` -> SUCCEEDS (`show` works for the SP only
+    at a scope it still holds a grant over).
+  - The SP's surviving grant is Management Group Contributor at the tenant root (identity.tf; tenant
+    root is never deleted), carrying `managementGroups/read` + `Microsoft.Authorization/*/read`, so a
+    `list` over the readable tenant-root collection is always available; a deleted MG is simply absent
+    from it.
+- **Corrected oracle (ADR-054 point 12; teardown-redesign section 12 + corrected 10.2 / 10.3 / 10.4).**
+  Replace the per-MG `show` with a ONE-TIME `az account management-group list` snapshot at ALL FOUR
+  sites (DISARM per-MG loop, VERIFY 1 loop, VERIFY 4 gone-assertion, az-sweep step 4). MG existence =
+  name membership in the snapshot. AUTH-FAIL-LOUD moves to the LIST call: a non-zero `is_auth_error`
+  list is a genuine dead token -> fail loud; a successful list is authoritative ground truth.
+  `is_auth_error` is UNCHANGED; the per-MG `show` is removed everywhere. The throwaway probe workflow
+  `.github/workflows/_probe-sp-mg.yml` MUST be DELETED in this fix round.
+- **Attempt-5 expectation.** Re-dispatch the same inputs after the snapshot-oracle fix lands in
+  teardown-disarm.sh, teardown-verify.sh (VERIFY 1 + VERIFY 4), and teardown-az-sweep.sh step 4: the
+  snapshot returns only the tenant root -> DISARM and VERIFY 1 skip every globaris-tree scope, step 4
+  no-ops, VERIFY 4 confirms the target MG names absent, VERIFY 2/3/5 succeed with zero rows -> **Phase
+  3 GREEN**. STOP only if the ONE `az account management-group list` fails `is_auth_error` (a genuine
+  dead token - diagnose, do not blind re-dispatch); a deleted-scope 403 can no longer occur because no
+  per-scope `show` is made. The fix is a focused DevSecOps change to three scripts (+ deleting the
+  probe workflow) plus a focused code-review re-approval before attempt 5.
+
+---
+
+## OUTCOME - run 29749656053 (prior dispatch): teardown SUCCEEDED; workflow-red is a VERIFY 1 false-positive
 
 The dispatch ran (mode=az-sweep, remove_mg_hierarchy=true, feature/teardown-redesign) with C1(a)
 applied (`--force-deletion` in step 1). The pre-clearance's central hypothesis PASSED:
@@ -42,7 +86,14 @@ teardown failure (estate fully torn down and live-verified; a new benign verify-
 from attempts 1-2). The user decides. See section 11.4 of the redesign doc for the reasoned
 recommendation and the candid counter-argument.
 
-### Attempt-4 bar (post-fix confirmation run)
+### Attempt-4 bar (post-fix confirmation run) - SUPERSEDED: the `show` gate this described failed on attempt 4
+
+> **SUPERSEDED - see the top OUTCOME block (attempt 4, run 29753193590).** This subsection assumed the
+> section-11 `show` gate would make attempt 4 green ("every MG `show` returns NotFound"). Attempt 4
+> proved that FALSE for the scoped SP - a `show` on a deleted MG returns a 403, not a 404 - so the
+> `show` gate failed loud at four sites. The corrected oracle is the `az account management-group list`
+> snapshot (ADR-054 point 12); the confirmation run is now ATTEMPT 5. Retained for the audit trail; the
+> original (now-wrong) text follows.
 
 Attempt 4 re-dispatches the SAME inputs after the MG-existence-gate fix lands in teardown-disarm.sh
 AND teardown-verify.sh (both loops - fixing only VERIFY leaves attempt 4 failing at Phase 0 DISARM,

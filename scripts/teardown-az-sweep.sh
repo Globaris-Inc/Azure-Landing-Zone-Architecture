@@ -45,6 +45,18 @@
 # --no-wait: the submission still returns immediately, and the actual cascade delete (workspace
 # + managed RG + retained UC catalog data) is what the reconcile step (step 5) then waits for.
 #
+# AMENDED a third time 2026-07-20 (third amendment / ADR-054 point 12, docs/teardown-redesign.md
+# section 12) - step 4's MG-existence check moved from a per-MG `az account management-group
+# show` (a second-amendment / ADR-054 point 11 fix, SUPERSEDED) to a ONE-TIME `az account
+# management-group list` snapshot. `show` is principal-dependent for the scoped teardown SP - its
+# MG-read grants are scoped to the globaris subtree (identity.tf) and are deleted WITH it, so
+# `show` on a deleted MG returns HTTP-403 `AuthorizationFailed` (not the clean 404 point-11
+# assumed), which is_auth_error correctly matches, so a `show`-based skip failed loud on benign
+# already-gone MGs (attempt 4, run 29753193590). Empirical proof (probe run 29756715840, run AS
+# THE SP): `list` succeeds and returns only the tenant root; `show --name globaris` returns 403.
+# See step 4's own comment below for the corrected mechanism (`mg_snapshot_load` /
+# `mg_in_snapshot`, teardown-common.sh).
+#
 # Order matters:
 #   1. Databricks: submit the WORKSPACE delete --no-wait --force-deletion (never `az group
 #      delete` the managed RG directly - it still carries an RP deny-assignment, F2, even with
@@ -194,22 +206,28 @@ for sub in "${SUBS[@]}"; do
 done
 
 # --- 4. MG hierarchy removal, gated on remove_mg_hierarchy. Fast control-plane ops - stay
-#     synchronous, no --no-wait, no reconcile wait needed for MGs (locked decision 9.3). ---
+#     synchronous, no --no-wait, no reconcile wait needed for MGs (locked decision 9.3).
+#     MG-EXISTENCE via the ONE-TIME `az account management-group list` SNAPSHOT (2026-07-20,
+#     third amendment / ADR-054 point 12, docs/teardown-redesign.md sections 10.3 and 12) -
+#     REPLACES the per-MG `az account management-group show` gate (ADR-054 point 11,
+#     SUPERSEDED): `show` is principal-dependent for the scoped teardown SP and returns 403 on
+#     a deleted MG (not the clean 404 the point-11 fix assumed - proven empirically, probe run
+#     29756715840), which is_auth_error correctly matches, so a `show`-based skip fails loud on
+#     benign already-gone MGs. The snapshot is taken ONCE here at the START of step 4, NOT
+#     re-listed per iteration - this step DELETES MGs as it goes, so later iterations correctly
+#     keep checking membership against the original snapshot rather than a live re-list (which
+#     would just be redundant work against a collection this step is itself shrinking). ---
 echo "== Phase 2 step 4: MG hierarchy removal (remove_mg_hierarchy=${REMOVE_MG_HIERARCHY}) =="
 if [ "$REMOVE_MG_HIERARCHY" != "true" ]; then
   echo "  Skipped (remove_mg_hierarchy=false) - the MG tree is left in place."
 else
+  if ! mg_snapshot_load; then
+    echo "::error::Step 4 cannot proceed without a trustworthy MG-existence snapshot."
+    exit 1
+  fi
   for mg in "${MG_DELETE_ORDER[@]}"; do
-    mg_show_out="$(az account management-group show --name "$mg" --output none 2>&1)"
-    mg_show_rc=$?
-    if [ "$mg_show_rc" -ne 0 ]; then
-      if is_auth_error "$mg_show_out"; then
-        # The exact bug #2 from the 2026-07-20 incident: a dead token made 'show' fail and
-        # that was misread as "already gone" for all 12 MGs. Never again - fail loud.
-        echo "::error::MG ${mg} existence check failed with an auth/transport error - cannot tell if it is genuinely gone: ${mg_show_out}"
-        exit 1
-      fi
-      echo "  MG ${mg} already gone - skipping (genuine NotFound): ${mg_show_out:-not found}"
+    if ! mg_in_snapshot "$mg"; then
+      echo "  MG ${mg} already gone (absent from the snapshot) - skipping."
       continue
     fi
 

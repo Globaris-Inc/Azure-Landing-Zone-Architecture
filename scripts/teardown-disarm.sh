@@ -14,14 +14,17 @@
 # returns success, not a 404), and `az policy assignment delete` follows that same ARM
 # semantics for a name that does not exist at a valid MG scope. A re-dispatch after a previous
 # run already removed an MG (remove_mg_hierarchy=true) is a legitimate case too - CORRECTED
-# 2026-07-20 (second amendment / ADR-054 point 11): a policy-assignment LIST call against that
-# deleted MG scope does NOT return a genuine NotFound - ARM evaluates RBAC on the scope BEFORE
-# confirming it exists, so the read comes back HTTP-403 `AuthorizationFailed: ... or the scope
-# is invalid. ... please refresh your credentials.`, which is_auth_error correctly matches (the
-# "credentials" tail). An earlier version of this comment claimed the opposite (a genuine
-# NotFound) - that was factually wrong and is exactly why the MG-existence gate below exists:
-# the disambiguation happens BEFORE the list call, by probing `az account management-group show`
-# directly, not by inspecting the list call's own error text.
+# 2026-07-20 (third amendment / ADR-054 point 12; supersedes an earlier, also-corrected version
+# of this same comment): a policy-assignment LIST call against a deleted MG scope does NOT
+# return a genuine NotFound for the teardown SP - ARM evaluates RBAC on the scope BEFORE
+# confirming it exists, and the SP's MG-scoped grants are deleted WITH the globaris subtree, so
+# the read comes back HTTP-403 `AuthorizationFailed: ... or the scope is invalid. ... please
+# refresh your credentials.`, which is_auth_error correctly matches (the "credentials" tail).
+# This is why existence is resolved BEFORE any list call, by a ONE-TIME `az account
+# management-group list` snapshot (see the amendment below and `mg_snapshot_load` in
+# teardown-common.sh) rather than by inspecting any single call's error text, and NOT by a
+# per-MG `az account management-group show` probe either - `show` is itself principal-dependent
+# and 403s on a deleted MG for the same reason (proven empirically, probe run 29756715840).
 #
 # NOTE for anyone testing this by hand on Windows Git Bash (MSYS): a leading "/" in --scope
 # gets auto-converted to a Windows path by MSYS's POSIX-to-Windows path translation - this is
@@ -44,32 +47,35 @@
 # (fail=1, this scope is NOT counted as disarmed), never silently read as "already disarmed /
 # scope gone".
 #
-# AMENDED again 2026-07-20 (second amendment / ADR-054 point 11, docs/teardown-redesign.md
-# sections 10.2 and 11) - MG-EXISTENCE GATE, mandatory for a re-dispatch against an already-empty
-# estate (attempt 4). The Finding #1 fix above correctly hardened the list calls, but it did NOT
-# account for a re-dispatch AFTER a prior run already deleted the MGs (remove_mg_hierarchy=true):
-# a policy-assignment list against a DELETED MG scope is not a clean NotFound - ARM evaluates RBAC
-# on the scope BEFORE confirming it exists, so the read comes back HTTP-403 `AuthorizationFailed:
-# ... or the scope is invalid. ... please refresh your credentials.`, which is_auth_error correctly
-# matches (the "credentials" tail). Without a gate, that trips the `elif is_auth_error` branch on
-# every already-deleted scope and fails DISARM loud at Phase 0, before VERIFY ever runs (this is
-# LOAD-BEARING: run 29749656053 only reached VERIFY because Phase 0 ran while the MGs were still
-# live - the same run's Phase 3 then failed on the mirror-image bug in VERIFY 1's policy list,
-# see teardown-verify.sh). Fix: before ANY policy-assignment or role-assignment work for an MG,
-# probe its existence with a direct capture (NOT az_run - only exit code + stderr are consumed):
-# `mg_show_out="$(az account management-group show --name "$mg" --output none 2>&1)"`, mirroring
-# the same oracle already used in teardown-verify.sh VERIFY 4 and teardown-az-sweep.sh step 4 -
-# both of which correctly reported every MG gone in run 29749656053. Three-way branch:
-#   - show succeeds -> MG EXISTS -> proceed with the identity-scan / role-assignment / policy-
-#     assignment logic below EXACTLY as today (a dead token or a real permission gap at a LIVE
-#     scope must still fail loud - this is not loosened).
-#   - show fails AND is_auth_error -> genuine dead token/transport error probing existence itself
-#     -> fail=1 (cannot certify this scope disarmed), continue to the next MG.
-#   - show fails AND NOT is_auth_error -> genuine NotFound -> the MG is gone -> nothing to disarm
-#     at a nonexistent scope -> continue (not a failure). This is the branch that makes a
-#     re-dispatch against an already-empty estate pass DISARM cleanly.
-# is_auth_error itself is NOT loosened - the disambiguation is scope existence, resolved by this
-# gate, not by relaxing the classifier (which would re-open the exact swallow bug Finding #1 closed).
+# AMENDED again 2026-07-20 (second amendment / ADR-054 point 11) - SUPERSEDED by the third
+# amendment below. That version gated the per-MG loop with `az account management-group show
+# --name <mg>`, expecting a clean 404 on a deleted MG. Attempt 4 (run 29753193590) proved that
+# expectation FALSE for the scoped teardown SP: `show` is itself principal-dependent and returns
+# HTTP-403 `AuthorizationFailed` (not a 404) on a deleted MG, because the SP's MG-read grants are
+# scoped to the globaris subtree and are deleted WITH it. DO NOT implement a `show`-based gate.
+#
+# AMENDED a third time 2026-07-20 (third amendment / ADR-054 point 12, docs/teardown-redesign.md
+# sections 10.2 and 12) - MG-EXISTENCE via a ONE-TIME `az account management-group list`
+# SNAPSHOT, not any per-MG `show`. Empirical proof (probe run 29756715840, run AS THE SP):
+# `az account management-group list` SUCCEEDS and returns ONLY the tenant root (every deleted
+# globaris-tree MG is ABSENT); `show --name globaris` returns 403; `show` on the tenant root
+# itself succeeds (the SP's surviving grant, Management Group Contributor at the tenant root,
+# identity.tf, is never deleted, and carries `managementGroups/read`). A `list` over that
+# readable collection is therefore always available to the SP, and existence resolves by NAME
+# MEMBERSHIP with NO per-scope call and so NO deleted-scope 403. Fix (`mg_snapshot_load` /
+# `mg_in_snapshot`, teardown-common.sh):
+#   - ONCE at the start of this script (before the per-MG loop), call `mg_snapshot_load`. A
+#     failure there (the list call itself failing `is_auth_error`, or any non-zero) is FAIL LOUD
+#     - it is the single call the SP is always entitled to make, so a failure is a genuine dead
+#     token / transport error and DISARM cannot proceed without a trustworthy snapshot.
+#   - In the per-MG loop, `mg_in_snapshot "$mg"` ABSENT -> the MG is gone -> `continue` (nothing
+#     to disarm at a nonexistent scope; not a failure - this is the branch that makes a
+#     re-dispatch against an already-empty estate pass DISARM cleanly). PRESENT -> proceed with
+#     the identity-scan / role-assignment / policy-assignment logic below EXACTLY as today (a
+#     dead token or a real permission gap at a LIVE scope must still fail loud - not loosened).
+# `is_auth_error` is NOT loosened; the per-MG `show` is REMOVED entirely - it is never needed as
+# an existence oracle (none of these sites need an EXISTING MG's detail as data, only its
+# presence/absence).
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,21 +84,20 @@ source "${script_dir}/teardown-common.sh"
 
 fail=0
 
+# MG-existence snapshot (see the amendment comment at the top of this file) - ONE list call for
+# the whole run, not a per-MG probe. A failure here is a genuine dead token / transport error
+# (the single call the SP is always entitled to make) and DISARM cannot proceed without it.
+if ! mg_snapshot_load; then
+  echo "::error::DISARM cannot proceed without a trustworthy MG-existence snapshot."
+  exit 1
+fi
+
 for mg in "${MG_SCOPES[@]}"; do
   scope="/providers/Microsoft.Management/managementGroups/${mg}"
   echo "== DISARM scope: ${mg} =="
 
-  # MG-existence gate (see the amendment comment at the top of this file) - probe BEFORE any
-  # policy/role-assignment work at this scope. Direct capture, not az_run: only the exit code
-  # and stderr matter here, and this is the same oracle teardown-verify.sh VERIFY 4 and
-  # teardown-az-sweep.sh step 4 already use successfully.
-  if ! mg_show_out="$(az account management-group show --name "$mg" --output none 2>&1)"; then
-    if is_auth_error "$mg_show_out"; then
-      echo "::error::DISARM: MG ${mg} existence probe failed with an auth/transport error - cannot certify this scope disarmed off a dead token: ${mg_show_out}"
-      fail=1
-    else
-      echo "  MG ${mg}: gone (genuine NotFound) - nothing to disarm at a nonexistent scope."
-    fi
+  if ! mg_in_snapshot "$mg"; then
+    echo "  MG ${mg}: gone (absent from the existing-MG snapshot) - nothing to disarm at a nonexistent scope."
     continue
   fi
 

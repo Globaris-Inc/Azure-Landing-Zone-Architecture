@@ -10,6 +10,13 @@
 # teardown-az-sweep.sh's --no-wait submission pass + bounded reconcile loop, and by the
 # auth-fail-loud hardening in teardown-verify.sh. See each function's own comment for the
 # locked mechanism it implements.
+#
+# AMENDED again 2026-07-20 (third amendment / ADR-054 point 12, docs/teardown-redesign.md
+# section 12): added `mg_snapshot_load` / `mg_in_snapshot` - the ONE-TIME `az account
+# management-group list` snapshot oracle that REPLACES the per-MG `az account management-group
+# show <name>` existence probe everywhere in the teardown scripts. See `mg_snapshot_load`'s own
+# comment for why: `show` is principal-dependent and returns a 403 (not a 404) for the scoped
+# teardown SP on a deleted MG.
 
 # The full globaris MG tree: root + all descendants (docs/teardown-redesign.md section 3):
 # globaris -> platform -> {connectivity, security, identity, management};
@@ -89,6 +96,56 @@ az_run() {
   rm -f "$__az_run_err_file"
   printf -v "$__az_run_outvar" '%s' "$__az_run_out"
   return "$__az_run_rc"
+}
+
+# mg_snapshot_load / mg_in_snapshot - the ONE-TIME `az account management-group list` snapshot
+# oracle (docs/teardown-redesign.md section 12 / ADR-054 point 12). REPLACES the per-MG
+# `az account management-group show <name>` existence probe everywhere in the teardown scripts.
+#
+# Why: the teardown OIDC SP's MG-read grants are scoped to the globaris subtree (identity.tf)
+# and are deleted WITH that subtree, so a `show` on a DELETED globaris-tree MG evaluates RBAC on
+# a scope the SP no longer holds any grant over and returns HTTP-403 `AuthorizationFailed` -
+# NOT the clean 404 `ManagementGroupNotFound` a tenant-root-privileged human would see. Since
+# `is_auth_error` correctly matches that 403 (as designed), a `show`-based existence gate fails
+# loud on every benign already-gone MG for this specific principal (proved empirically, probe
+# run 29756715840, run AS the teardown SP: `list` succeeds and returns only the tenant root;
+# `show --name globaris` returns 403; `show` on the tenant root itself succeeds). The SP's
+# surviving grant is Management Group Contributor AT THE TENANT ROOT (identity.tf; the tenant
+# root is never deleted), which carries `Microsoft.Management/managementGroups/read` - a `list`
+# over that readable collection is always available to the SP, so existence resolves by NAME
+# MEMBERSHIP in one list call, with NO per-scope call and therefore no deleted-scope 403.
+#
+# `mg_snapshot_load` captures the set ONCE per script run via `az_run` (kept stdout/stderr
+# separate - merging them here would reintroduce the exact Finding #2 stderr-banner-corrupts-
+# the-data-channel bug this codebase already closed everywhere else a list's stdout is consumed
+# as data) and populates the global associative array MG_SNAPSHOT (name -> 1 for every MG that
+# currently exists). Auth-fail-loud lives HERE: a non-zero exit is the single call the SP is
+# always entitled to make, so a failure classifies with `is_auth_error` (or any non-zero) as a
+# genuine dead token / transport error - callers MUST treat a failed mg_snapshot_load as FAIL
+# LOUD and never proceed with a stale/absent snapshot. A SUCCESSFUL list is authoritative ground
+# truth for the rest of the run - a dead token cannot return a clean list.
+declare -gA MG_SNAPSHOT
+mg_snapshot_load() {
+  MG_SNAPSHOT=()
+  local names_out name
+  if ! az_run names_out account management-group list --query "[].name" -o tsv; then
+    echo "::error::mg_snapshot_load: az account management-group list failed - this is the single call the SP is always entitled to make (Management Group Contributor at the tenant root, never deleted), so a failure here is a genuine dead token / transport error: ${AZ_RUN_STDERR}"
+    return 1
+  fi
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    MG_SNAPSHOT["$name"]=1
+  done <<< "$names_out"
+  return 0
+}
+
+# mg_in_snapshot "<name>" - membership test against the snapshot loaded by mg_snapshot_load.
+# Returns 0 (true, MG exists) if present, 1 (false, MG gone) if absent. `${MG_SNAPSHOT[$name]+x}`
+# is the standard unset-or-null-safe existence test and never errors under `set -u`, even when
+# the key is not present.
+mg_in_snapshot() {
+  local name="${1:-}"
+  [ -n "${MG_SNAPSHOT[$name]+x}" ]
 }
 
 # az_relogin - mint a FRESH GitHub OIDC federated assertion on demand and re-authenticate the
