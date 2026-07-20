@@ -174,7 +174,7 @@ az_relogin() {
 #   2 = a re-login failed OR an existence check came back auth-classified mid-wait - this is
 #       the section-9.4 "auth error must fail loud" case, distinct from a slow delete. Callers
 #       MUST treat a 2 as a hard failure of the calling script (docs/teardown-redesign.md
-#       section 10.2: "any auth-classified failure at any step is a hard non-zero exit"), not
+#       section 10.3: "any auth-classified failure at any step is a hard non-zero exit"), not
 #       just a Phase-3-will-catch-it warning.
 wait_for_rgs_gone() {
   local ceiling=1800 interval=20 waited=0

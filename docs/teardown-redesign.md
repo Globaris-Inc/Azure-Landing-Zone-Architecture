@@ -19,7 +19,7 @@
 | # | Failure | Root cause |
 |---|---|---|
 | F1 | **Workflow destroyed NOTHING** | `needs: [..., synthetic]` on every spoke + `if: ${{ !failure() ... }}`. `synthetic` is a real root (synthetic/*.tf define real resources - RGs, red-team ACA jobs, cost-pattern VM/storage - gated behind `var.enable_synthetic_workload`, currently false), so its destroy against empty/absent state FAILED, which put the run into `failure()` state, so `!failure()` evaluated FALSE on EVERY downstream job -> all skipped. One empty-state root cascade-skipped the entire teardown. Fix note (reviewer BLOCK, 2026-07-19): the original fix-spec below said to DELETE the `synthetic` job - that was corrected to HARDEN it instead (same `!cancelled()` + state-empty resilience fix as every other root), since `synthetic` is a real root that must retire its own Terraform state via a real destroy, not just have its RGs caught by the naming-pattern az-sweep (which would leave state drifted). |
-| F2 | terraform-destroy alone can't finish some resources | Databricks MANAGED RG carries an RP deny-assignment (cannot `az group delete` directly - must delete the WORKSPACE to cascade it); APIM/AKS are slow deletes; KV purge-protection blocks re-create by name. |
+| F2 | terraform-destroy alone can't finish some resources | Databricks MANAGED RG carries an RP deny-assignment (cannot `az group delete` directly - must delete the WORKSPACE, and per the 2026-07-20 amendment that delete must pass `--force-deletion` to cascade the managed RG - a plain delete now RETAINS it); APIM/AKS are slow deletes; KV purge-protection blocks re-create by name. |
 | F3 | **Policy layer keeps RE-REMEDIATING** | MG-scope DINE policy ASSIGNMENTS (base ALZ Deploy-* + the 223 AMBA objects) stay live during resource deletion and RE-CREATE resources (rg-amba-monitoring-001 was re-remediated). Resource deletion races live remediation and loses. |
 | F4 | terraform-destroy can no longer help | State was cleaned to EMPTY (for a fresh redeploy), so `terraform destroy` sees nothing and cannot finish the CURRENT half-destroyed estate. No fallback existed. |
 
@@ -93,8 +93,11 @@ Reverse-dependency-order terraform-destroy per root (INCLUDING `synthetic`), wit
   removes the policy DEFS + MG hierarchy from state cleanly, or the `remove_mg_hierarchy` az step
   does it in Phase 2).
 - **F2 handling inside terraform-destroy:**
-  - Databricks: `terraform destroy` deletes the WORKSPACE resource, which cascades the RP-managed
-    RG cleanup (the deny-assignment blocks direct RG delete but not workspace-triggered cleanup).
+  - Databricks: `terraform destroy` deletes the WORKSPACE resource (the deny-assignment blocks
+    direct RG delete but not workspace-triggered cleanup). NOTE the 2026-07-20 amendment: a plain
+    workspace delete no longer self-cleans the managed RG - so if the terraform provider destroy
+    leaves the managed RG behind, the Phase 2 az-sweep remnant-catch (with `--force-deletion`,
+    section 6 / 10.3) and Phase 3 VERIFY are the backstop that finish and confirm it.
   - APIM: the root provider `features { api_management { purge_soft_delete_on_destroy = true,
     recover_soft_deleted = ... } }` (already added at B4/ADR-047) purges on destroy. Confirm
     present; adequate timeout (the 360-min CI ceiling covers APIM/AKS slow deletes).
@@ -109,9 +112,10 @@ mode. `az`-based, idempotent:
   rg-online-*, rg-connectivity-*, rg-identity-*, rg-*-monitoring-*, **rg-amba-monitoring-001**,
   etc.) across the workload/platform subs: `az group list` filter -> `az group delete --yes
   --no-wait` then a wait-loop.
-- Databricks (state-gone case): `az databricks workspace delete` on any surviving workspace
-  (cascades managed RG); then verify the 2 managed RGs are gone (they "finish on their own" once
-  the workspace is deleted - the sweep waits/verifies).
+- Databricks (state-gone case): `az databricks workspace delete --force-deletion` on any surviving
+  workspace (the `--force-deletion` flag is what cascades the managed RG - see the 2026-07-20
+  amendment / section 6: a plain delete now RETAINS it); then verify the managed RGs are gone (the
+  reconcile loop waits, Phase 3 VERIFY confirms).
 - KV: `az keyvault list` -> `az keyvault delete`; `az keyvault purge` for NON-purge-protected;
   purge-protected recorded for the redeploy recover path (section 6).
 - **MG hierarchy removal (if `remove_mg_hierarchy` - section 5):** bottom-up - for each leaf MG,
@@ -180,8 +184,16 @@ so nothing references the MGs when they are deleted.
 ## 6. Databricks / KV / APIM handling (F2) - consolidated
 
 - **Databricks managed RG:** never `az group delete` it directly (RP deny-assignment). Delete the
-  WORKSPACE (terraform destroy, or `az databricks workspace delete`); the managed RG self-cleans.
-  Phase 3 verifies it is gone.
+  WORKSPACE (terraform destroy, or `az databricks workspace delete`). CORRECTION (2026-07-20, from
+  the re-dispatch pre-clearance C1): a plain workspace delete NO LONGER self-cleans the managed RG.
+  Per the current Microsoft "Delete a workspace" doc (ms.date 2026-07-08) the managed RG - plus its
+  DBFS storage account and access connector - is RETAINED unless the delete passes `--force-deletion`,
+  and for a Unity-Catalog-enabled workspace Azure converts the managed RG into a regular RG and keeps
+  its contents. So the az-sweep path (section 10.3 step 1) MUST use `az databricks workspace delete
+  --force-deletion` to cascade the managed RG; Phase 3 VERIFY then confirms it is gone. (Open item:
+  DevSecOps is confirming `--force-deletion` combines with `--no-wait`; if it does not, that is a
+  submit-vs-wait sequencing ruling back to the architect - the reconcile loop, section 9.3, would
+  own the managed-RG wait instead.)
 - **KV purge-protection:** teardown soft-deletes KVs; purge-protected ones cannot be purged until
   retention expires. Wednesday's redeploy must RECOVER them (`recover_soft_deleted_key_vaults`
   feature, already used per the B0a caveat) OR use fresh names. Record the soft-deleted vault list
@@ -352,10 +364,18 @@ list is exactly the "empty read mis-interpreted as done" pattern that sank Phase
 
 ### 10.3 `scripts/teardown-az-sweep.sh` (Phase 2)
 
-- **Step 1 Databricks:** change `az databricks workspace delete` to `--no-wait`. Do NOT
-  `wait_for_rg_gone` in-line here. Capture each workspace's managed-RG name into a list for the
-  reconcile step. Capture stderr on the `az databricks workspace list` call and on the delete: an
-  auth-classified error is FAIL LOUD, not "already gone."
+- **Step 1 Databricks:** the workspace delete MUST pass `--force-deletion` - a plain delete no
+  longer self-cleans the managed RG (section 6 / amendment point 10; MS "Delete a workspace" doc,
+  ms.date 2026-07-08). Intended invocation: `az databricks workspace delete --force-deletion
+  --no-wait`. Do NOT `wait_for_rg_gone` in-line here (the managed RG is reconciled in the final
+  wait step). Capture each workspace's managed-RG name into a list for the reconcile step. Capture
+  stderr on the `az databricks workspace list` call and on the delete: an auth-classified error is
+  FAIL LOUD, not "already gone." COMPATIBILITY CHECK (being confirmed by DevSecOps before merge):
+  that `--force-deletion` and `--no-wait` combine on `az databricks workspace delete`. If they do
+  NOT combine, STOP and route back to the architect for a submit-vs-wait sequencing ruling - do not
+  silently drop either flag: a synchronous `--force-deletion` (no `--no-wait`) reintroduces the
+  long in-session poll the token-durability ruling (9.2) exists to remove, so the ruling would be to
+  force-delete asynchronously another way or let the reconcile loop (9.3) own the managed-RG wait.
 - **Step 2 RG sweep:** already `--no-wait` for the delete - keep that, but (i) EXCLUDE the
   managed-RG names captured in step 1 from direct deletion (they cascade from the workspace delete;
   a direct `az group delete` on them is doomed by the RP deny-assignment and is pure noise), and

@@ -54,7 +54,8 @@ real root - the workflow destroyed nothing (`synthetic` IS a real root - `synthe
 real resources gated behind `var.enable_synthetic_workload`, currently false - the cascade was
 about the destroy failing against empty state, not about the root not existing); (F2)
 terraform-destroy alone cannot finish the Databricks managed RG (RP deny-assignment - must delete
-the workspace to cascade), APIM/AKS slow deletes, KV purge-protection; (F3) MG-scope DINE policy
+the workspace, and per the amendment below that delete now requires `--force-deletion` to cascade
+the managed RG), APIM/AKS slow deletes, KV purge-protection; (F3) MG-scope DINE policy
 assignments kept RE-REMEDIATING (recreated rg-amba-monitoring-001) during resource deletion; (F4)
 state was emptied for a fresh redeploy, so terraform-destroy can no longer finish the current
 half-destroy - no az fallback existed.
@@ -75,9 +76,10 @@ half-destroy - no az fallback existed.
    (Phase 0) and VERIFY (Phase 3) run in both modes, target=all only (a single-root target skips
    the whole-estate phases); `mode=az-sweep` with a non-`all` target is rejected by the `guard` job
    before login (it would otherwise run nothing and report green).
-4. **F2 handling:** Databricks = delete the WORKSPACE (never the managed RG directly - cascades);
-   APIM/KV = provider purge features (APIM added at B4) + 360-min ceiling; KV purge-protected =
-   soft-delete + redeploy recover (recover_soft_deleted_key_vaults).
+4. **F2 handling:** Databricks = delete the WORKSPACE (never the managed RG directly) WITH
+   `--force-deletion` (see the 2026-07-20 amendment point 10 - a plain workspace delete no longer
+   self-cleans the managed RG); APIM/KV = provider purge features (APIM added at B4) + 360-min
+   ceiling; KV purge-protected = soft-delete + redeploy recover (recover_soft_deleted_key_vaults).
 5. **Full MG-hierarchy teardown for the Wednesday redeploy, dispatched explicitly**
    (`remove_mg_hierarchy` input, default **false** - a checked-in default that deletes the whole MG
    tree is too much blast radius; the redeploy runbook passes `true` explicitly at dispatch): subs
@@ -172,6 +174,18 @@ rulings and a DevSecOps fix-spec (full detail: docs/teardown-redesign.md section
    successful empty list. Applies to ALL of teardown-disarm.sh, teardown-az-sweep.sh, and
    teardown-verify.sh - VERIFY especially, since a dead token there would otherwise falsely report
    "clean". This directly kills the three silent-exit-0 bugs above.
+10. **Databricks managed-RG cascade now REQUIRES `--force-deletion` (stale-premise correction).**
+    The original ADR-054 F2 premise - that deleting a Databricks workspace self-cleans its managed
+    resource group - is no longer true per the current Microsoft "Delete a workspace" doc
+    (ms.date 2026-07-08): a plain delete RETAINS the managed RG (plus its DBFS storage account and
+    access connector), and for a Unity-Catalog-enabled workspace Azure converts the managed RG into
+    a regular RG and keeps its contents. So the workspace delete MUST pass `--force-deletion` to
+    cascade the managed RG. This corrects ADR-054 F2 and docs/teardown-redesign.md section 6, and
+    aligns with the re-dispatch pre-clearance C1. DevSecOps is adding `--force-deletion` to the
+    az-sweep script in parallel and CONFIRMING it combines with `--no-wait` (point 7a); if the two
+    flags do NOT combine, DevSecOps STOPS and routes back to the architect for a submit-vs-wait
+    sequencing ruling (a synchronous force-delete would reintroduce the long-poll the token-durability
+    ruling exists to remove, so the reconcile loop, point 8, would then own the managed-RG wait).
 
 Amendment consequences: Phase 2 becomes submission + one relogin-bounded reconcile wait (no
 synchronous long deletes); an auth/token failure ANYWHERE now fails the run loudly instead of

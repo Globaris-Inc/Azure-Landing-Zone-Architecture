@@ -32,11 +32,25 @@
 # failure branch (never on a success path compare) are unaffected - there is no data-corruption
 # risk there.
 #
+# AMENDED again 2026-07-20 (architect pre-clearance C1, stale-design-premise catch): ADR-054's
+# F2 premise ("delete the workspace, the managed RG self-cleans") is out of date per the current
+# MS "Delete a workspace" doc (updated 2026-07-08) - a workspace delete WITHOUT --force-deletion
+# RETAINS the managed RG (DBFS storage account + access connector; Azure Databricks converts it
+# to a regular RG instead of removing it). Step 1's workspace delete now passes --force-deletion
+# alongside --no-wait. Verified compatible (not mutually exclusive, no synchronous-wait side
+# effect) against the live `az databricks workspace delete` CLI reference
+# (learn.microsoft.com/en-us/cli/azure/databricks/workspace) - both are listed as independent
+# optional flags in the same command syntax block, in the same parameter group as everything
+# else (no coupling/exclusivity note). --force-deletion does not change the async contract of
+# --no-wait: the submission still returns immediately, and the actual cascade delete (workspace
+# + managed RG + retained UC catalog data) is what the reconcile step (step 5) then waits for.
+#
 # Order matters:
-#   1. Databricks: submit the WORKSPACE delete --no-wait (never `az group delete` the managed
-#      RG directly - it carries an RP deny-assignment, F2). Deleting the workspace cascades the
-#      managed RG cleanup; the managed RG name is captured here and waited on in the single
-#      reconcile step at the end, not polled in-line.
+#   1. Databricks: submit the WORKSPACE delete --no-wait --force-deletion (never `az group
+#      delete` the managed RG directly - it still carries an RP deny-assignment, F2, even with
+#      --force-deletion in play; --force-deletion is what makes the WORKSPACE delete itself
+#      cascade the managed RG cleanup instead of retaining it). The managed RG name is captured
+#      here and waited on in the single reconcile step at the end, not polled in-line.
 #   2. General RG sweep by naming pattern across all 5 workload/platform subscriptions,
 #      excluding any Databricks-managed RG captured in step 1 (a direct delete on those is
 #      doomed by the RP deny-assignment and pure noise - they cascade from step 1 instead).
@@ -65,8 +79,10 @@ if [ "${#SUBS[@]}" -eq 0 ]; then
   exit 1
 fi
 
-# --- 1. Databricks: submit the workspace delete --no-wait (never wait in-session, section 9.2a) ---
-echo "== Phase 2 step 1: Databricks workspace cascade (submission only, --no-wait) =="
+# --- 1. Databricks: submit the workspace delete --no-wait --force-deletion (never wait
+#     in-session, section 9.2a; --force-deletion is required to cascade the managed RG at all,
+#     architect pre-clearance C1 - see the header comment above) ---
+echo "== Phase 2 step 1: Databricks workspace cascade (submission only, --no-wait --force-deletion) =="
 declare -a dbx_managed_rgs=()
 declare -a dbx_managed_rg_subs=()
 for sub in "${SUBS[@]}"; do
@@ -83,9 +99,9 @@ for sub in "${SUBS[@]}"; do
     ws_rg="$(printf '%s' "$row" | cut -f2)"
     managed_rg_id="$(printf '%s' "$row" | cut -f3)"
     managed_rg_name="${managed_rg_id##*/}"
-    echo "  Submitting delete for Databricks workspace ${ws_name} (rg ${ws_rg}, sub ${sub}, --no-wait) - cascades managed rg ${managed_rg_name}"
+    echo "  Submitting delete for Databricks workspace ${ws_name} (rg ${ws_rg}, sub ${sub}, --no-wait --force-deletion) - cascades managed rg ${managed_rg_name}"
     if ! dbx_del_out="$(az databricks workspace delete --name "$ws_name" --resource-group "$ws_rg" \
-        --subscription "$sub" --yes --no-wait --output none 2>&1)"; then
+        --subscription "$sub" --yes --no-wait --force-deletion --output none 2>&1)"; then
       if is_auth_error "$dbx_del_out"; then
         echo "::error::Databricks workspace delete submission for ${ws_name} failed with an auth/transport error: ${dbx_del_out}"
         exit 1
@@ -100,7 +116,11 @@ for sub in "${SUBS[@]}"; do
   done
 done
 
-# --- 2. General RG sweep by naming pattern, across all 5 subs (--no-wait submission) ---
+# --- 2. General RG sweep by naming pattern, across all 5 subs (--no-wait submission). The
+#     Databricks-managed RG is STILL excluded here even with --force-deletion in step 1: it
+#     still carries the RP deny-assignment (F2) until the workspace's own force-delete cascade
+#     completes, so a concurrent direct `az group delete` on it would race that cascade and is
+#     doomed either way - the reconcile step (step 5) is what waits for it to actually clear. ---
 echo "== Phase 2 step 2: RG sweep (naming pattern, --no-wait submission) =="
 declare -a deleted_rgs=()
 declare -a deleted_subs=()
@@ -238,7 +258,7 @@ else
   wait_for_rgs_gone "${reconcile_pairs[@]}"
   reconcile_rc=$?
   if [ "$reconcile_rc" -eq 2 ]; then
-    # A re-login or an auth-classified existence check failed mid-wait - per section 10.2 this
+    # A re-login or an auth-classified existence check failed mid-wait - per section 10.3 this
     # is a hard non-zero exit for the whole script, not just a Phase-3-will-catch-it warning.
     echo "::error::reconciliation hit an auth/transport failure - failing loud (section 9.4), not treating this as a plain still-deleting straggler."
     exit 1

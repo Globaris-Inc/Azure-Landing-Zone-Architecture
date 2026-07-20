@@ -62,6 +62,7 @@ echo "== VERIFY 1: MG-scope policy assignments =="
 for mg in "${MG_SCOPES[@]}"; do
   scope="/providers/Microsoft.Management/managementGroups/${mg}"
   if az_run remaining policy assignment list --scope "$scope" --query "length(@)" -o tsv; then
+    # shellcheck disable=SC2154  # remaining is assigned indirectly by az_run's printf -v
     if [ "${remaining:-0}" != "0" ]; then
       note_fail "MG ${mg} still has ${remaining} policy assignment(s) - DISARM did not fully complete."
     else
@@ -104,6 +105,7 @@ done
 echo "== VERIFY 3: Databricks workspaces =="
 for sub in "${SUBS[@]}"; do
   if az_run count databricks workspace list --subscription "$sub" --query "length(@)" -o tsv; then
+    # shellcheck disable=SC2154  # count is assigned indirectly by az_run's printf -v
     if [ "${count:-0}" != "0" ]; then
       note_fail "${count} Databricks workspace(s) still present in subscription ${sub}."
     else
