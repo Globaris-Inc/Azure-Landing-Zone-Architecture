@@ -967,7 +967,46 @@ policies and re-hit AADSTS700024. What is the durable fix?
 **A** if/when a validated greenfield rebuild becomes a requirement. Do NOT build A speculatively during the
 recovery - the priority is getting the identity layer green. Keep `platform/identity` CI-only either way.
 
-**UPDATE 2026-07-20 (architect, teardown consolidation) - a proven `az_relogin` primitive now exists;
+**RESOLVED 2026-07-20 (architect, ADR-055) - greenfield rebuild requested, durable fix designed and chosen.**
+Mechanism verified (not assumed): this is the NATIVE provider OIDC context, not az-CLI, so ADR-054's
+`az_relogin` does not transfer. go-azure-sdk's GitHub OIDC authorizer (`sdk/auth/github_oidc_authorizer.go`)
+caches the ACCESS token and re-mints a FRESH GitHub assertion via `githubAssertion()` on each access-token
+acquisition, PROVIDED the request URL + bearer token resolve (`ARM_OIDC_REQUEST_URL`/`ARM_OIDC_REQUEST_TOKEN`,
+GitHub-Actions fallback `ACTIONS_ID_TOKEN_REQUEST_URL`/`ACTIONS_ID_TOKEN_REQUEST_TOKEN`). In run 29055619749
+azurerm re-minted across a 2h11m create poll (it failed on TIMEOUT, not AADSTS700024) while the azuread tail
+Graph ops at +3h reused a STALE job-start assertion and hit AADSTS700024 - the divergence in the same run is
+the smoking gun (a version-gated / idle-gap behaviour; the lock now resolves azuread 3.9.0 / azurerm 4.71.0,
+both current, both reading the request inputs).
+
+**Chosen fix (a coordinated two-part, NOT a root split, NOT a stored credential):**
+- Part 1 (structural GUARANTEE, identity root): a single umbrella flag `enable_conditional_access` (default
+  `true`) gates every azuread Graph write (named location + `time_sleep.wait_named_location` + all eight CA
+  policies CA-001..CA-008),
+  so greenfield runs as a documented TWO-PASS: Pass 1 (`enable_conditional_access = false`) creates
+  network + AADDS as an azurerm-ONLY long apply (proven token-safe; ADR-029 import recovers a timed-out
+  create), Pass 2 (flag `true`, domain already Running -> Read in seconds) runs the Graph writes in a SHORT
+  apply under a fresh token. This is OQ-022 Option A's lifecycle separation achieved WITHOUT a new root/state
+  migration - it reuses the `enable_*` pattern and the existing ADR-029 import.
+- Part 2 (refresh HYGIENE, all roots, `_tf-root.yml`): explicitly export `ARM_OIDC_REQUEST_URL` +
+  `ARM_OIDC_REQUEST_TOKEN` (from the runtime `ACTIONS_*` vars, via a `$GITHUB_ENV` step - the job `env:` map
+  does not shell-expand runtime vars), with provider floors azurerm 4.71.0 / azuread 3.9.0. This makes token
+  refresh reliable for Pass 2 and for every other long apply (notably connectivity WITH VPN/ExpressRoute
+  gateways under production restoration, ADR-049/ADR-042; APIM/AKS/Databricks/Fabric are already sub-window).
+
+**Rejected:** full root split (OQ Option A original) - heavier than the flag two-pass for the same
+guarantee; Part-2-alone / mid-apply re-auth (OQ Option B) - refresh alone is very likely sufficient but
+UNPROVABLE across a 3h idle gap without a live long-apply, and the user's 4-fail bar makes staking the first
+greenfield run on it unacceptable (so Part 2 is kept as hygiene, Part 1 is the guarantee); a longer-lived
+cert/secret (OQ Option c) - regresses the keyless OIDC posture (ADR-004/005/021) and is unnecessary;
+self-hosted runner - out of bounds (ADR-005/OQ-007).
+
+**Lanes:** DevSecOps owns `_tf-root.yml` (Part 2 export step + docs) and the greenfield two-pass sequencing
+in the deploy runbook/DEPLOYMENT.md. Cloud-engineer owns `platform/identity` (the `enable_conditional_access`
+flag + `count` gating on the nine azuread resources (named location + CA-001..CA-008) + `one(...)`-safe outputs + reinstating the ADR-029 import
+block for greenfield recovery). MANDATORY pre-clearance before any deploy retry; the real proof is the live
+greenfield long-apply. See ADR-055 for the full spec and consequences.
+
+**Superseded interim note (2026-07-20, teardown consolidation) - a proven `az_relogin` primitive now exists;
 generalizing it to long DEPLOY steps is a tracked item, not in scope here.** ADR-054's teardown fix
 built `az_relogin` (teardown-common.sh): it mints a BRAND-NEW GitHub OIDC federated assertion on demand
 (fresh id-token from `$ACTIONS_ID_TOKEN_REQUEST_URL`, audience `api://AzureADTokenExchange`, then

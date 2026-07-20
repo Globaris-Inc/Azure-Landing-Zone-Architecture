@@ -37,6 +37,223 @@
 
 <!-- Newest at the top. -->
 
+### ADR-056: Branch topology and lifecycle - feature -> integration (banking) -> main, one workstream per branch, delete-on-merge after clearance, and MANDATORY verification of branch state against origin/* refs (never trust local pointers)
+
+- **Date:** 2026-07-20
+- **Section:** 10 (Pipeline & Tooling) / cross-cutting process
+- **Status:** Accepted (architect; process ADR - binds every role)
+- **Decision makers:** user (repeated stale-local-ref confusion prompted it), claude (architect)
+
+**Context:**
+
+The build runs across three long-lived doc/code lines - short-lived `feature/*` branches, the `banking`
+integration line (the real build: B1-B9 + O&M phase 1 + security + teardown redesign, merged via PR #39),
+and `main` (now fully current via PR #31; `main..banking` is empty). During the ADR-055 pre-clearance a
+prior agent was repeatedly misled because LOCAL branch pointers were stale and did not reflect the remote:
+local refs suggested reconciliations were outstanding that were in fact already merged. The working state had
+to be cleaned up and re-verified against the remote before any real work could proceed. This is a recurring,
+expensive failure mode (agents re-derive an incorrect estate/branch picture from stale local git and then
+act on it), and it directly threatens the user's hard bar (4 straight deploy failures moves the project off
+Claude Code) because a wrong branch picture can send an apply from the wrong code.
+
+Nothing in the ADR log had codified the branch flow or the "verify against origin/*" rule, so each agent
+improvised. This ADR makes the topology and the verification discipline explicit.
+
+**Decision:**
+
+1. **Branch flow is `feature/* -> banking (integration) -> main`.** Feature work is done on a dedicated
+   `feature/<workstream>` branch, flows into `banking` for integration, and `banking` reconciles to `main`.
+   Never propose a commit straight to `main` (memory: dev-and-feature-branch-strategy).
+2. **One workstream per branch.** A `feature/*` branch carries exactly one coherent workstream (e.g.
+   `feature/adr-055-oidc-durability`, `feature/teardown-redesign`). Do not pile unrelated changes onto an
+   in-flight feature branch.
+3. **Delete-on-merge AFTER clearance.** A `feature/*` branch is deleted once it has merged and the merge is
+   cleared (reviewer approve + any pre-clearance/QA gate its change requires). Deleting before clearance
+   loses the recovery point; keeping stale merged branches around is what breeds the local-pointer confusion.
+4. **MANDATORY: verify branch/estate state against `origin/*` refs, NEVER local pointers.** Before any agent
+   reasons about "what is on branch X" or "is Y merged", it MUST consult the REMOTE-tracking refs
+   (`git fetch` then read `origin/<branch>`, `git log origin/main..origin/banking`, `gh` for PR state) and
+   treat local branch pointers as UNTRUSTED until reconciled. A local pointer that disagrees with `origin/*`
+   is stale by default. When a task hand-off supplies remote-verified ground-truth facts (tip commits,
+   which line contains what), those SUPERSEDE anything the agent infers from local git.
+5. **Corollary for deploys:** because an apply runs the code on the dispatched ref, confirming the ref
+   against `origin/*` is part of the pre-clearance gate - a plan/apply must never be dispatched from a branch
+   whose remote state the agent has not verified.
+
+**Alternatives considered:**
+- Trunk-based single-branch flow - rejected: the build's role hand-offs (architect -> engineer/devsecops ->
+  reviewer) and batched per-iteration reviews need an integration line distinct from `main`, and feature
+  isolation is what lets a workstream be reviewed and cleared as a unit.
+- Rely on local branch hygiene / agent memory of git state - rejected: this is the exact failure this ADR
+  exists to stop. Local pointers drift; only `origin/*` is authoritative.
+- Long-lived feature branches - rejected: they accumulate cross-workstream drift and are the classic source
+  of stale-ref confusion; one workstream per branch, delete-on-merge keeps the set small and legible.
+
+**Consequences:**
+- Positive: a single documented topology every role follows; the stale-local-ref failure mode is named and
+  guarded (verify against `origin/*`); deploys cannot be dispatched from an unverified ref; the branch set
+  stays small (delete-on-merge).
+- Negative / trade-offs: an explicit `git fetch` + `origin/*` check is now a required step before branch/
+  merge reasoning (small, cheap); delete-on-merge means a merged branch is gone once cleared (the merge
+  commit + `main`/`banking` history are the recovery point, which is the intent).
+- Follow-ups required: none code-side (process ADR). It binds the architect pre-clearance gate (point 5) and
+  every agent's branch reasoning (point 4). Consistent with the propose-commits-not-run rule (ADR / memory:
+  propose-commits-dont-run) - this ADR does not change WHO commits, only how branch state is established.
+
+### ADR-055: Durable greenfield fix for OIDC token expiry on the identity root's 1-3h AADDS create + trailing Graph ops (resolves OQ-022) - refresh-enabled provider OIDC (explicit ARM_OIDC_REQUEST_URL/TOKEN export) PLUS decouple the multi-hour create from the azuread Graph phase via a single umbrella enable-flag two-pass, NOT a root split and NOT a stored long-lived credential
+
+- **Date:** 2026-07-20
+- **Section:** 8 (Identity / Entra DS) / 5 (azuread Conditional Access) / 10 (Pipeline & Tooling, OIDC auth)
+- **Status:** Accepted (architect design; DevSecOps + cloud-engineer implement; code-reviewer gates). Resolves OQ-022. Extends ADR-029 Part C (which deferred the durable greenfield fix). Does NOT supersede ADR-029 (its NSG fix + import recovery remain in force).
+- **Decision makers:** user (requested the greenfield rebuild follow-up), claude (architect)
+
+**Context:**
+
+`platform/identity` co-locates, in ONE `terraform apply`, a 1-3h `azurerm_active_directory_domain_service`
+create-wait (`domain-services.tf:93`, create-only wait for both DCs) with azuread Microsoft-Graph writes
+(named location + CA-001..CA-008 in `main.tf`). On a from-scratch greenfield deploy the long create runs
+BEFORE the Graph ops. In run 29055619749 (2026-07-10) the trailing Graph ops failed
+`AADSTS700024: Client assertion is not within its valid time range`, the assertion window being the one
+minted at job start (~3h earlier). ADR-029 Part C closed this for the CURRENT POC by importing the
+built-once domain so every future apply is short, and PARKED the durable greenfield fix as OQ-022. The user
+has now requested the greenfield rebuild, so the durable fix must land.
+
+**Mechanism (verified 2026-07-20, not assumed - anti-hallucination):**
+- Auth context is NATIVE provider OIDC (`ARM_USE_OIDC=true` + `ARM_CLIENT_ID`, `_tf-root.yml:102-103`), NOT
+  az-CLI. The teardown's `az_relogin` shell helper (ADR-054) therefore does NOT transfer - it re-logs-in the
+  az CLI, not the Terraform provider's in-process token source.
+- Both providers authenticate through go-azure-sdk's GitHub OIDC authorizer. It exchanges a GitHub-issued
+  id-token (the client assertion, ~5 min validity) for an Azure/Graph access token (~60-75 min). Verified
+  against the go-azure-sdk `sdk/auth/github_oidc_authorizer.go` source: the CachedAuthorizer caches the
+  ACCESS TOKEN, and on expiry re-invokes `githubAssertion()`, which issues a FRESH HTTP GET to the id-token
+  request URL and mints a NEW assertion, then re-exchanges. So a correctly-configured recent provider
+  re-mints per access-token acquisition; it does NOT ride one ~5 min assertion for hours.
+- The request URL + bearer token resolve from `ARM_OIDC_REQUEST_URL` / `ARM_OIDC_REQUEST_TOKEN`, with a
+  documented GitHub-Actions fallback to the runtime-injected `ACTIONS_ID_TOKEN_REQUEST_URL` /
+  `ACTIONS_ID_TOKEN_REQUEST_TOKEN` (present whenever `permissions: id-token: write` is set - it is,
+  `_tf-root.yml:92`). Confirmed against the hashicorp/azurerm and hashicorp/azuread `service_principal_oidc`
+  provider guides.
+- Smoking gun in run 29055619749: azurerm POLLED the AADDS create for 2h11m with NO auth failure (it failed
+  on a create-wait TIMEOUT, not AADSTS700024) - proof that azurerm's authorizer DID re-mint across 2h+ in
+  this exact workflow and env. azuread's tail Graph ops at +3h failed AADSTS700024 reporting the ORIGINAL
+  (job-start) assertion window - proof that the azuread path reused a STALE cached assertion instead of
+  re-minting. The divergence in the SAME run/env is the key finding: azuread acquired its Graph token once
+  at job start, sat idle ~3h while azurerm did the long create, and on refresh did not fetch a fresh
+  id-token (a version-gated / idle-gap behaviour of the resolved azuread build; the lock now resolves azuread
+  to 3.9.0 and azurerm to 4.71.0, both current, both reading the OIDC request inputs). Conclusion: the
+  exposure is (i) reliance on version-gated auto-detection of the request inputs, and (ii) a multi-hour idle
+  gap between one provider's job-start token and the other provider's tail-end first/next Graph call.
+
+**Decision:**
+
+Adopt a two-part coordinated fix. Part 1 is the STRUCTURAL GUARANTEE (removes the failure mode regardless of
+provider refresh edge cases); Part 2 is refresh HYGIENE that makes token refresh reliable for Part 1's short
+second pass and for every OTHER long apply in the estate. Both land together.
+
+**Part 1 - decouple the multi-hour create from the Graph phase via a single umbrella enable-flag, run
+greenfield as a documented TWO-PASS sequence (identity root only). NO root split.**
+- Add ONE new umbrella variable to `platform/identity`, `enable_conditional_access` (bool, default `true`),
+  and gate EVERY azuread Graph WRITE on it: `azuread_named_location.approved_countries`,
+  `time_sleep.wait_named_location`, and ALL EIGHT CA policies CA-001..CA-008 (`require_mfa_admins`,
+  `block_legacy_auth`, `require_compliant_device_portal`, `phishing_resistant_mfa_pim`, `signin_frequency_admins`,
+  `block_high_user_risk`, `mfa_signin_risk`, and the already-gated `geo_block`, which becomes
+  `enable_conditional_access && enable_geo_block_ca_policy`). Gating only the first five would leave three
+  azuread Graph writes (`signin_frequency_admins`, `block_high_user_risk`, `mfa_signin_risk`) running at the
+  tail of Pass 1 and defeat the azurerm-only guarantee, so all eight are gated. This reuses the codebase's established
+  `enable_*` flag pattern (ADR-030/031/032/043) - a `count = var.enable_conditional_access ? 1 : 0` on each,
+  with the outputs made `one(...)`-safe (mirrors the existing geo_block output).
+- Greenfield deploy order (documented in DEPLOYMENT.md / the deploy runbook, NOT a code default change - the
+  flag stays default `true` so steady-state and every non-greenfield apply are unchanged):
+  - Pass 1: apply `platform/identity` with `enable_conditional_access = false` (greenfield tfvars override).
+    This creates the identity VNet/NSG + AADDS managed domain and absorbs the 1-3h create-wait as an
+    azurerm-ONLY apply. That path is proven token-safe (azurerm re-minted across 2h11m in run 29055619749).
+    No Graph write runs at the tail, so no stale-assertion exposure exists in this long pass.
+  - Pass 1 recovery (only if the create-wait times out, e.g. slow DC2 / AADDS104): reinstate ADR-029's
+    config-driven `import {}` block for `azurerm_active_directory_domain_service.this[0]` (composite ID
+    `<domain resource ID>/initialReplicaSetId/<replica set GUID>`, GUID supplied by the operator per ADR-029)
+    and re-apply, still with `enable_conditional_access = false`. This is the canonical greenfield recovery,
+    not a new mechanism.
+  - Pass 2: apply `platform/identity` with `enable_conditional_access = true` (the default). The domain
+    already exists, so azurerm does a Read (seconds) and the azuread Graph writes run early in a SHORT apply
+    under a fresh, just-minted token. Steady-state and CI re-applies are exactly this short single pass.
+- There are NO azuread data sources in the root: the admin role-template IDs (`local.admin_role_template_ids`,
+  `main.tf:30`) and the management-app IDs (`local.azure_management_app_ids`, `main.tf:60`) are hardcoded
+  literal constants, not `data "azuread_*"` lookups. So the only azuread objects the root touches are the
+  eight CA-policy writes + the named location gated above, and nothing azuread runs unauthenticated at the
+  multi-hour tail once those are gated off in Pass 1.
+
+**Part 2 - refresh-enabled provider OIDC (all roots, `_tf-root.yml`).**
+- Explicitly export `ARM_OIDC_REQUEST_URL` and `ARM_OIDC_REQUEST_TOKEN` into the job environment, sourced
+  from the runtime `ACTIONS_ID_TOKEN_REQUEST_URL` / `ACTIONS_ID_TOKEN_REQUEST_TOKEN`. This MUST be done in a
+  `run:` step that writes to `$GITHUB_ENV` (the job-level `env:` map does NOT shell-expand runtime vars, so
+  `ARM_OIDC_REQUEST_URL: ${ACTIONS_ID_TOKEN_REQUEST_URL}` in `env:` would be a literal, not the value). This
+  removes the dependency on version-gated auto-detection of the request inputs: with them set explicitly,
+  every supported provider version re-mints a fresh assertion on access-token refresh.
+- Provider floors (already satisfied by the lock files, restated so a `-upgrade` cannot regress below them):
+  azurerm `4.71.0` (pinned `~> 4.71.0`), azuread `3.9.0` (pinned `~> 3.0`). Both current, both read the OIDC
+  request inputs and re-mint per acquisition.
+- `permissions: id-token: write` is already present (`_tf-root.yml:92`) - required and confirmed.
+
+**Alternatives considered:**
+- Part-1 alternative "full root SPLIT into a Phase-1 (network+AADDS) root and a Phase-2 (azuread CA) root"
+  (OQ-022 Option A) - REJECTED: achieves the same ARM-vs-Graph lifecycle separation as the flag two-pass but
+  at far higher cost (a new composition root, state migration, cross-root data passing for the domain/subnet,
+  provider re-wiring, an extra pipeline stage). ADR-029 already called this speculative for a POC. The
+  umbrella flag delivers the identical guarantee inside the existing root.
+- Part-2-alone "just export the request inputs / bump providers and keep the single 3h apply with tail Graph
+  ops" (OQ-022 Option B, mechanism only) - REJECTED AS THE SOLE FIX. It is very likely sufficient (the
+  mechanism verification says a current provider with explicit request inputs re-mints across the idle gap),
+  but its correctness across a 3h idle gap is UNPROVABLE without a live long-apply, and the user's hard bar
+  (4 straight failures moves the project off Claude Code) plus the cost of a burned 3h greenfield apply make
+  it unacceptable to stake the first greenfield run on an unproven refresh across a multi-hour idle gap. Part
+  2 is therefore retained as mandatory hygiene, but Part 1 (azurerm-only long pole, proven token-safe) is the
+  guarantee.
+- CI job-level mid-apply re-auth for the azuread phase (OQ-022 Option B, the `az_relogin`-style variant) -
+  REJECTED: a single `terraform apply` process holds its provider token source in-process; an external
+  `az login` between phases does not refresh the Terraform provider's authorizer, and there is no supported
+  hook to re-auth mid-apply. `az_relogin` solves the az-CLI context (teardown), not the provider context.
+- Longer-lived credential for the long apply only - client certificate or client secret (OQ-022 Option c) -
+  REJECTED: reintroduces a stored long-lived secret, directly regressing the keyless federated-OIDC posture
+  (ADR-004/005/021), and is unnecessary once refresh works (Part 2) and the long pole is azurerm-only (Part
+  1). Not accepted even scoped to one apply.
+- Self-hosted runner with a persistent identity - OUT OF BOUNDS (GitHub-hosted runners per ADR-005 / OQ-007).
+
+**Scope - which deploy steps can exceed the ~60-75 min token window (so the fix covers the real set, not just
+AADDS):**
+- `platform/identity` / AADDS: 1-3h create-wait co-located with Graph writes - the PRIMARY case; gets BOTH
+  Part 1 and Part 2.
+- `platform/connectivity` WITH the paid gateways enabled (VPN Gateway / ExpressRoute Gateway) under
+  production restoration (ADR-049; deferred/flag-gated off in the POC per ADR-042): gateway creates run
+  30-45+ min EACH, so a two-hub apply can approach or exceed the token window. Covered by Part 2 (refresh
+  export); no structural change needed because there are no trailing Graph ops in connectivity.
+- APIM (ADR-047, ~29 min observed for Developer stv2 internal; a Premium multi-region unit would be longer),
+  AKS private cluster, Databricks workspace, Fabric capacity - all currently under the token window (<~20-30
+  min). Covered for free by the Part 2 export; no structural change.
+- Net: Part 2 is the universal safety net for ALL roots at zero incremental cost; Part 1 is identity-only
+  because AADDS is the only multi-hour CREATE co-located with Graph WRITES.
+
+**Consequences:**
+- Positive: the greenfield long pole becomes an azurerm-only apply on a proven-refreshing token; the Graph
+  phase always runs in a short apply; keyless OIDC posture preserved (no stored secret); every long apply
+  across the estate gains reliable token refresh from one workflow change; reuses two already-built
+  mechanisms (the `enable_*` flag pattern and the ADR-029 import), so the change surface is small and
+  no new root/state migration is introduced.
+- Negative / trade-offs: greenfield identity is now a documented two-pass (one extra apply invocation on a
+  clean-room rebuild only - steady-state stays single-pass); one new variable + `count` gating on nine azuread
+  resources (a named location + all eight CA policies CA-001..CA-008); a `$GITHUB_ENV` export step added to
+  `_tf-root.yml` that runs on every root (harmless, ~no cost).
+- Follow-ups required:
+  - MANDATORY pre-clearance (standing architect-owned gate) before any deploy retry of `platform/identity`,
+    with a fresh resource-type lifecycle audit (AADDS `azurerm_active_directory_domain_service` still
+    current, not retired) and the live policy matrix at the Identity MG ancestors (the ADR-028 Deny-Public-IP
+    exemption must be live before the create).
+  - The REAL proof of this fix is a live greenfield long-apply, which only the requested rebuild exercises.
+    QA/architect must confirm on that run: Pass 1 completes (or times out and imports) with azurerm token
+    refresh and NO AADSTS700024, and Pass 2's Graph writes succeed under a fresh token.
+  - Plan-scan before each apply (LESSON 26): the AADDS resource carries an Azure-assigned ForceNew attribute
+    (`domain_configuration_type`, pinned `FullySynced` per ADR-029) - a plan showing `-/+ replace` on the
+    domain is a STOP.
+
 ### ADR-054: Reliable end-to-end teardown - disarm-policy-first, no-empty-root-cascade, two-mode (terraform primary + az sweep fallback), OIDC token durability, Databricks force-deletion, auth-fail-loud, MG list-snapshot oracle, full MG-hierarchy teardown, loud verification [GREEN and proven E2E, attempt 5 run 29765892057; consolidated 2026-07-20 - the reactive-patch amendment chain is folded into the coherent mechanism below, with a compact changelog; the interim per-MG `show` oracle is superseded by the `az account management-group list` snapshot oracle]
 
 - **Date:** 2026-07-19

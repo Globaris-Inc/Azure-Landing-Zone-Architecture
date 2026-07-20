@@ -1,6 +1,6 @@
 # Purpose: Zero Trust + Conditional Access - provider configuration.
 # Section: 5 - Zero Trust + Conditional Access
-# Last updated: 2026-07-08
+# Last updated: 2026-07-20 (ADR-055: azuread floor raised to ~> 3.9)
 #
 # Three providers are required for this module:
 #   azuread - Conditional Access policies, named locations, Identity Protection
@@ -21,8 +21,12 @@ terraform {
   required_version = ">= 1.9"
   required_providers {
     azuread = {
-      source  = "hashicorp/azuread"
-      version = "~> 3.0"
+      source = "hashicorp/azuread"
+      # ADR-055: floor raised to >= 3.9.0 so a future `-upgrade` cannot regress
+      # below the version that reliably reads the OIDC request inputs and re-mints
+      # the GitHub assertion per token acquisition. `~> 3.9` keeps the current
+      # resolved 3.9.0 (latest as of 2026-07-20) while allowing 3.9.x patches.
+      version = "~> 3.9"
     }
     azurerm = {
       source  = "hashicorp/azurerm"

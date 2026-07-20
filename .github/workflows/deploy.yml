@@ -74,6 +74,24 @@ on:
         type: string
         default: ""
         required: false
+      enable_conditional_access_override:
+        # ADR-055 greenfield two-pass (platform/identity ONLY). The code default for
+        # var.enable_conditional_access is true (steady-state, single-pass behaviour).
+        # There is no other mechanism to flip it per-run - poc.tfvars does not set it -
+        # so this input is the dispatch-time override. Leave blank for every normal
+        # apply (including every other root). Set "false" ONLY for identity greenfield
+        # Pass 1 (azurerm-only long apply, no azuread Graph writes at the tail). Set
+        # back to blank (or "true") for Pass 2. NEVER set "false" against an estate that
+        # already carries the Conditional Access policies - true -> false there is a
+        # destroy of all nine azuread Graph resources (PC-7G). Only wired into the
+        # identity job below; setting it for any other target has no effect (guarded).
+        description: "ADR-055 identity two-pass ONLY: '' (normal/Pass 2), 'false' (greenfield Pass 1), 'true' (explicit Pass 2). Blank for every other root."
+        type: choice
+        default: ""
+        options:
+          - ""
+          - "false"
+          - "true"
 
 permissions:
   id-token: write
@@ -108,6 +126,18 @@ jobs:
       - name: Reject force-unlock with target=all
         run: |
           echo "::error::action=force-unlock requires a single target (target != 'all'). lock_id resolves against exactly one root's state lease. Re-run with a specific target."
+          exit 1
+
+  # ADR-055. enable_conditional_access_override is only threaded into the identity
+  # job below - any other target would silently ignore it, which is more confusing
+  # than a loud rejection. Reject up front, same pattern as the two guards above.
+  guard-enable-conditional-access-target:
+    if: ${{ inputs.enable_conditional_access_override != '' && inputs.target != 'all' && inputs.target != 'platform/identity' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject enable_conditional_access_override outside identity/all
+        run: |
+          echo "::error::enable_conditional_access_override only affects platform/identity (ADR-055 two-pass). Set target=platform/identity or target=all, or leave the override blank."
           exit 1
 
   management-groups:
@@ -171,6 +201,10 @@ jobs:
       # LESSON 16: JIT-allowlist the runner IP on the firewalled state SA. Single-target
       # only (races on target=all, where sibling roots mutate the same SA firewall).
       manage_runner_ip: ${{ inputs.target != 'all' }}
+      # ADR-055 two-pass. Blank (default) = no override = code default (true, single
+      # pass, unchanged behaviour). Only this job receives it - see
+      # guard-enable-conditional-access-target above.
+      enable_conditional_access_override: ${{ inputs.enable_conditional_access_override }}
     secrets: inherit
 
   security:

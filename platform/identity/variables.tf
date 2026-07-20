@@ -1,6 +1,6 @@
 # Purpose: Input variables for the identity / Zero Trust root module.
 # Section: 5 - Zero Trust + Conditional Access
-# Last updated: 2026-07-10
+# Last updated: 2026-07-20 (ADR-055 Part 1: enable_conditional_access + reinstate import var)
 
 # ---------------------------------------------------------------------------
 # Tenant + subscription targeting
@@ -34,6 +34,26 @@ variable "environment" {
 # ---------------------------------------------------------------------------
 # Conditional Access - behaviour
 # ---------------------------------------------------------------------------
+
+variable "enable_conditional_access" {
+  description = <<-EOT
+    Umbrella gate for every azuread Microsoft Graph WRITE in this root: the
+    approved-countries named location, its replication wait (time_sleep), and all
+    Conditional Access policies (CA-001..CA-008). Default true preserves the
+    already-built POC behaviour - all Graph writes apply in the single
+    steady-state pass, so there is NO change for any non-greenfield apply.
+
+    Set false ONLY for the greenfield Pass 1 (ADR-055 Part 1 / OQ-022). That pass
+    creates the identity VNet/NSG + the AADDS managed domain as an azurerm-ONLY
+    apply and absorbs the 1-3h create-wait with NO trailing Graph write, so the
+    stale-OIDC-assertion failure (AADSTS700024, run 29055619749) cannot occur.
+    Pass 2 re-applies with the default true: the domain already exists (azurerm
+    Read in seconds) and the Graph writes land early in a short apply under a
+    fresh, just-minted token. See ADR-055 and OQ-022.
+  EOT
+  type        = bool
+  default     = true
+}
 
 variable "ca_policy_state" {
   description = <<-EOT
@@ -150,6 +170,24 @@ variable "identity_mode" {
 
 variable "identity_domain_name" {
   description = "Fully-qualified DNS domain name for Microsoft Entra Domain Services (e.g. 'aadds.globaris.onmicrosoft.com'). Required when identity_mode = 'entra-ds'. Ties to OQ-003 (POC domain name)."
+  type        = string
+  default     = ""
+}
+
+variable "aadds_import_replica_set_id" {
+  description = <<-EOT
+    ONE-TIME RECOVERY INPUT (ADR-029, reinstated for the ADR-055 greenfield
+    two-pass). GUID of the managed domain's initial replica set, used to build the
+    composite config-driven import ID for a built-but-unstated Entra Domain
+    Services resource:
+    '<domain resource ID>/initialReplicaSetId/<this GUID>'. Used only for Pass 1
+    recovery when the AADDS create-wait times out (e.g. slow DC2 / AADDS104) and
+    the domain exists in Azure but not in Terraform state. Supplied operationally
+    via TF_VAR_aadds_import_replica_set_id in CI for the recovery apply only. Leave
+    "" for a normal deploy (no domain to import): the import block is then a no-op,
+    keeping the config portable. Never commit the live GUID to tfvars. Remove the
+    import block in a cleanup commit once the recovery apply lands (LESSON 52).
+  EOT
   type        = string
   default     = ""
 }

@@ -87,6 +87,21 @@ on:
         required: false
         type: boolean
         default: false
+      enable_conditional_access_override:
+        # ADR-055 greenfield two-pass, platform/identity ONLY. var.enable_conditional_access
+        # has no entry in envs/poc.tfvars, so its live value is always the code default
+        # (true) unless this override sets TF_VAR_enable_conditional_access for the run.
+        # Blank (default) => no TF_VAR is exported => Terraform falls through to the code
+        # default (true) => normal single-pass behaviour, identical to every apply before
+        # this input existed. "false" => Pass 1 (azurerm-only long apply). "true" => an
+        # explicit Pass 2 (same effect as blank, spelled out for clarity in a dispatch).
+        # Any other value is rejected loudly by the export step below (fail closed, never
+        # silently mis-set a tenant-wide Conditional Access gate). deploy.yml only ever
+        # threads a non-blank value into the identity job call.
+        description: "'' (no override, code default true) | 'false' (Pass 1) | 'true' (Pass 2, explicit). Ignored by every root that does not declare enable_conditional_access."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write
@@ -131,6 +146,17 @@ jobs:
       TF_VAR_pim_approver_group_object_id: ${{ secrets.PIM_APPROVER_GROUP_OBJECT_ID }}
       TF_VAR_sentinel_owner_group_object_id: ${{ secrets.SENTINEL_OWNER_GROUP_OBJECT_ID }}
       TF_VAR_honeypot_user_principal_name: ${{ secrets.HONEYPOT_USER_PRINCIPAL_NAME }}
+      # ADR-029 recovery import, REINSTATED for the ADR-055 greenfield two-pass (code-review
+      # BLOCK, cross-lane wiring gap): replica-set ID of an Entra DS managed domain that exists
+      # in Azure but not in Terraform state (Pass 1 recovery only, when the AADDS create-wait
+      # times out - see DEPLOYMENT.md Step 4 / platform/identity/variables.tf). Unset Secret =>
+      # empty string => TF_VAR_aadds_import_replica_set_id="" => the import block's
+      # `for_each = var.aadds_import_replica_set_id != "" ? toset([...]) : []` is INERT (empty
+      # set, zero import operations) => a normal plan/apply is completely unaffected. Matches
+      # the variable's own default = "" (platform/identity/variables.tf), so even a fully unset
+      # env var falls through to the same inert state. Originally removed as dead wiring in
+      # commit 010d4a9 when the .tf side was also dead; both sides are live again together.
+      TF_VAR_aadds_import_replica_set_id: ${{ secrets.AADDS_IMPORT_REPLICA_SET_ID }}
       TF_VAR_cost_pattern_budget_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
       TF_VAR_cost_guardrails_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
       # Wave B2 - AKS (ADR-043/044)
@@ -160,6 +186,47 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # ADR-055 Part 2 (durable OIDC token refresh for long applies, resolves OQ-022) -
+      # explicitly export the OIDC request inputs so BOTH Terraform providers (azurerm and
+      # azuread) re-mint a fresh GitHub id-token on every access-token acquisition, instead of
+      # relying on version-gated auto-detection of ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN. This
+      # closes the exposure behind the identity root's AADSTS700024 failure (run 29055619749):
+      # azurerm re-minted correctly across a 2h11m poll, but azuread reused a stale job-start
+      # assertion on a tail Graph call ~3h later. MUST go through $GITHUB_ENV in a `run:` step -
+      # the job-level `env:` map below does NOT shell-expand runtime vars, so a literal
+      # `ARM_OIDC_REQUEST_URL: ${ACTIONS_ID_TOKEN_REQUEST_URL}`-style entry there would not
+      # resolve to the actual value. ACTIONS_ID_TOKEN_REQUEST_URL / _TOKEN are auto-present in
+      # every step's environment because `permissions: id-token: write` is already set above
+      # (line ~92) - not re-requested here. Universal safety net: this runs for every root,
+      # harmless (near-zero cost) even for short applies that never approach the token window.
+      - name: Export OIDC request inputs for provider token refresh (ADR-055 Part 2)
+        run: |
+          echo "ARM_OIDC_REQUEST_URL=$ACTIONS_ID_TOKEN_REQUEST_URL" >> "$GITHUB_ENV"
+          echo "ARM_OIDC_REQUEST_TOKEN=$ACTIONS_ID_TOKEN_REQUEST_TOKEN" >> "$GITHUB_ENV"
+
+      # ADR-055 Part 1 dispatch wiring (identity greenfield two-pass only). Only runs
+      # when the caller supplied a non-blank override (deploy.yml only ever does this
+      # for the identity job). Fails loudly on anything other than "true"/"false" so a
+      # typo can never silently mis-set a tenant-wide Conditional Access gate. Blank
+      # (the skip case, `if:` below is false) means no TF_VAR_enable_conditional_access
+      # is exported at all, so Terraform falls through to the variable's own code
+      # default (true) exactly as it did before this input existed - every root that
+      # does not declare enable_conditional_access ignores the input entirely even if
+      # a caller passed it, since an unmatched TF_VAR_* is a harmless no-op for
+      # Terraform (it only errors on an unset REQUIRED variable, never on an extra one).
+      - name: Set enable_conditional_access override (ADR-055 identity two-pass)
+        if: ${{ inputs.enable_conditional_access_override != '' }}
+        env:
+          OVERRIDE: ${{ inputs.enable_conditional_access_override }}
+        run: |
+          set -euo pipefail
+          if [ "$OVERRIDE" != "true" ] && [ "$OVERRIDE" != "false" ]; then
+            echo "::error::enable_conditional_access_override must be 'true', 'false', or blank. Got: '$OVERRIDE'"
+            exit 1
+          fi
+          echo "Setting TF_VAR_enable_conditional_access=$OVERRIDE for this run (root=${{ inputs.root }})."
+          echo "TF_VAR_enable_conditional_access=$OVERRIDE" >> "$GITHUB_ENV"
 
       # ADR-025 — open the firewalled state SA for this run by flipping default_action
       # to Allow (opt-in). Off by default; see the manage_runner_ip input docs. Captures
