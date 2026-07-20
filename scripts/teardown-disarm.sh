@@ -12,7 +12,10 @@
 # Idempotent: listing/deleting an absent scope, assignment, or role assignment is a no-op,
 # never an error - ARM delete operations are delete-if-exists (deleting an absent resource
 # returns success, not a 404), and `az policy assignment delete` follows that same ARM
-# semantics for a name that does not exist at a valid MG scope.
+# semantics for a name that does not exist at a valid MG scope. A re-dispatch after a previous
+# run already removed an MG (remove_mg_hierarchy=true) is a legitimate case too - that scope's
+# list calls then return a genuine NotFound, distinct from an auth failure (see amendment
+# below).
 #
 # NOTE for anyone testing this by hand on Windows Git Bash (MSYS): a leading "/" in --scope
 # gets auto-converted to a Windows path by MSYS's POSIX-to-Windows path translation - this is
@@ -20,6 +23,21 @@
 # Files/Git/providers/...'`). Prefix the command with MSYS_NO_PATHCONV=1 for local testing.
 # The GitHub Actions runner (ubuntu-latest, native Linux) has no such translation layer, so
 # this script needs no workaround in CI - only local repro on Windows needs it.
+#
+# AMENDED 2026-07-20 (code-review BLOCK, Finding #1, docs/teardown-redesign.md section 9.4 /
+# ADR-054 amendment point 9 - "the auth-fail-loud rule binds ALL three scripts"): this script
+# previously swallowed every list call with `2>/dev/null || true`, so a dead/expired OIDC token
+# (the same AADSTS700024 class as the 2026-07-20 incident) would read as "0 assignments -
+# already disarmed" and DISARM would print "complete" and exit 0 having cleared nothing - while
+# Phase 1/2 gate on `needs.disarm.result == 'success'`, so resource deletion would proceed with
+# DINE policy assignments still live (reopening the exact F3 resurrection loop this phase
+# exists to prevent). Every list call below now uses `az_run` (teardown-common.sh) - which
+# keeps stdout (the data channel) and stderr fully separate, so a stderr WARNING banner on an
+# otherwise-clean call can never corrupt the result either (Finding #2's same fix) - and
+# classifies a non-zero exit with `is_auth_error`: an auth/transport failure is FAIL LOUD
+# (fail=1, this scope is NOT counted as disarmed), never silently read as "already disarmed /
+# scope gone". A genuine NotFound (the legitimate re-dispatch-after-MG-removal case above) still
+# reads as "nothing here" - it is not an auth error, so it is not conflated with one.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,16 +52,36 @@ for mg in "${MG_SCOPES[@]}"; do
 
   # Capture (name, principalId) for DINE assignments with a system-assigned identity BEFORE
   # deleting the assignment - the identity's role assignment does not vanish with it.
-  mapfile -t identity_rows < <(az policy assignment list --scope "$scope" \
-    --query "[?identity!=null].[name,identity.principalId]" -o tsv 2>/dev/null || true)
+  if az_run identity_rows_out policy assignment list --scope "$scope" \
+      --query "[?identity!=null].[name,identity.principalId]" -o tsv; then
+    # shellcheck disable=SC2154  # identity_rows_out is assigned indirectly by az_run's printf -v
+    mapfile -t identity_rows <<< "$identity_rows_out"
+  elif is_auth_error "$AZ_RUN_STDERR"; then
+    echo "::error::DISARM: policy assignment (identity) list failed for scope ${mg} with an auth/transport error - cannot certify this scope disarmed off a dead token: ${AZ_RUN_STDERR}"
+    fail=1
+    continue
+  else
+    echo "  (identity-scan) scope ${mg}: no data (already disarmed, or scope no longer exists): ${AZ_RUN_STDERR}"
+    identity_rows=()
+  fi
 
   for row in "${identity_rows[@]:-}"; do
     [ -z "$row" ] && continue
     principal_id="$(printf '%s' "$row" | cut -f2)"
     [ -z "$principal_id" ] && continue
     echo "  Belt: checking role assignments for DINE identity ${principal_id} at ${mg}"
-    mapfile -t role_ids < <(az role assignment list --scope "$scope" --assignee "$principal_id" \
-      --query "[].id" -o tsv 2>/dev/null || true)
+    if az_run role_ids_out role assignment list --scope "$scope" --assignee "$principal_id" \
+        --query "[].id" -o tsv; then
+      # shellcheck disable=SC2154  # role_ids_out is assigned indirectly by az_run's printf -v
+      mapfile -t role_ids <<< "$role_ids_out"
+    elif is_auth_error "$AZ_RUN_STDERR"; then
+      echo "::error::DISARM: role assignment list failed for identity ${principal_id} at scope ${mg} with an auth/transport error: ${AZ_RUN_STDERR}"
+      fail=1
+      continue
+    else
+      echo "  ::warning::role assignment list for ${principal_id} at ${mg}: no data (continuing): ${AZ_RUN_STDERR}"
+      role_ids=()
+    fi
     for rid in "${role_ids[@]:-}"; do
       [ -z "$rid" ] && continue
       echo "    Removing role assignment: ${rid}"
@@ -53,11 +91,24 @@ for mg in "${MG_SCOPES[@]}"; do
   done
 
   # Delete every policy assignment at this scope (base ALZ + AMBA). Idempotent.
-  mapfile -t assignment_names < <(az policy assignment list --scope "$scope" \
-    --query "[].name" -o tsv 2>/dev/null || true)
+  if az_run assignment_names_out policy assignment list --scope "$scope" \
+      --query "[].name" -o tsv; then
+    # shellcheck disable=SC2154  # assignment_names_out is assigned indirectly by az_run's printf -v
+    mapfile -t assignment_names <<< "$assignment_names_out"
+  elif is_auth_error "$AZ_RUN_STDERR"; then
+    # This is the exact Finding #1 bug: a dead token here must NEVER be read as "0 assignments -
+    # already disarmed" - fail loud instead, so Phase 1/2 (gated on disarm success) do not
+    # proceed while assignments may still be live.
+    echo "::error::DISARM: policy assignment list failed for scope ${mg} with an auth/transport error - cannot certify this scope disarmed off a dead token: ${AZ_RUN_STDERR}"
+    fail=1
+    continue
+  else
+    echo "  No policy assignments at scope ${mg} (already disarmed, or scope no longer exists): ${AZ_RUN_STDERR}"
+    continue
+  fi
 
   if [ "${#assignment_names[@]}" -eq 0 ] || [ -z "${assignment_names[0]:-}" ]; then
-    echo "  No policy assignments at scope ${mg} (already disarmed, or scope no longer exists)."
+    echo "  No policy assignments at scope ${mg} (already disarmed)."
     continue
   fi
 
@@ -72,7 +123,7 @@ for mg in "${MG_SCOPES[@]}"; do
 done
 
 if [ "$fail" -ne 0 ]; then
-  echo "::error::DISARM finished with one or more real (non-idempotent) delete failures - Phase 1 destroy will NOT proceed (phase-1 root jobs require disarm success). Phase 2/3 still run and will report the remaining assignments as remnants."
+  echo "::error::DISARM finished with one or more real (non-idempotent) delete failures, or an auth/transport error that means a scope could not be certified disarmed - Phase 1 destroy will NOT proceed (phase-1 root jobs require disarm success). Phase 2/3 still run and will report the remaining assignments as remnants."
   exit 1
 fi
 

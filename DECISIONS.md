@@ -37,7 +37,7 @@
 
 <!-- Newest at the top. -->
 
-### ADR-054: Reliable end-to-end teardown - disarm-policy-first, no-empty-root-cascade, two-mode (terraform primary + az sweep fallback), full MG-hierarchy teardown for clean redeploy, loud verification
+### ADR-054: Reliable end-to-end teardown - disarm-policy-first, no-empty-root-cascade, two-mode (terraform primary + az sweep fallback), full MG-hierarchy teardown for clean redeploy, loud verification [amended 2026-07-20: OIDC token durability + async/verify reconciliation + auth-fail-loud]
 
 - **Date:** 2026-07-19
 - **Section:** Section 10 (pipeline) / teardown; supersedes the teardown ordering/gating of the
@@ -115,6 +115,72 @@ half-destroy - no az fallback existed.
   `synthetic` is restored as a hardened Phase-1 job (point 2 above) and `remove_mg_hierarchy`
   defaults to `false` (point 5 above). The `guard` az-sweep/target=all rejection (point 3) was
   also added at this correction pass.
+
+**Amendment (2026-07-20) - OIDC token durability, async-delete / verify reconciliation, and the
+auth-error-must-fail-loud rule (teardown run 29712487341, mode=az-sweep, remove_mg_hierarchy=true
+on `banking`).**
+
+Context of the amendment: the redesigned workflow ran. Phase 0 DISARM succeeded (VERIFY 1 later
+confirmed 0 policy assignments at every MG scope); Phase 1 was correctly skipped (az-sweep, state
+gone); Phase 3 VERIFY correctly failed loud on remnants. But Phase 2 AZ SWEEP exited 0 having
+deleted NOTHING. Root cause: the `azure/login` GitHub OIDC federated client-assertion is valid only
+for GitHub's ~5-minute window (here 02:34:44 -> 02:39:44). Phase 2 step 1 ran `az databricks
+workspace delete` SYNCHRONOUSLY (no `--no-wait`) plus a 600s in-session `wait_for_rg_gone` poll,
+which drove the single job to ~55 minutes. When the initial Azure access token expired mid-job, the
+az CLI tried to refresh it using the long-dead 5-minute federated assertion and every call died with
+`AADSTS700024: Client assertion is not within its valid time range`. Three swallow-the-error bugs
+then turned that auth death into a silent success: the Databricks workspace delete never submitted;
+`az account management-group show ... 2>/dev/null` returning non-zero on a dead token was
+mis-read as "MG already gone - skipping" for all 12 MGs; and the `|| true`-guarded RG/KV list calls
+returned empty on the dead token, so nothing was swept. Remnants left standing: rg-amba-monitoring-001,
+the bank-data workload + Databricks managed RGs, one Databricks workspace, and the full 12-MG tree.
+
+This class is the deferred OQ-022 (OIDC assertion lifetime vs long-running operations). The
+amendment does NOT change the four-phase shape or any prior decision above; it adds three locked
+rulings and a DevSecOps fix-spec (full detail: docs/teardown-redesign.md sections 9 and 10):
+
+7. **Token durability = short submission pass + a re-login primitive, never az's own refresh.**
+   (a) Phase 2 fires EVERY delete with `--no-wait` (Databricks workspace, RGs, KV) - a
+   submission-only pass that completes well inside one fresh access token; no operation ever
+   long-polls in-session on the token that submitted it. (b) A shared `az_relogin` helper mints a
+   BRAND-NEW GitHub OIDC assertion on demand (request a fresh id-token from
+   `$ACTIONS_ID_TOKEN_REQUEST_URL` with `$ACTIONS_ID_TOKEN_REQUEST_TOKEN`, audience
+   `api://AzureADTokenExchange`, then `az login --service-principal --federated-token`) - GitHub
+   serves fresh assertions for the whole job, so this bypasses az's broken refresh (which reuses the
+   one-time 5-minute assertion). (c) Any bounded wait loop calls `az_relogin` at the START of every
+   iteration, so a poll can never outlive its token. Rejected: relying on `azure/login` at job start
+   alone (does not survive a >token-lifetime single step); relying on az token refresh (structurally
+   impossible with a consumed one-time federated assertion).
+8. **Async-delete / immediate-verify reconciliation: the WAIT lives in Phase 2, VERIFY stays an
+   instant truth-gate.** After the `--no-wait` submission pass, Phase 2 runs ONE bounded
+   reconciliation loop (re-login each iteration, point 7c) that waits for exactly the RGs it
+   submitted plus the Databricks managed RGs to report gone, up to a bounded ceiling (30 min, far
+   under the 360-min job ceiling). Phase 3 VERIFY then asserts remnants=0 IMMEDIATELY with no wait,
+   and fails loud. Idempotent operator RE-DISPATCH is the documented safety net ONLY for the
+   pathological over-ceiling straggler; the workflow does NOT auto-retry (avoids masking a genuinely
+   stuck delete). Rejected: putting the wait inside VERIFY (muddies the auditor's "truth at this
+   instant" contract and could wait out a stuck delete); auto-retry loops in the workflow (can mask
+   a stuck resource and complicate the graph). Note: MG re-parent + bottom-up delete are fast
+   control-plane ops and stay in the submission pass (no reconcile wait needed for MGs).
+9. **AUTH-ERROR-MUST-FAIL-LOUD: no teardown step may ever treat an auth/token/transport failure as
+   "resource absent / already gone".** Every existence check and list call must DISTINGUISH a real
+   NotFound (idempotent no-op) from an auth or transport error (fail loud, non-zero, `::error::` -
+   never fall into a "skip / already gone / empty = nothing to do" branch). Mechanism: capture
+   stderr (do not blanket-swallow with `2>/dev/null`); a shared `is_auth_error` classifier matches
+   `AADSTS`, "valid time range", "not within", "AuthenticationFailed", "ExpiredAuthenticationToken",
+   token / credential / 401 / 403 patterns; a failed (non-zero) list is explicitly distinct from a
+   successful empty list. Applies to ALL of teardown-disarm.sh, teardown-az-sweep.sh, and
+   teardown-verify.sh - VERIFY especially, since a dead token there would otherwise falsely report
+   "clean". This directly kills the three silent-exit-0 bugs above.
+
+Amendment consequences: Phase 2 becomes submission + one relogin-bounded reconcile wait (no
+synchronous long deletes); an auth/token failure ANYWHERE now fails the run loudly instead of
+masquerading as a clean teardown; VERIFY remains the instant, unwaited truth-gate. Follow-up:
+DevSecOps implements docs/teardown-redesign.md section 10 across the three scripts + teardown.yml
+(export `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` plus the auto-present
+`ACTIONS_ID_TOKEN_REQUEST_*` to the sweep step so `az_relogin` works); re-run mode=az-sweep,
+remove_mg_hierarchy=true to finish run 29712487341's remnants before the Wednesday redeploy (the
+live 12-MG tree collides with a fresh empty-state avm-ptn-alz apply).
 
 ### ADR-053: Wave B9 security/compliance rulings + the B9-vs-B-R split principle - B9 does additive/Audit-first/net-new (CMK, PCI/SOC visibility, platform-MG Audit, OpenAI-guardrails Audit); B-R does enforcement (Deny-promotion) + live-network flips; most founding-B9 scope is already built
 

@@ -5,6 +5,12 @@
 > failed E2E and forced manual work. Wednesday needs a working teardown.
 > **Owner:** Cloud Solutions Architect. Decision: ADR-054. Implementer: DevSecOps.
 > **No Terraform/workflow written here - this is the contract.**
+>
+> **AMENDED 2026-07-20** (teardown run 29712487341): the four-phase shape below is unchanged and
+> correct, but Phase 2 failed silently on an OIDC token-lifetime edge - see **section 9** (locked
+> rulings on token durability, async-delete / verify reconciliation, and auth-fail-loud) and
+> **section 10** (the exact DevSecOps fix-spec per script). Read sections 9 and 10 as overriding
+> the Phase 2 mechanics wherever they differ from section 3.
 
 ---
 
@@ -207,3 +213,204 @@ Phase 3 verifies zero remnants. No manual deletion.
 - Phase 3 verification is green (loud failure on any remnant).
 - Wednesday's fresh redeploy meets a clean slate (no MG-hierarchy collision, KV recover path
   documented).
+
+---
+
+## 9. AMENDMENT 2026-07-20 - Phase 2 silent no-op on OIDC token expiry (run 29712487341)
+
+### 9.1 What failed (facts)
+
+Dispatch: mode=az-sweep, remove_mg_hierarchy=true, on `banking`. Phase 0 DISARM succeeded (VERIFY 1
+later confirmed 0 policy assignments at every MG scope). Phase 1 was correctly skipped (az-sweep,
+state gone). Phase 3 VERIFY correctly FAILED LOUD on the remnants. But **Phase 2 AZ SWEEP exited 0
+having deleted nothing.**
+
+Root cause = OIDC client-assertion expiry mid-job (the deferred OQ-022 class):
+
+- `azure/login`'s GitHub OIDC federated assertion is valid only for GitHub's ~5-minute window
+  (this run: 02:34:44 -> 02:39:44). It is a one-time, short-lived credential.
+- Phase 2 step 1 ran `az databricks workspace delete` SYNCHRONOUSLY (no `--no-wait`) plus a 600s
+  in-session `wait_for_rg_gone` poll. That drove the single job to ~55 minutes.
+- When the initial Azure access token expired (~55 min in), az tried to REFRESH it using the
+  long-dead 5-minute assertion, so from ~03:29 every az call died with
+  `AADSTS700024: Client assertion is not within its valid time range`.
+- The workspace delete never even submitted. Nothing downstream ran.
+
+Three swallow-the-error bugs converted that auth death into a silent exit 0:
+
+1. The Databricks workspace delete was synchronous (the ~55-min blocker that outlived the token).
+2. `az account management-group show ... 2>/dev/null` returning non-zero on a dead token was
+   mis-read as "MG already gone - skipping" for all 12 MGs (a dead-token error is indistinguishable
+   from NotFound at that call site).
+3. The `|| true`-guarded `az group list` / `az keyvault list` calls, run after the token died,
+   returned empty -> the RG and KV sweeps found "nothing" and swept nothing.
+
+Remnants left standing (Phase 3 output): rg-amba-monitoring-001; the bank-data workload RG + its
+Databricks managed RG; one Databricks workspace; the full 12-MG hierarchy intact.
+
+### 9.2 LOCKED DECISION 1 - token durability
+
+The fix is a short submission pass PLUS an on-demand re-login primitive; never rely on az's own
+token refresh (structurally impossible once the one-time 5-minute assertion is consumed).
+
+- **(a) `--no-wait` submission pass.** Phase 2 fires EVERY delete asynchronously (Databricks
+  workspace, RGs, KV) - a submission-only pass that completes well inside one fresh access token. No
+  operation long-polls in-session on the token that submitted it. This alone removes the ~55-min
+  single-step blocker.
+- **(b) `az_relogin` primitive.** A shared shell helper mints a BRAND-NEW GitHub OIDC assertion on
+  demand: request a fresh id-token from `$ACTIONS_ID_TOKEN_REQUEST_URL` (bearer
+  `$ACTIONS_ID_TOKEN_REQUEST_TOKEN`, audience `api://AzureADTokenExchange`), extract `.value`, then
+  `az login --service-principal --username $AZURE_CLIENT_ID --tenant $AZURE_TENANT_ID
+  --federated-token <token>`. GitHub serves fresh assertions for the entire job, so this bypasses
+  az's broken refresh. If a re-login itself fails, that is a FAIL-LOUD condition (never continue).
+- **(c) relogin-then-poll loop.** Any bounded wait calls `az_relogin` at the START of each
+  iteration, so a poll can never outlive its token.
+
+Rejected: `azure/login` at job start alone (does not survive a single step longer than the token
+lifetime); leaning on az token refresh (the assertion is a consumed one-time credential).
+
+### 9.3 LOCKED DECISION 2 - async-delete vs immediate-verify reconciliation
+
+**The wait lives in Phase 2; VERIFY stays an instant, unwaited truth-gate.**
+
+- After the `--no-wait` submission pass, Phase 2 runs ONE bounded reconciliation loop
+  (`az_relogin` each iteration, per 9.2c) that waits for EXACTLY the RGs it submitted for deletion
+  plus the Databricks managed RGs to report gone, up to a bounded ceiling of **30 minutes** (far
+  under the 360-min job ceiling). MG re-parent + bottom-up MG delete are fast control-plane ops and
+  stay in the submission pass - no reconcile wait is needed for MGs.
+- Phase 3 VERIFY then asserts remnants=0 IMMEDIATELY, no wait, and fails loud on anything found.
+- The idempotent contract still holds as a SAFETY NET for the pathological over-ceiling straggler:
+  an operator RE-DISPATCHES the same workflow (safe, idempotent) and it catches the remainder. The
+  workflow does NOT auto-retry - auto-retry could wait out / mask a genuinely stuck delete.
+
+Rejected: putting the wait inside VERIFY (muddies the auditor's "truth at this instant" contract and
+could silently wait out a stuck delete); an in-workflow auto-retry loop (masks stuck resources,
+complicates the graph). Decisive rule: patience belongs to the ACTOR (Phase 2), instant judgment to
+the AUDITOR (Phase 3).
+
+### 9.4 LOCKED DECISION 3 - auth-error-must-fail-loud
+
+**No teardown step may ever treat an auth / token / transport failure as "resource absent / already
+gone / nothing to do".** Every existence check and list call must DISTINGUISH:
+
+- a genuine NotFound (resource absent) -> idempotent no-op, success; from
+- an auth or transport error -> FAIL LOUD (non-zero, `::error::`), NEVER a skip / already-gone /
+  empty-so-nothing-to-do branch.
+
+Mechanism (locked): stop blanket-swallowing with `2>/dev/null`. Capture stderr, and classify it with
+a shared `is_auth_error` helper matching (case-insensitive) `AADSTS`, `valid time range`,
+`not within`, `AuthenticationFailed`, `ExpiredAuthenticationToken`, `token`, `credential`, `401`,
+`403`, and `az login` prompts. A failed (non-zero) list call is explicitly distinct from a
+successful list that returned zero rows: only the latter is "nothing to sweep." This rule binds ALL
+three scripts, VERIFY included - a dead token inside VERIFY would otherwise falsely certify "clean,"
+which is the worst possible failure for the truth-gate.
+
+---
+
+## 10. FIX-SPEC FOR DEVSECOPS (exact required behavior - no code here)
+
+Implement per the locked decisions in section 9. Behavioral contract only; DevSecOps writes the
+shell / YAML.
+
+### 10.1 `scripts/teardown-common.sh` (shared primitives - new)
+
+- **Add `az_relogin`:** mint a fresh GitHub OIDC id-token from `$ACTIONS_ID_TOKEN_REQUEST_URL`
+  (bearer `$ACTIONS_ID_TOKEN_REQUEST_TOKEN`, audience `api://AzureADTokenExchange`), then
+  `az login --service-principal --username "$AZURE_CLIENT_ID" --tenant "$AZURE_TENANT_ID"
+  --federated-token <value>` (add `--subscription "$AZURE_SUBSCRIPTION_ID"` context as needed). On
+  any failure (no id-token returned, `az login` non-zero) it must `::error::` and return non-zero -
+  callers treat a failed re-login as FAIL LOUD, never continue.
+- **Add `is_auth_error "<text>"`:** return 0 (true) when the text matches, case-insensitive, any of
+  `AADSTS` / `valid time range` / `not within` / `AuthenticationFailed` /
+  `ExpiredAuthenticationToken` / `token` / `credential` / `401` / `403` / `az login`. Used to
+  classify captured stderr everywhere the old code swallowed it.
+- **Add a `wait_for_rgs_gone` reconcile helper** (or refactor the existing `wait_for_rg_gone`):
+  accepts the list of (sub, rg) pairs to wait on; on each iteration FIRST calls `az_relogin`, THEN
+  checks each RG with `az group exists`; loops until all are gone or the 30-min ceiling; on ceiling
+  it returns non-zero (Phase 3 will then fail loud on the remnant) - never a silent success.
+
+### 10.2 `scripts/teardown-disarm.sh` (Phase 0)
+
+DISARM is short and ran fine on run 29712487341, but it is subject to the SAME swallow bug and MUST
+be hardened - the auth-fail-loud rule (section 9.4) binds all three scripts. Its policy-assignment
+list is exactly the "empty read mis-interpreted as done" pattern that sank Phase 2.
+
+- **Policy-assignment list calls:** replace the `az policy assignment list --scope ... 2>/dev/null
+  || true` pattern (used both for the DINE identity rows and for `assignment_names`) with a
+  separate-stderr capture. A non-zero list call that `is_auth_error` (or any non-zero) is FAIL LOUD
+  (`::error::`, exit 1) - it must NEVER fall through to the "No policy assignments at scope ...
+  (already disarmed, or scope no longer exists)" branch. A dead token read as "already disarmed"
+  would leave the MG-scope DINE assignments live and re-open the F3 resurrection loop that this
+  whole redesign exists to close, while the run reports green.
+- **Role-assignment list / delete (`az role assignment list` / `delete`):** same treatment -
+  distinguish a genuine absent/NotFound (idempotent no-op) from an auth-classified failure (fail
+  loud). Only a successful zero-row list means "no role assignment to remove."
+- The existing `fail=1`-on-real-delete-failure logic stays; this adds the missing coverage on the
+  LIST side (a failed list currently produces an empty array read as "already disarmed").
+- DISARM stays a short job with a single job-start `azure/login`; no `az_relogin` loop is needed
+  here (it does not long-poll), but it MUST import `is_auth_error` from teardown-common.sh (10.1).
+
+### 10.3 `scripts/teardown-az-sweep.sh` (Phase 2)
+
+- **Step 1 Databricks:** change `az databricks workspace delete` to `--no-wait`. Do NOT
+  `wait_for_rg_gone` in-line here. Capture each workspace's managed-RG name into a list for the
+  reconcile step. Capture stderr on the `az databricks workspace list` call and on the delete: an
+  auth-classified error is FAIL LOUD, not "already gone."
+- **Step 2 RG sweep:** already `--no-wait` for the delete - keep that, but (i) EXCLUDE the
+  managed-RG names captured in step 1 from direct deletion (they cascade from the workspace delete;
+  a direct `az group delete` on them is doomed by the RP deny-assignment and is pure noise), and
+  (ii) replace the `az group list ... 2>/dev/null || true` pattern: capture exit code + stderr; a
+  non-zero list call that `is_auth_error` (or any non-zero list) is FAIL LOUD, NOT an empty list.
+  Only a successful zero-row list means "nothing to sweep in this sub."
+- **Step 3 Key Vault:** same list-call hardening as step 2 (a failed `az keyvault list` /
+  `list-deleted` must not be read as "no vaults"). KV delete can stay as is (fast); keep the
+  purge-protected reporting.
+- **Step 4 MG hierarchy:** replace the `az account management-group show ... 2>/dev/null` -> "already
+  gone - skipping" logic. Capture stderr: only a genuine NotFound means "skip (already gone)"; an
+  auth-classified error is FAIL LOUD. Same for `subscription remove` and `management-group delete` -
+  a non-idempotent (auth / real) failure must fail loud, not warn-and-continue. MG ops stay
+  synchronous (fast); no `--no-wait`, no reconcile wait for MGs.
+- **New final step - reconciliation:** after all submissions, call `wait_for_rgs_gone` (10.1) over
+  the union of the swept workload/platform RGs and the Databricks managed RGs, re-logging in each
+  iteration. Only after this does the script exit. The script's own exit remains advisory (Phase 3
+  is authoritative), EXCEPT that any auth-classified failure at any step is a hard non-zero exit.
+- **Remove the assumption that a synchronous long delete is acceptable:** no step in this script may
+  block in-session for longer than a token lifetime without an intervening `az_relogin`.
+
+### 10.4 `scripts/teardown-verify.sh` (Phase 3)
+
+- VERIFY stays an IMMEDIATE assertion (no waiting - the wait now lives in Phase 2).
+- Harden EVERY az call against the swallow bug: the current `2>/dev/null || echo "0"` and
+  `2>/dev/null || true` patterns must distinguish a failed call from an empty result. If any
+  `az policy assignment list` / `az group list` / `az databricks workspace list` /
+  `az account management-group show` / `az keyvault list-deleted` call returns non-zero and
+  `is_auth_error` (or any non-zero for the count/list calls), VERIFY must FAIL LOUD - it must NEVER
+  interpret a dead token as "0 assignments / clean / gone." A false "clean" from the truth-gate is
+  the worst outcome.
+- Keep the existing sub-count guard (VERIFY 0). Optionally add a one-shot `az_relogin` at job start
+  is unnecessary (the workflow `azure/login` step already provides a fresh token and VERIFY is fast)
+  - but the auth-fail-loud hardening above is mandatory.
+
+### 10.5 `.github/workflows/teardown.yml`
+
+- **az-sweep step env:** in addition to the existing `*_SUBSCRIPTION_ID` secrets and
+  `REMOVE_MG_HIERARCHY`, export `AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}`,
+  `AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}`, and `AZURE_SUBSCRIPTION_ID:
+  ${{ vars.AZURE_SUBSCRIPTION_ID }}` so `az_relogin` can re-authenticate from inside the script.
+  `ACTIONS_ID_TOKEN_REQUEST_URL` / `ACTIONS_ID_TOKEN_REQUEST_TOKEN` are auto-present because the
+  workflow already sets `permissions: id-token: write` - do NOT hardcode them.
+- The per-phase `azure/login` steps stay (fresh token at each job start). No change to the guard,
+  the phase graph, `!cancelled()` gating, mode/target logic, or `remove_mg_hierarchy` default
+  (false) - the four-phase shape is correct and unchanged.
+- No `--no-wait` or reconcile logic belongs in YAML; it is all inside teardown-az-sweep.sh /
+  teardown-common.sh.
+
+### 10.6 Acceptance for the amendment
+
+- A single mode=az-sweep dispatch completes Phase 2 in a submission pass + one bounded reconcile
+  wait, never a >55-min single step, and re-authenticates across the wait (no AADSTS700024).
+- No step anywhere reports "already gone / clean / nothing to do" off the back of an auth or
+  transport error - such an error fails the run loudly.
+- Phase 3 VERIFY is green (immediate, unwaited) after a genuinely complete teardown; loud on any
+  real remnant; and can itself never certify "clean" on a dead token.
+- Re-dispatch (idempotent) finishes any over-ceiling straggler; no manual deletion.
