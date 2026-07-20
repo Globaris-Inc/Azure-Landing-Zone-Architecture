@@ -31,6 +31,41 @@
 
 <!-- Newest at the top. -->
 
+### OQ-048: Teardown SP cannot verify MG deletion via a per-scope read - list-snapshot oracle (canonical) vs a minimal tenant-root Management Group Reader grant
+
+- **Raised:** 2026-07-20 (teardown consolidation pass, architect; structural root of ADR-054 defect 3)
+- **Section:** 10 (Pipeline & Tooling) / teardown; relates to OQ-008 + ADR-021 (SP scope-down)
+- **Blocking:** No - the list-snapshot oracle is implemented and proven green E2E (attempt 5, run
+  29765892057). This item RECORDS the design decision so the oracle is understood as deliberate, not
+  accidental.
+- **Priority:** Low
+
+**Question:**
+The teardown identity (the scoped OIDC SP) can DELETE the globaris MG tree but cannot then VERIFY the
+deletion with a per-scope read: its MG-read grants were scoped to the globaris subtree and are deleted
+WITH it, so `az account management-group show <deleted-mg>` (and a per-scope policy read) returns
+HTTP-403 `AuthorizationFailed` for this principal, not a clean 404. Should the canonical design stay
+the `az account management-group list` snapshot oracle, or should the SP get a minimal tenant-root
+read role so deleted-MG reads return a clean 404?
+
+**Options being considered:**
+- A (RECOMMENDED, CHOSEN): keep the ONE-TIME `az account management-group list` snapshot oracle
+  (`mg_snapshot_load` / `mg_in_snapshot`, teardown-common.sh); existence is name-membership in the
+  snapshot, auth-fail-loud on the list call. Zero RBAC change, already proven green E2E, no bootstrap
+  re-apply. Relies only on the SP's SURVIVING Management Group Contributor at the tenant root (carries
+  `managementGroups/read`, never deleted), so the one list call is always available.
+- B (REJECTED): grant the SP a minimal Management Group Reader (or equivalent read) at the tenant root
+  so a deleted-MG `show` returns a clean 404 and per-scope existence probes "just work". Simpler call
+  sites, but it WIDENS the SP's standing grant, needs a bootstrap re-apply (bootstrap/identity.tf), and
+  cuts against OQ-008 / ADR-021, which are trying to REDUCE this SP's footprint.
+
+**RESOLVED 2026-07-20 (architect, ADR-054 consolidated point 11): Option A - the list-snapshot oracle
+is the canonical design.** It needs no RBAC change and no bootstrap change, is proven, and moves in the
+SAME direction as OQ-008 (less standing privilege), whereas B adds a standing grant purely to fix a
+diagnostic read. The per-MG `show` oracle is retired (it was principal-dependent and caused defect 3).
+The design depends only on the SP's surviving tenant-root MG Contributor grant, which OQ-008 keeps, so
+the two are compatible.
+
 ### OQ-047: B9 CMK scope - which data stores get customer-managed keys, and is the cost/risk worth it?
 
 - **Raised:** 2026-07-19 (B9 design engagement, architect - ADR-053, docs/b9-security-design.md
@@ -931,6 +966,21 @@ policies and re-hit AADSTS700024. What is the durable fix?
 **Recommendation:** For now, ADR-029 import (no code change here) plus **C** as the interim posture; adopt
 **A** if/when a validated greenfield rebuild becomes a requirement. Do NOT build A speculatively during the
 recovery - the priority is getting the identity layer green. Keep `platform/identity` CI-only either way.
+
+**UPDATE 2026-07-20 (architect, teardown consolidation) - a proven `az_relogin` primitive now exists;
+generalizing it to long DEPLOY steps is a tracked item, not in scope here.** ADR-054's teardown fix
+built `az_relogin` (teardown-common.sh): it mints a BRAND-NEW GitHub OIDC federated assertion on demand
+(fresh id-token from `$ACTIONS_ID_TOKEN_REQUEST_URL`, audience `api://AzureADTokenExchange`, then
+`az login --service-principal --federated-token`) and re-authenticates mid-job, bypassing az's broken
+one-time-assertion refresh. This is exactly OQ-022's Option B mechanism, and it is PROVEN green across a
+30-min reconcile wait in teardown. It currently solves the token-expiry class for TEARDOWN ONLY (it is
+an az-CLI shell helper; the identity root's long AADDS create is a Terraform azurerm/azuread apply, a
+different execution context). Tracked follow-up (do NOT build speculatively): evaluate whether the same
+fresh-assertion-on-demand pattern can wrap or precede the long deploy steps (the identity root's 1-3h
+AADDS create + trailing Graph ops), e.g. a CI re-auth step immediately before the azuread phase, which
+would make OQ-022 Option B concrete for deploy. This does not change the teardown design and is not in
+scope for the teardown consolidation; it is recorded so the proven primitive is not forgotten when a
+validated greenfield rebuild becomes a requirement.
 
 ### OQ-021: ALZ diagnostic-settings DINE (`Deploy-Diag-LogsCat`) fails - its central Log Analytics workspace parameter is unwired (resolves to the zero-GUID subscription)
 

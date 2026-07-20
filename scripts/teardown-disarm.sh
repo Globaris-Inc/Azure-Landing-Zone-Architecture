@@ -112,8 +112,14 @@ for mg in "${MG_SCOPES[@]}"; do
     fail=1
     continue
   else
-    echo "  (identity-scan) scope ${mg}: no data (already disarmed, or scope no longer exists): ${AZ_RUN_STDERR}"
-    identity_rows=()
+    # 2026-07-20 auth-fail-loud sweep (docs/teardown-redesign.md section 10.1, class A): this
+    # scope is CONFIRMED LIVE (mg_in_snapshot already gated it), so "scope no longer exists" is
+    # impossible here - a non-auth, non-zero list at a live scope is a real error, never "no
+    # data / already disarmed". Fail loud instead of silently proceeding with an empty identity
+    # scan (which would skip the belt-and-suspenders role-assignment cleanup below it).
+    echo "::error::DISARM: policy assignment (identity) list failed for scope ${mg} with a non-auth error at a confirmed-live scope - cannot treat this as empty: ${AZ_RUN_STDERR}"
+    fail=1
+    continue
   fi
 
   for row in "${identity_rows[@]:-}"; do
@@ -121,8 +127,13 @@ for mg in "${MG_SCOPES[@]}"; do
     principal_id="$(printf '%s' "$row" | cut -f2)"
     [ -z "$principal_id" ] && continue
     echo "  Belt: checking role assignments for DINE identity ${principal_id} at ${mg}"
-    if az_run role_ids_out role assignment list --scope "$scope" --assignee "$principal_id" \
-        --query "[].id" -o tsv; then
+    # 2026-07-20 auth-fail-loud sweep (docs/teardown-redesign.md section 10.1, class A): uses
+    # --assignee-object-id + --fill-principal-name false (both verified real `az role assignment
+    # list` flags, CLI ref ms.date 2026-06-26) instead of --assignee, so a deleted-DINE-identity
+    # Microsoft Graph resolution error cannot masquerade as this class and trip the new fail-loud
+    # below - both flags bypass the Graph query entirely.
+    if az_run role_ids_out role assignment list --scope "$scope" --assignee-object-id "$principal_id" \
+        --fill-principal-name false --query "[].id" -o tsv; then
       # shellcheck disable=SC2154  # role_ids_out is assigned indirectly by az_run's printf -v
       mapfile -t role_ids <<< "$role_ids_out"
     elif is_auth_error "$AZ_RUN_STDERR"; then
@@ -130,14 +141,29 @@ for mg in "${MG_SCOPES[@]}"; do
       fail=1
       continue
     else
-      echo "  ::warning::role assignment list for ${principal_id} at ${mg}: no data (continuing): ${AZ_RUN_STDERR}"
-      role_ids=()
+      # This scope is CONFIRMED LIVE (mg_in_snapshot already gated it) - a non-auth, non-zero
+      # list here is a real error, never "no data to remove". Fail loud instead of silently
+      # skipping the belt-and-suspenders role-assignment cleanup for this identity.
+      echo "::error::DISARM: role assignment list failed for identity ${principal_id} at scope ${mg} with a non-auth error at a confirmed-live scope - cannot treat this as empty: ${AZ_RUN_STDERR}"
+      fail=1
+      continue
     fi
     for rid in "${role_ids[@]:-}"; do
       [ -z "$rid" ] && continue
       echo "    Removing role assignment: ${rid}"
-      az role assignment delete --ids "$rid" --output none 2>&1 || \
-        echo "  ::warning::could not remove role assignment ${rid} (continuing - idempotent retry on next run)"
+      # 2026-07-20 auth-fail-loud sweep (docs/teardown-redesign.md section 10.2, class B,
+      # coherence only - the Databricks workspace delete already classifies auth this way).
+      # An auth death here also hits the policy-assignment delete later in this loop, which
+      # already sets fail=1, so DISARM still fails loud overall either way - this closes the
+      # coherence gap, not a correctness defect.
+      if ! role_del_out="$(az role assignment delete --ids "$rid" --output none 2>&1)"; then
+        if is_auth_error "$role_del_out"; then
+          echo "::error::DISARM: role assignment delete for ${rid} at ${mg} failed with an auth/transport error: ${role_del_out}"
+          fail=1
+        else
+          echo "  ::warning::could not remove role assignment ${rid} (continuing - idempotent retry on next run): ${role_del_out}"
+        fi
+      fi
     done
   done
 
@@ -154,7 +180,13 @@ for mg in "${MG_SCOPES[@]}"; do
     fail=1
     continue
   else
-    echo "  No policy assignments at scope ${mg} (already disarmed, or scope no longer exists): ${AZ_RUN_STDERR}"
+    # 2026-07-20 auth-fail-loud sweep (docs/teardown-redesign.md section 10.1, class A) - the
+    # HIGHEST-SEVERITY of the three sites: this scope is CONFIRMED LIVE (mg_in_snapshot already
+    # gated it), so "scope no longer exists" is impossible here. Silently `continue`-ing past a
+    # non-auth list failure would certify this scope disarmed off a real error, re-opening the
+    # F3 DINE-resurrection window this whole phase exists to close, while the run stays green.
+    echo "::error::DISARM: policy assignment list failed for scope ${mg} with a non-auth error at a confirmed-live scope - cannot certify this scope disarmed: ${AZ_RUN_STDERR}"
+    fail=1
     continue
   fi
 

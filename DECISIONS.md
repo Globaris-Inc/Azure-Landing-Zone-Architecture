@@ -37,7 +37,7 @@
 
 <!-- Newest at the top. -->
 
-### ADR-054: Reliable end-to-end teardown - disarm-policy-first, no-empty-root-cascade, two-mode (terraform primary + az sweep fallback), full MG-hierarchy teardown for clean redeploy, loud verification [amended 2026-07-20: OIDC token durability + async/verify reconciliation + auth-fail-loud; amended again 2026-07-20: MG-existence gate for the deleted-MG policy-list false-positive in DISARM + VERIFY 1; amended a third time 2026-07-20: point-11 `show` oracle was principal-dependent and WRONG for the scoped SP - superseded by point 12, the `az account management-group list` snapshot oracle]
+### ADR-054: Reliable end-to-end teardown - disarm-policy-first, no-empty-root-cascade, two-mode (terraform primary + az sweep fallback), OIDC token durability, Databricks force-deletion, auth-fail-loud, MG list-snapshot oracle, full MG-hierarchy teardown, loud verification [GREEN and proven E2E, attempt 5 run 29765892057; consolidated 2026-07-20 - the reactive-patch amendment chain is folded into the coherent mechanism below, with a compact changelog; the interim per-MG `show` oracle is superseded by the `az account management-group list` snapshot oracle]
 
 - **Date:** 2026-07-19
 - **Section:** Section 10 (pipeline) / teardown; supersedes the teardown ordering/gating of the
@@ -54,8 +54,8 @@ real root - the workflow destroyed nothing (`synthetic` IS a real root - `synthe
 real resources gated behind `var.enable_synthetic_workload`, currently false - the cascade was
 about the destroy failing against empty state, not about the root not existing); (F2)
 terraform-destroy alone cannot finish the Databricks managed RG (RP deny-assignment - must delete
-the workspace, and per the amendment below that delete now requires `--force-deletion` to cascade
-the managed RG), APIM/AKS slow deletes, KV purge-protection; (F3) MG-scope DINE policy
+the workspace, and per the consolidated mechanism below that delete now requires `--force-deletion`
+to cascade the managed RG), APIM/AKS slow deletes, KV purge-protection; (F3) MG-scope DINE policy
 assignments kept RE-REMEDIATING (recreated rg-amba-monitoring-001) during resource deletion; (F4)
 state was emptied for a fresh redeploy, so terraform-destroy can no longer finish the current
 half-destroy - no az fallback existed.
@@ -77,7 +77,7 @@ half-destroy - no az fallback existed.
    the whole-estate phases); `mode=az-sweep` with a non-`all` target is rejected by the `guard` job
    before login (it would otherwise run nothing and report green).
 4. **F2 handling:** Databricks = delete the WORKSPACE (never the managed RG directly) WITH
-   `--force-deletion` (see the 2026-07-20 amendment point 10 - a plain workspace delete no longer
+   `--force-deletion` (see the consolidated mechanism below - a plain workspace delete no longer
    self-cleans the managed RG); APIM/KV = provider purge features (APIM added at B4) + 360-min
    ceiling; KV purge-protected = soft-delete + redeploy recover (recover_soft_deleted_key_vaults).
 5. **Full MG-hierarchy teardown for the Wednesday redeploy, dispatched explicitly**
@@ -118,263 +118,130 @@ half-destroy - no az fallback existed.
   defaults to `false` (point 5 above). The `guard` az-sweep/target=all rejection (point 3) was
   also added at this correction pass.
 
-**Amendment (2026-07-20) - OIDC token durability, async-delete / verify reconciliation, and the
-auth-error-must-fail-loud rule (teardown run 29712487341, mode=az-sweep, remove_mg_hierarchy=true
-on `banking`).**
+**Current mechanism (consolidated 2026-07-20 - GREEN and proven E2E, attempt 5 run 29765892057).**
 
-Context of the amendment: the redesigned workflow ran. Phase 0 DISARM succeeded (VERIFY 1 later
-confirmed 0 policy assignments at every MG scope); Phase 1 was correctly skipped (az-sweep, state
-gone); Phase 3 VERIFY correctly failed loud on remnants. But Phase 2 AZ SWEEP exited 0 having
-deleted NOTHING. Root cause: the `azure/login` GitHub OIDC federated client-assertion is valid only
-for GitHub's ~5-minute window (here 02:34:44 -> 02:39:44). Phase 2 step 1 ran `az databricks
-workspace delete` SYNCHRONOUSLY (no `--no-wait`) plus a 600s in-session `wait_for_rg_gone` poll,
-which drove the single job to ~55 minutes. When the initial Azure access token expired mid-job, the
-az CLI tried to refresh it using the long-dead 5-minute federated assertion and every call died with
-`AADSTS700024: Client assertion is not within its valid time range`. Three swallow-the-error bugs
-then turned that auth death into a silent success: the Databricks workspace delete never submitted;
-`az account management-group show ... 2>/dev/null` returning non-zero on a dead token was
-mis-read as "MG already gone - skipping" for all 12 MGs; and the `|| true`-guarded RG/KV list calls
-returned empty on the dead token, so nothing was swept. Remnants left standing: rg-amba-monitoring-001,
-the bank-data workload + Databricks managed RGs, one Databricks workspace, and the full 12-MG tree.
+The four-phase shape above is unchanged. Three live-only defects were then fixed, each a distinct
+real root cause; the fixes are proven and the code is the source of truth. They are described here as
+one coherent mechanism (the dated, run-numbered history is in the changelog at the end of this ADR
+and in docs/teardown-redesign.md Appendix A). Full design: docs/teardown-redesign.md sections 4 to 7
+and 10.
 
-This class is the deferred OQ-022 (OIDC assertion lifetime vs long-running operations). The
-amendment does NOT change the four-phase shape or any prior decision above; it adds three locked
-rulings and a DevSecOps fix-spec (full detail: docs/teardown-redesign.md sections 9 and 10):
+7. **Token durability = a short submission pass plus an on-demand re-login primitive; never az's own
+   refresh.** The `azure/login` GitHub OIDC federated assertion is valid only inside GitHub's ~5
+   minute window; once consumed, az cannot refresh the derived ~1h access token, so any single step
+   that outlives it dies AADSTS700024. Mechanism: (a) Phase 2 fires EVERY delete with `--no-wait`
+   (submission only, no in-session long-poll on the token that submitted it); (b) a shared
+   `az_relogin` helper mints a BRAND-NEW GitHub OIDC assertion on demand (fresh id-token from
+   `$ACTIONS_ID_TOKEN_REQUEST_URL`, audience `api://AzureADTokenExchange`, then `az login
+   --service-principal --federated-token`) - GitHub serves fresh assertions for the whole job; (c)
+   the single bounded reconcile wait calls `az_relogin` at the START of every iteration, ceiling 30
+   min, so a poll can never outlive its token. A failed re-login is FAIL LOUD. Rejected: `azure/login`
+   at job start alone (does not survive a >token-lifetime step); az token refresh (impossible with a
+   consumed one-time assertion); putting the wait inside VERIFY (muddies the auditor's instant-truth
+   contract); an in-workflow auto-retry loop (masks a stuck delete).
 
-7. **Token durability = short submission pass + a re-login primitive, never az's own refresh.**
-   (a) Phase 2 fires EVERY delete with `--no-wait` (Databricks workspace, RGs, KV) - a
-   submission-only pass that completes well inside one fresh access token; no operation ever
-   long-polls in-session on the token that submitted it. (b) A shared `az_relogin` helper mints a
-   BRAND-NEW GitHub OIDC assertion on demand (request a fresh id-token from
-   `$ACTIONS_ID_TOKEN_REQUEST_URL` with `$ACTIONS_ID_TOKEN_REQUEST_TOKEN`, audience
-   `api://AzureADTokenExchange`, then `az login --service-principal --federated-token`) - GitHub
-   serves fresh assertions for the whole job, so this bypasses az's broken refresh (which reuses the
-   one-time 5-minute assertion). (c) Any bounded wait loop calls `az_relogin` at the START of every
-   iteration, so a poll can never outlive its token. Rejected: relying on `azure/login` at job start
-   alone (does not survive a >token-lifetime single step); relying on az token refresh (structurally
-   impossible with a consumed one-time federated assertion).
 8. **Async-delete / immediate-verify reconciliation: the WAIT lives in Phase 2, VERIFY stays an
-   instant truth-gate.** After the `--no-wait` submission pass, Phase 2 runs ONE bounded
-   reconciliation loop (re-login each iteration, point 7c) that waits for exactly the RGs it
-   submitted plus the Databricks managed RGs to report gone, up to a bounded ceiling (30 min, far
-   under the 360-min job ceiling). Phase 3 VERIFY then asserts remnants=0 IMMEDIATELY with no wait,
-   and fails loud. Idempotent operator RE-DISPATCH is the documented safety net ONLY for the
-   pathological over-ceiling straggler; the workflow does NOT auto-retry (avoids masking a genuinely
-   stuck delete). Rejected: putting the wait inside VERIFY (muddies the auditor's "truth at this
-   instant" contract and could wait out a stuck delete); auto-retry loops in the workflow (can mask
-   a stuck resource and complicate the graph). Note: MG re-parent + bottom-up delete are fast
-   control-plane ops and stay in the submission pass (no reconcile wait needed for MGs).
-9. **AUTH-ERROR-MUST-FAIL-LOUD: no teardown step may ever treat an auth/token/transport failure as
-   "resource absent / already gone".** Every existence check and list call must DISTINGUISH a real
-   NotFound (idempotent no-op) from an auth or transport error (fail loud, non-zero, `::error::` -
-   never fall into a "skip / already gone / empty = nothing to do" branch). Mechanism: capture
-   stderr (do not blanket-swallow with `2>/dev/null`); a shared `is_auth_error` classifier matches
-   `AADSTS`, "valid time range", "not within", "AuthenticationFailed", "ExpiredAuthenticationToken",
-   token / credential / 401 / 403 patterns; a failed (non-zero) list is explicitly distinct from a
-   successful empty list. Applies to ALL of teardown-disarm.sh, teardown-az-sweep.sh, and
-   teardown-verify.sh - VERIFY especially, since a dead token there would otherwise falsely report
-   "clean". This directly kills the three silent-exit-0 bugs above.
-10. **Databricks managed-RG cascade now REQUIRES `--force-deletion` (stale-premise correction).**
-    The original ADR-054 F2 premise - that deleting a Databricks workspace self-cleans its managed
-    resource group - is no longer true per the current Microsoft "Delete a workspace" doc
-    (ms.date 2026-07-08): a plain delete RETAINS the managed RG (plus its DBFS storage account and
-    access connector), and for a Unity-Catalog-enabled workspace Azure converts the managed RG into
-    a regular RG and keeps its contents. So the workspace delete MUST pass `--force-deletion` to
-    cascade the managed RG. This corrects ADR-054 F2 and docs/teardown-redesign.md section 6, and
-    aligns with the re-dispatch pre-clearance C1. DevSecOps is adding `--force-deletion` to the
-    az-sweep script in parallel and CONFIRMING it combines with `--no-wait` (point 7a); if the two
-    flags do NOT combine, DevSecOps STOPS and routes back to the architect for a submit-vs-wait
-    sequencing ruling (a synchronous force-delete would reintroduce the long-poll the token-durability
-    ruling exists to remove, so the reconcile loop, point 8, would then own the managed-RG wait).
+   instant truth-gate.** After the submission pass, Phase 2 runs ONE relogin-bounded reconcile loop
+   that waits for exactly the RGs it submitted plus the Databricks managed RGs to report gone; Phase 3
+   VERIFY then asserts remnants=0 with no wait. Idempotent operator RE-DISPATCH is the safety net for
+   the pathological over-ceiling straggler; the workflow does NOT auto-retry. MG re-parent + bottom-up
+   delete are fast control-plane ops and stay synchronous in the submission pass (no reconcile wait).
 
-Amendment consequences: Phase 2 becomes submission + one relogin-bounded reconcile wait (no
-synchronous long deletes); an auth/token failure ANYWHERE now fails the run loudly instead of
-masquerading as a clean teardown; VERIFY remains the instant, unwaited truth-gate. Follow-up:
-DevSecOps implements docs/teardown-redesign.md section 10 across the three scripts + teardown.yml
-(export `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` plus the auto-present
-`ACTIONS_ID_TOKEN_REQUEST_*` to the sweep step so `az_relogin` works); re-run mode=az-sweep,
-remove_mg_hierarchy=true to finish run 29712487341's remnants before the Wednesday redeploy (the
-live 12-MG tree collides with a fresh empty-state avm-ptn-alz apply).
+9. **Auth-error-must-fail-loud, across all three scripts.** No teardown step may treat an auth / token
+   / transport failure as "resource absent / already gone". Every list/existence call DISTINGUISHES a
+   genuine NotFound (idempotent no-op) from an auth or transport error (fail loud, non-zero,
+   `::error::`); a failed list is explicitly distinct from a successful zero-row list. Two data traps
+   are closed so this is sound: (T1) the shared `az_run` helper keeps stdout (the data channel) and
+   stderr fully separate, so a clean-exit WARNING banner can never inject a bogus row into a `mapfile`
+   or scalar compare; (T2) the shared `is_auth_error` classifier (matching `AADSTS`, "valid time
+   range", "not within", `AuthenticationFailed`, `ExpiredAuthenticationToken`, token / credential /
+   401 / 403 / `az login`) replaces the old `2>/dev/null || true` swallow. VERIFY especially - a dead
+   token there would otherwise falsely certify "clean". `is_auth_error` is NOT loosened.
 
-**Amendment (2026-07-20, second) - the token-durability fix WORKED; a deleted-MG-scope
-false-positive in the two policy-assignment-list loops (VERIFY 1 and DISARM) must be gated on MG
-existence (teardown run 29749656053, mode=az-sweep, remove_mg_hierarchy=true, feature/teardown-
-redesign).**
+10. **Databricks managed-RG cascade requires `--force-deletion`.** Per the current MS "Delete a
+    workspace" doc (ms.date 2026-07-08) a plain workspace delete RETAINS the managed RG (plus its DBFS
+    storage account and access connector; a UC-enabled workspace's managed RG is converted to a regular
+    RG and kept). So the workspace delete passes `--force-deletion` to cascade the managed RG;
+    `--force-deletion` and `--no-wait` combine (proven in run 29749656053, which cleared the managed
+    RG). Never `az group delete` the managed RG directly (RP deny-assignment); the reconcile step waits
+    for the cascade and VERIFY 3 confirms.
 
-DISPOSITION of run 29749656053 - the teardown SUCCEEDED, the workflow-red is a VERIFY false-positive.
-The token-durability fix (amendment point 7) held end to end: Phase 0 DISARM cleared every MG-scope
-policy assignment while the MGs still existed (proving the OIDC SP has policyAssignments read+delete
-at MG scope); Phase 2 AZ SWEEP completed in about 10 minutes with ZERO AADSTS / token / az_relogin
-errors (no 55-minute hang) and `--force-deletion` cleared the Databricks managed RG. Live Azure state
-after the run: the Databricks workspace gone, both landingzones workload RGs gone, rg-amba-monitoring-
-001 gone, all 11 globaris-tree MGs deleted (only the tenant root remains), 0 policy assignments at
-every scope. The estate is genuinely, fully torn down and this was live-verified. VERIFY 2 (RGs),
-VERIFY 3 (Databricks) and VERIFY 5 (soft-deleted KVs) were clean; VERIFY 4 (MG hierarchy removed)
-confirmed every MG gone; ONLY VERIFY 1 failed loud, and it failed on remnants that do not exist.
+11. **MG existence is resolved by a ONE-TIME `az account management-group list` snapshot, never a
+    per-MG `show`. This is the CANONICAL design, not a workaround (see the SP-verification ruling
+    below and OQ-048).** The teardown runs as the scoped OIDC SP whose MG-read grants were scoped to
+    the globaris subtree and are deleted WITH it, so the SP can DELETE the MGs but cannot then `show` a
+    deleted MG: a per-MG `az account management-group show <deleted-mg>` returns HTTP-403
+    `AuthorizationFailed` (not the clean 404 a tenant-root-privileged principal sees), and a per-scope
+    policy read on a deleted MG returns the identical 403. So existence is captured ONCE per script run
+    by `az account management-group list --query "[].name" -o tsv`; existence is name membership in
+    that set (`mg_snapshot_load` / `mg_in_snapshot`, teardown-common.sh). The SP's surviving grant,
+    Management Group Contributor at the tenant root (never deleted), carries
+    `Microsoft.Management/managementGroups/read`, so the SP can always read that collection; a deleted
+    MG is simply absent from it, with NO per-scope call and therefore NO deleted-scope 403 (proven,
+    probe run 29756715840, run AS the SP: `list` returns only the tenant root; `show --name globaris`
+    returns 403). Auth-fail-loud lives on the LIST call: a non-zero `is_auth_error` snapshot load is a
+    genuine dead token at the one call the SP is always entitled to make -> FAIL LOUD; a successful
+    list is authoritative ground truth. All four MG-touching sites (DISARM per-MG loop; VERIFY 1;
+    VERIFY 4 as name-absence; az-sweep step 4) consume the snapshot; `show` is removed as an existence
+    oracle everywhere. The throwaway probe workflow used to prove the oracle has been deleted from the
+    repo.
 
-The bug (a benign, newly-diagnosed cause, structurally distinct from attempts 1-2). VERIFY 1 and
-DISARM both iterate the 11 MG scopes and run `az policy assignment list --scope
-/providers/Microsoft.Management/managementGroups/<mg>`. When the MG has been DELETED, ARM evaluates
-RBAC on the scope BEFORE confirming the scope exists and returns HTTP-403
-`AuthorizationFailed: ... does not have authorization to perform action
-'Microsoft.Authorization/policyAssignments/read' over scope '.../managementGroups/<mg>' or the scope
-is invalid. If access was recently granted, please refresh your credentials.` The `is_auth_error`
-classifier matches that text (via the `credential` token catching the standard "please refresh your
-credentials" tail), so VERIFY 1's `elif is_auth_error` branch fired and failed loud
-("cannot certify this scope clean off a dead token") for all 11 already-deleted MGs. It is NOT a dead
-token and NOT a real permission gap - it is a 403-shaped response for a policy read on a NONEXISTENT
-scope (the "or the scope is invalid" clause). VERIFY 1 and VERIFY 4 are structurally contradictory in
-remove_mg_hierarchy=true mode: VERIFY 4 REQUIRES the MGs gone, and VERIFY 1 then cannot read a scope
-that no longer exists. The pre-hardening VERIFY 1 swallowed this as "clean, or MG no longer exists";
-the correct auth-fail-loud hardening (amendment point 9) now over-catches the benign deleted-MG case.
+**SP-verification ruling (2026-07-20, structural root of defect 3) - the list-snapshot oracle is
+CANONICAL; a tenant-root Management Group Reader grant is REJECTED.** The teardown identity can delete
+MGs but cannot verify their deletion via a per-scope read. Two ways to resolve it:
+- (A, CHOSEN) Keep the `az account management-group list` snapshot oracle. Zero RBAC change, already
+  proven green E2E, no bootstrap re-apply. It relies only on the SP's SURVIVING Management Group
+  Contributor at the tenant root (which carries `managementGroups/read` and is never deleted), so the
+  one list call the design depends on is always available.
+- (B, REJECTED) Grant the SP a minimal Management Group Reader (or equivalent read) at the tenant root
+  so a deleted-MG `show` returns a clean 404. It would simplify call sites (a per-MG existence probe
+  would "just work") but it WIDENS the SP's standing grant, needs a bootstrap re-apply
+  (bootstrap/identity.tf), and touches the OQ-008 / ADR-021 least-privilege scope-down that is trying
+  to REDUCE this SP's footprint. Rationale for choosing A: it needs no RBAC change and no bootstrap
+  change, is proven, and moves in the SAME direction as OQ-008 (less standing privilege), whereas B
+  adds a standing grant to fix a purely diagnostic read. The list-oracle is therefore the deliberate,
+  recorded design; the per-MG `show` oracle is retired (it was principal-dependent and is why defect 3
+  occurred). Tracked as OQ-048.
 
-Whether it counts against the user's 4-attempt bar (architect recommendation; the user decides).
-Recommend NOT counting it as a teardown failure. The operational objective - a zero-manual, E2E,
-CI/CD teardown of the estate - was fully achieved and live-verified; the token-durability hypothesis
-under test PASSED cleanly (zero AADSTS across the whole Phase 2). The workflow-red is a defect in the
-completion GATE (a VERIFY over-catch after a successful teardown), not a teardown or auth-durability
-failure, and it is a new failure class distinct from attempt 1 (F1 empty-root cascade-skip -
-destroyed nothing) and attempt 2 (the OIDC token death mid-Phase-2 - destroyed nothing). Each retry
-has NARROWED the failure class (LESSON 59): cascade -> token durability -> a post-success verify-gate
-edge. Candid counter-argument for the user: by the letter of the design's own acceptance bar
-("a green Phase 3 IS the definition of teardown succeeded E2E"), Phase 3 was red, so this run did not
-meet the stated bar - attempt 4 (post-fix, against an already-empty estate) is the confirmation run
-that produces the green Phase 3 the bar demands.
+**Residual hardening (follow-up, DevSecOps).** One coherence item remains from the reactive-patch
+sequence: three DISARM list `else` branches (teardown-disarm.sh identity-scan ~L114-117, role list
+~L132-134, assignment-names ~L156-158) still treat a NON-auth failure at a CONFIRMED-LIVE MG scope as
+"no data / already disarmed" rather than failing loud, the same class VERIFY 1 already fixes. DevSecOps
+hardens these three `else` branches to fail loud (per docs/teardown-redesign.md section 10.1) and
+corrects the stale DISARM header comment. A lower-priority, backstopped coherence observation (four
+delete-submission sites that swallow auth without classifying, section 10.2) is optional. No behavior
+change beyond this class; the four-phase mechanism above is green and proven.
 
-11. **[SUPERSEDED 2026-07-20 by point 12 - the `show`-based oracle below was principal-dependent and
-    failed live on attempt 4 (run 29753193590). Retained for the audit trail; do NOT implement the
-    `show` oracle. Read point 12 for the correct `az account management-group list` snapshot oracle.]**
-    The deleted-MG policy-list false-positive is fixed with an MG-EXISTENCE GATE in BOTH loops that
-    iterate MG scopes - VERIFY 1 (Phase 3) AND DISARM (Phase 0) - not by loosening `is_auth_error`.**
-    - Rule: before listing policy assignments at an MG scope, first probe MG existence with
-      `az account management-group show --name <mg>`. This call returns a CLEAN, non-auth
-      HTTP-404 `ManagementGroupNotFound` on a deleted MG (proven: VERIFY 4 and Phase-2 step-4 both
-      already use exactly this oracle and both correctly reported every MG gone in run 29749656053).
-      Three-way branch, mirroring the existing VERIFY 4 / Phase-2 step-4 code:
-      (a) `show` succeeds -> the MG EXISTS -> run the policy-assignment list with the existing
-      auth-fail-loud classification UNCHANGED (a dead token or a genuine permission gap at a live
-      scope still fails loud); (b) `show` fails and `is_auth_error` -> FAIL LOUD (a genuine dead
-      token / transport error - cannot certify anything off it); (c) `show` fails and NOT
-      `is_auth_error` -> genuine NotFound, the MG is gone -> in DISARM, skip (nothing to disarm at a
-      nonexistent scope); in VERIFY 1, skip (no scope to check - VERIFY 4 owns the MG-gone assertion
-      when remove_mg_hierarchy=true). Use the direct `mg_show_out="$(az ... 2>&1)"; rc=$?` capture
-      form (as VERIFY 4 does), NOT `az_run` - the show output is consumed only for its exit code and
-      stderr classification, never as a data channel.
-    - DISARM is affected identically to VERIFY 1, and this is the load-bearing point for attempt 4:
-      DISARM ran fine in run 29749656053 ONLY because Phase 0 runs FIRST, when the MGs were still
-      live. On attempt 4 the MGs are ALREADY deleted before the run starts, so DISARM's per-MG
-      `az policy assignment list` hits the same deleted-scope AuthorizationFailed and, WITHOUT the
-      existence gate, DISARM fails loud at Phase 0 and attempt 4 never reaches VERIFY. Fixing VERIFY 1
-      alone is insufficient. DISARM's header comment (which currently claims a deleted-MG list
-      "returns a genuine NotFound, distinct from an auth failure") is factually wrong and must be
-      corrected: the deleted-MG POLICY LIST returns a 403 AuthorizationFailed, which is precisely why
-      the gate probes existence via `show` (a clean 404) rather than trusting the list's error shape.
-    - `is_auth_error` STAYS AS-IS (do NOT loosen it, do NOT special-case AuthorizationFailed inside
-      it). It correctly matches this text via the "refresh your credentials" tail, and at a LIVE scope
-      that match is the desired behaviour - a real permission gap or a dead token there MUST fail loud.
-      The ambiguity being resolved is deleted-vs-live SCOPE EXISTENCE, which is a scope question, not
-      a text-classification question, so it belongs in the existence gate. Loosening the matcher would
-      re-open a swallow bug (a genuine permission gap / dead token at a live scope read as "clean").
-    - Rejected alternative: "when remove_mg_hierarchy=true, VERIFY 1 defers all MG-scope assignment
-      checks to VERIFY 4." It is logically sound for VERIFY (MG gone implies no assignments possible),
-      but it does NOT generalize to DISARM (DISARM must list+delete at LIVE MGs on every normal run and
-      is not tied to remove_mg_hierarchy at all), and it discards diagnostic precision for the
-      partial-failure case (an MG that still exists WITH assignments). The existence gate is the single
-      pattern that works uniformly in both loops and preserves auth-fail-loud for live scopes.
+**Consequences of the consolidated mechanism:** a single dispatch tears the estate down E2E state-intact
+or state-gone with zero manual steps; remediation cannot resurrect resources mid-sweep; Phase 2 is a
+submission pass plus one relogin-bounded reconcile wait (no >token-lifetime step, no AADSTS700024); any
+auth/token failure anywhere fails the run loudly; VERIFY is the instant, unwaited truth-gate that can
+never certify "clean" off a dead token; a fresh redeploy meets a clean MG slate. Follow-up: DevSecOps
+applies the section-10.1 DISARM hardening; OQ-008 / ADR-021 SP scope-down proceeds independently (the
+list-oracle depends only on the SP's surviving tenant-root MG Contributor grant, which OQ-008 keeps);
+OQ-022 tracks generalizing `az_relogin` to long deploy steps (teardown-only today).
 
-Second-amendment consequences: attempt 4 (post-fix, against the already-empty estate) goes green ONLY
-if the existence gate is applied to BOTH DISARM and VERIFY 1 - every MG `show` returns NotFound ->
-both loops skip cleanly; Phase 2 is a near-no-op (its MG step-4 existence gate already handles gone
-MGs; RG/KV/Databricks lists over the still-present subscriptions succeed and return zero rows);
-VERIFY 4 confirms every MG gone; VERIFY 2/3/5 are clean -> Phase 3 green. Follow-up: DevSecOps applies
-the existence gate to teardown-disarm.sh and teardown-verify.sh per docs/teardown-redesign.md
-section 10.2 and 10.4 (both amended), corrects the DISARM header comment, then the operator
-re-dispatches mode=az-sweep, remove_mg_hierarchy=true for the green confirmation run.
-
-**Amendment (2026-07-20, third) - the point-11 `show` oracle was PRINCIPAL-DEPENDENT and WRONG for
-the scoped teardown SP; superseded by the `az account management-group list` snapshot oracle
-(teardown attempt 4, run 29753193590; empirical probe run 29756715840).**
-
-Point 11's premise - that `az account management-group show --name <mg>` returns a CLEAN HTTP-404
-`ManagementGroupNotFound` on a deleted MG - is TRUE ONLY for a tenant-root-privileged principal. It is
-FALSE for the scoped OIDC teardown SP, which is the principal that actually runs the teardown. The
-SP's MG-read grants were scoped to the globaris subtree (identity.tf) and were DELETED together with
-that subtree. So for the SP, a `show` on a deleted globaris-tree MG evaluates RBAC on a scope the SP
-no longer has any grant over and returns HTTP-403 `AuthorizationFailed`, NOT a 404. `is_auth_error`
-correctly matches that 403, so the point-11 gate fired FAIL LOUD on benign already-gone MGs at every
-one of the four probe sites. Attempt 4 (run 29753193590) consequently failed Phase 0 DISARM, Phase 2
-az-sweep step 4, AND Phase 3 VERIFY (VERIFY 1 and VERIFY 4), even though the estate was, and remains,
-fully torn down. The oracle was principal-dependent: a tenant-root-privileged human running the same
-`show` gets the clean 404 the design assumed, which is exactly why point 11 looked correct in
-review and in run 29749656053 (where DISARM ran while the MGs were still live).
-
-Empirical proof (read-only diagnostic run AS THE ACTUAL SP in the production-destroy environment,
-probe run 29756715840; cited by run number, no GUIDs):
-- Probe 1: `az account management-group list -o table` SUCCEEDS for the SP and returns ONLY the
-  tenant root - all 11 deleted globaris-tree MGs are ABSENT.
-- Probe 2: `az account management-group list --query "[].name" -o tsv` returns only the tenant-root
-  name.
-- Probe 3: `az account management-group show --name globaris` returns 403 `AuthorizationFailed` (the
-  root cause, reproduced deterministically).
-- Probe 4: `az account management-group show --name <tenant-root>` SUCCEEDS - `show` works for the SP
-  ONLY at a scope it still holds a grant over (the tenant root), i.e. only for EXISTING, granted
-  scopes.
-The SP's surviving grant is Management Group Contributor at the TENANT ROOT (identity.tf, tenant root
-is never deleted), which carries `Microsoft.Management/managementGroups/read` AND
-`Microsoft.Authorization/*/read`. A `list` targets the existing, readable tenant-root MG collection;
-a deleted MG is simply ABSENT from that collection, so membership resolves existence with NO per-scope
-call and therefore NO per-scope 403.
-
-12. **The MG-existence oracle is a ONE-TIME `az account management-group list` snapshot, NOT a per-MG
-    `show`. This SUPERSEDES point 11's oracle at all four probe sites. `is_auth_error` is unchanged.**
-    - (a) **Snapshot, not per-scope probe.** Once per script run, capture the set of existing MG names
-      via `az account management-group list --query "[].name" -o tsv` (single call). MG existence =
-      name membership in that snapshot set. A deleted MG is absent from the set -> "gone", decided
-      with NO per-scope call and therefore NO deleted-scope 403. This removes the principal-dependent
-      false-positive at its source: the SP CAN read the tenant-root collection (its surviving grant),
-      it simply cannot `show` an individual scope it no longer has a grant over.
-    - (b) **Auth-fail-loud moves to the LIST call itself.** If `az account management-group list`
-      returns non-zero and `is_auth_error`, that is a genuine dead token / transport failure at the
-      one call the SP is always entitled to make -> FAIL LOUD (`::error::`, non-zero). If the `list`
-      SUCCEEDS, the returned set is authoritative ground truth for the whole run - a genuinely dead
-      token cannot return a clean list. This PRESERVES the section-9.4 auth-fail-loud guarantee (a real
-      auth failure still fails the run loudly) while eliminating the deleted-scope false-positive that
-      the per-MG `show` introduced.
-    - (c) **All four probe sites convert to the snapshot oracle:**
-      1. `teardown-disarm.sh` (Phase 0 per-MG loop): for each MG, if its name is NOT in the snapshot
-         set -> skip (gone, nothing to disarm); if present -> list + delete policy assignments with the
-         existing auth-fail-loud logic UNCHANGED.
-      2. `teardown-verify.sh` VERIFY 1 (per-MG policy-assignment loop): if the MG name is NOT in the
-         snapshot -> skip clean (VERIFY 4 owns the gone-assertion when remove_mg_hierarchy=true); if
-         present -> the remaining-assignments check with auth-fail-loud UNCHANGED.
-      3. `teardown-verify.sh` VERIFY 4 (MG-gone check): the assertion becomes name-membership - for
-         remove_mg_hierarchy=true, each target MG name MUST NOT be in the snapshot set (absent = gone).
-         No per-MG `show`.
-      4. `teardown-az-sweep.sh` step 4 (MG removal): iterate/delete only the MGs PRESENT in the
-         snapshot set (bottom-up, re-parent subs then delete). An already-empty estate -> the snapshot
-         holds none of the globaris-tree names -> step 4 no-ops cleanly.
-    - (d) **`is_auth_error` STAYS AS-IS** (unchanged from point 9 / point 11). The per-MG `show` is
-      REMOVED as an existence oracle everywhere. `show` may remain ONLY where an EXISTING MG's detail
-      is genuinely needed as data (none of the four teardown sites need this - all four are pure
-      existence checks, so all four drop `show` entirely).
-    - (e) **Attempt 5 expectation (green E2E with the list-oracle):** DISARM takes the snapshot ->
-      globaris-tree absent -> skips every scope -> Phase 0 green; VERIFY 1 same; VERIFY 4 confirms the
-      names absent; az-sweep step 4 no-ops; Phase 2 / Phase 3 green. If the ONE `az account
-      management-group list` fails `is_auth_error`, that is a real dead token -> fail loud (a true STOP,
-      diagnose - not a deleted-scope false-positive).
-    - (f) **Implementer note:** the throwaway probe workflow `.github/workflows/_probe-sp-mg.yml`
-      (used to produce probe run 29756715840) MUST be DELETED as part of this fix round - it exists
-      only to prove the oracle and must not remain in the repo.
-
-Third-amendment consequences: the deleted-scope false-positive is eliminated at its root (a single
-authoritative list the SP is always entitled to make), the auth-fail-loud guarantee is preserved (it
-binds the list call), and per-MG `show` is retired from the teardown scripts. Point 11's `show` gate
-is superseded and must NOT be implemented. Follow-up: DevSecOps applies the snapshot oracle to
-teardown-disarm.sh, teardown-verify.sh (VERIFY 1 AND VERIFY 4), and teardown-az-sweep.sh step 4 per
-docs/teardown-redesign.md sections 10.2 / 10.3 / 10.4 (amended), corrects the DISARM header comment,
-DELETES `.github/workflows/_probe-sp-mg.yml`, then the operator re-dispatches mode=az-sweep,
-remove_mg_hierarchy=true for the attempt-5 green confirmation run.
-
+**Changelog (compact audit trail; runs cited by number, no GUIDs):**
+- 2026-07-19 - original 4-phase design (ADR-054). Same-day reviewer BLOCK correction: `synthetic`
+  restored as a hardened Phase-1 root (not deleted), `remove_mg_hierarchy` default false, guard
+  `az-sweep`-requires-`target=all` rejection added.
+- 2026-07-20 - defect 1, OIDC assertion expiry on long deletes (run 29712487341): a ~55-min synchronous
+  Databricks delete outlived the token; three swallow-the-error bugs made Phase 2 exit 0 having deleted
+  nothing. Fixed by points 7 to 9 (deferred OQ-022 class in teardown).
+- 2026-07-20 - defect 2 (parallel), Databricks managed RG no longer self-cleans (MS doc ms.date
+  2026-07-08): fixed by point 10, `--force-deletion`.
+- 2026-07-20 - run 29749656053: token-durability fix HELD, estate fully live-verified torn down; a new
+  VERIFY 1 false-positive (403 on a deleted-MG policy read) surfaced.
+- 2026-07-20 - SUPERSEDED interim oracle: a per-MG `az account management-group show` gate (expected a
+  clean 404). Principal-dependent and WRONG for the scoped SP; do not implement.
+- 2026-07-20 - defect 3 (attempt 4, run 29753193590; probe run 29756715840): the `show` oracle returns
+  a 403 (not a 404) for the scoped SP on a deleted MG, failing loud at all four MG sites on benign gone
+  MGs. Corrected by point 11, the `az account management-group list` snapshot oracle.
+- 2026-07-20 - attempt 5, run 29765892057: GREEN E2E (Confirm / DISARM / AZ-SWEEP / VERIFY all
+  success), estate fully torn down. Design proven.
+- 2026-07-20 - consolidation pass (this ADR body + docs/teardown-redesign.md rewrite): reactive-patch
+  chain folded into one coherent mechanism; SP-verification ruling recorded (list-oracle canonical,
+  OQ-048); residual class-A DISARM hardening handed to DevSecOps.
 ### ADR-053: Wave B9 security/compliance rulings + the B9-vs-B-R split principle - B9 does additive/Audit-first/net-new (CMK, PCI/SOC visibility, platform-MG Audit, OpenAI-guardrails Audit); B-R does enforcement (Deny-promotion) + live-network flips; most founding-B9 scope is already built
 
 - **Date:** 2026-07-19

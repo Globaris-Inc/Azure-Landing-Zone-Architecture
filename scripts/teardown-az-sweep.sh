@@ -157,8 +157,17 @@ for sub in "${SUBS[@]}"; do
       continue
     fi
     echo "  Submitting delete for RG ${rg} (sub ${sub}, --no-wait)"
-    az group delete --name "$rg" --subscription "$sub" --yes --no-wait --output none 2>&1 || \
-      echo "  ::warning::delete request for ${rg} failed (continuing - idempotent retry on next run)"
+    # 2026-07-20 auth-fail-loud sweep (docs/teardown-redesign.md section 10.2, class B,
+    # coherence only - matches the Databricks workspace delete's classification above). Backstop
+    # either way: rg is still appended to deleted_rgs/deleted_subs below, so the reconcile step
+    # (az_relogin re-auths) and VERIFY 2 catch any true remnant even on a non-auth failure here.
+    if ! rg_del_out="$(az group delete --name "$rg" --subscription "$sub" --yes --no-wait --output none 2>&1)"; then
+      if is_auth_error "$rg_del_out"; then
+        echo "::error::RG delete submission for ${rg} (sub ${sub}) failed with an auth/transport error: ${rg_del_out}"
+        exit 1
+      fi
+      echo "  ::warning::delete request for ${rg} failed (continuing - idempotent retry on next run): ${rg_del_out}"
+    fi
     deleted_rgs+=("$rg")
     deleted_subs+=("$sub")
   done
@@ -179,8 +188,15 @@ for sub in "${SUBS[@]}"; do
     kv_name="$(printf '%s' "$row" | cut -f1)"
     kv_rg="$(printf '%s' "$row" | cut -f2)"
     echo "  Deleting live Key Vault ${kv_name} (rg ${kv_rg}, sub ${sub}) - soft-deletes"
-    az keyvault delete --name "$kv_name" --resource-group "$kv_rg" --subscription "$sub" --output none 2>&1 || \
-      echo "  ::warning::delete for KV ${kv_name} failed or already gone (continuing)"
+    # 2026-07-20 auth-fail-loud sweep (docs/teardown-redesign.md section 10.2, class B,
+    # coherence only). Backstop: reconcile + VERIFY 2/5 catch any true remnant either way.
+    if ! kv_del_out="$(az keyvault delete --name "$kv_name" --resource-group "$kv_rg" --subscription "$sub" --output none 2>&1)"; then
+      if is_auth_error "$kv_del_out"; then
+        echo "::error::Key Vault delete for ${kv_name} (sub ${sub}) failed with an auth/transport error: ${kv_del_out}"
+        exit 1
+      fi
+      echo "  ::warning::delete for KV ${kv_name} failed or already gone (continuing): ${kv_del_out}"
+    fi
   done
 
   if ! az_run deleted_kvs_out keyvault list-deleted --subscription "$sub" \
@@ -199,8 +215,16 @@ for sub in "${SUBS[@]}"; do
       echo "  PURGE-PROTECTED (retention applies, cannot purge): ${dkv_name} (${dkv_loc}, sub ${sub}). Redeploy must set recover_soft_deleted_key_vaults=true (LESSON 56) or use a fresh name."
     else
       echo "  Purging (not purge-protected): ${dkv_name} (${dkv_loc}, sub ${sub})"
-      az keyvault purge --name "$dkv_name" --location "$dkv_loc" --subscription "$sub" --output none 2>&1 || \
-        echo "  ::warning::purge for ${dkv_name} failed (continuing - Phase 3 will report if it still blocks a name)"
+      # 2026-07-20 auth-fail-loud sweep (docs/teardown-redesign.md section 10.2, class B,
+      # coherence only). Backstop: VERIFY 5 lists soft-deleted vaults and fails loud on an
+      # auth error there too, so this never false-greens either way.
+      if ! kv_purge_out="$(az keyvault purge --name "$dkv_name" --location "$dkv_loc" --subscription "$sub" --output none 2>&1)"; then
+        if is_auth_error "$kv_purge_out"; then
+          echo "::error::Key Vault purge for ${dkv_name} (sub ${sub}) failed with an auth/transport error: ${kv_purge_out}"
+          exit 1
+        fi
+        echo "  ::warning::purge for ${dkv_name} failed (continuing - Phase 3 will report if it still blocks a name): ${kv_purge_out}"
+      fi
     fi
   done
 done
