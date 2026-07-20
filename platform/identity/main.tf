@@ -1,6 +1,6 @@
 # Purpose: Zero Trust baseline - Conditional Access policies and Identity Protection.
 # Section: 5 - Zero Trust + Conditional Access
-# Last updated: 2026-07-10
+# Last updated: 2026-07-20 (ADR-055 Part 1: umbrella enable_conditional_access gate)
 #
 # Policies deployed (all start in Report-only mode via var.ca_policy_state):
 #   CA-001  Require MFA for all admin roles
@@ -67,6 +67,11 @@ locals {
 # ---------------------------------------------------------------------------
 
 resource "azuread_named_location" "approved_countries" {
+  # ADR-055 Part 1: umbrella-gated Graph write. Skipped in greenfield Pass 1
+  # (enable_conditional_access = false) so the long azurerm-only AADDS create has
+  # no trailing Graph op; created in Pass 2 / steady state (default true).
+  count = var.enable_conditional_access ? 1 : 0
+
   display_name = "Approved Sign-in Countries - ${title(var.org_prefix)}"
 
   country {
@@ -82,12 +87,17 @@ resource "azuread_named_location" "approved_countries" {
 # tenant (named location already replicated) it costs nothing meaningful and a plain
 # rerun clears geo_block regardless. See ADR-028.
 #
-# Gated on the same var.enable_geo_block_ca_policy as its only consumer, the
-# geo_block policy below (ADR-030): with geo_block off the path there is nothing to
-# wait for, so this 300s sleep is skipped too. Re-enabling the policy re-enables
-# this wait in lockstep.
+# ADR-055 Part 1: gated on the umbrella var.enable_conditional_access, matching the
+# named location it waits on (which is now the same gate). In greenfield Pass 1
+# (enable_conditional_access = false) there is no named location and no geo_block
+# consumer, so this 300s sleep is skipped along with every other Graph op. In Pass 2
+# / steady state it buffers the named-location Graph replication lag for geo_block
+# (ADR-028). geo_block additionally gates on var.enable_geo_block_ca_policy, so when
+# CA is on but geo_block is off this sleep runs with no consumer - a harmless 300s
+# no-op; the named location is still created (it feeds an output) and this keeps the
+# gate uniform across the umbrella flag.
 resource "time_sleep" "wait_named_location" {
-  count = var.enable_geo_block_ca_policy ? 1 : 0
+  count = var.enable_conditional_access ? 1 : 0
 
   create_duration = "300s"
 
@@ -99,6 +109,8 @@ resource "time_sleep" "wait_named_location" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "require_mfa_admins" {
+  count = var.enable_conditional_access ? 1 : 0 # ADR-055 Part 1 umbrella gate
+
   display_name = "CA-001 [${upper(var.org_prefix)}] Require MFA - Admin Roles"
   state        = var.ca_policy_state
 
@@ -127,6 +139,8 @@ resource "azuread_conditional_access_policy" "require_mfa_admins" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "block_legacy_auth" {
+  count = var.enable_conditional_access ? 1 : 0 # ADR-055 Part 1 umbrella gate
+
   display_name = "CA-002 [${upper(var.org_prefix)}] Block Legacy Authentication"
   state        = var.ca_policy_state
 
@@ -154,6 +168,8 @@ resource "azuread_conditional_access_policy" "block_legacy_auth" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "require_compliant_device_portal" {
+  count = var.enable_conditional_access ? 1 : 0 # ADR-055 Part 1 umbrella gate
+
   display_name = "CA-003 [${upper(var.org_prefix)}] Compliant Device - Azure Portal + Mgmt API"
   state        = var.ca_policy_state
 
@@ -188,6 +204,8 @@ resource "azuread_conditional_access_policy" "require_compliant_device_portal" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "phishing_resistant_mfa_pim" {
+  count = var.enable_conditional_access ? 1 : 0 # ADR-055 Part 1 umbrella gate
+
   display_name = "CA-004 [${upper(var.org_prefix)}] Require MFA - PIM Role Activation (phishing-resistant in prod)"
   state        = var.ca_policy_state
 
@@ -232,7 +250,10 @@ resource "azuread_conditional_access_policy" "phishing_resistant_mfa_pim" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "geo_block" {
-  count = var.enable_geo_block_ca_policy ? 1 : 0
+  # ADR-055 Part 1: compose the umbrella gate with the pre-existing geo_block flag
+  # (ADR-030). Off in greenfield Pass 1 via the umbrella; independently toggleable
+  # via enable_geo_block_ca_policy in steady state.
+  count = var.enable_conditional_access && var.enable_geo_block_ca_policy ? 1 : 0
 
   display_name = "CA-005 [${upper(var.org_prefix)}] Geo-Block - Outside Approved Countries"
   state        = var.ca_policy_state
@@ -251,7 +272,7 @@ resource "azuread_conditional_access_policy" "geo_block" {
 
     locations {
       included_locations = ["All"]
-      excluded_locations = [azuread_named_location.approved_countries.object_id]
+      excluded_locations = [azuread_named_location.approved_countries[0].object_id]
     }
   }
 
@@ -270,6 +291,8 @@ resource "azuread_conditional_access_policy" "geo_block" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "signin_frequency_admins" {
+  count = var.enable_conditional_access ? 1 : 0 # ADR-055 Part 1 umbrella gate
+
   display_name = "CA-006 [${upper(var.org_prefix)}] Sign-in Frequency 4h - Admin Roles on Mgmt Apps"
   state        = var.ca_policy_state
 
@@ -298,6 +321,8 @@ resource "azuread_conditional_access_policy" "signin_frequency_admins" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "block_high_user_risk" {
+  count = var.enable_conditional_access ? 1 : 0 # ADR-055 Part 1 umbrella gate
+
   display_name = "CA-007 [${upper(var.org_prefix)}] Block - High User Risk"
   state        = var.ca_policy_state
 
@@ -326,6 +351,8 @@ resource "azuread_conditional_access_policy" "block_high_user_risk" {
 # ---------------------------------------------------------------------------
 
 resource "azuread_conditional_access_policy" "mfa_signin_risk" {
+  count = var.enable_conditional_access ? 1 : 0 # ADR-055 Part 1 umbrella gate
+
   display_name = "CA-008 [${upper(var.org_prefix)}] Require MFA - Medium/High Sign-in Risk"
   state        = var.ca_policy_state
 

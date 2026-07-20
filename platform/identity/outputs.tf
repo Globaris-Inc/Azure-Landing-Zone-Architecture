@@ -1,23 +1,23 @@
 # Purpose: Outputs for the identity / Zero Trust root module.
 # Section: 5 - Zero Trust + Conditional Access
-# Last updated: 2026-07-10
+# Last updated: 2026-07-20 (ADR-055 Part 1: one(...)-safe CA outputs)
 
 output "named_location_approved_countries_id" {
-  description = "Object ID of the approved-countries named location used by the geo-block CA policy."
-  value       = azuread_named_location.approved_countries.object_id
+  description = "Object ID of the approved-countries named location used by the geo-block CA policy. Null when var.enable_conditional_access = false (ADR-055 greenfield Pass 1)."
+  value       = one(azuread_named_location.approved_countries[*].object_id)
 }
 
 output "ca_policy_ids" {
-  description = "Map of Conditional Access policy display-name slug → object ID."
+  description = "Map of Conditional Access policy display-name slug → object ID. Each value is null when the policy is not created (var.enable_conditional_access = false in ADR-055 greenfield Pass 1; geo_block additionally null when var.enable_geo_block_ca_policy = false)."
   value = {
-    require_mfa_admins         = azuread_conditional_access_policy.require_mfa_admins.id
-    block_legacy_auth          = azuread_conditional_access_policy.block_legacy_auth.id
-    require_compliant_device   = azuread_conditional_access_policy.require_compliant_device_portal.id
-    phishing_resistant_mfa_pim = azuread_conditional_access_policy.phishing_resistant_mfa_pim.id
-    geo_block                  = one(azuread_conditional_access_policy.geo_block[*].id) # null when var.enable_geo_block_ca_policy = false (ADR-030)
-    signin_frequency_admins    = azuread_conditional_access_policy.signin_frequency_admins.id
-    block_high_user_risk       = azuread_conditional_access_policy.block_high_user_risk.id
-    mfa_signin_risk            = azuread_conditional_access_policy.mfa_signin_risk.id
+    require_mfa_admins         = one(azuread_conditional_access_policy.require_mfa_admins[*].id)
+    block_legacy_auth          = one(azuread_conditional_access_policy.block_legacy_auth[*].id)
+    require_compliant_device   = one(azuread_conditional_access_policy.require_compliant_device_portal[*].id)
+    phishing_resistant_mfa_pim = one(azuread_conditional_access_policy.phishing_resistant_mfa_pim[*].id)
+    geo_block                  = one(azuread_conditional_access_policy.geo_block[*].id) # null when CA off or var.enable_geo_block_ca_policy = false (ADR-030/055)
+    signin_frequency_admins    = one(azuread_conditional_access_policy.signin_frequency_admins[*].id)
+    block_high_user_risk       = one(azuread_conditional_access_policy.block_high_user_risk[*].id)
+    mfa_signin_risk            = one(azuread_conditional_access_policy.mfa_signin_risk[*].id)
   }
 }
 

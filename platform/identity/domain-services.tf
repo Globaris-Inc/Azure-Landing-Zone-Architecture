@@ -2,7 +2,7 @@
 #          Services + a Recovery Services Vault for future DC/management VMs.
 #          (Section 8 - G1 / Gap-Closure Wave 3 / ADR-010)
 # Section: 8 - Standard Platform Components (Identity subscription)
-# Last updated: 2026-07-08
+# Last updated: 2026-07-20 (ADR-055 Part 1: reinstate ADR-029 greenfield import)
 #
 # DEVIATION: there is NO AVM module for Entra Domain Services (the registry returns
 # 404 for avm-res-aad-domainservice, confirmed 2026-06-25). This uses the native
@@ -153,6 +153,49 @@ resource "azurerm_active_directory_domain_service" "this" {
     azurerm_resource_provider_registration.aad,
     time_sleep.wait_aadds_policy_exemption,
   ]
+}
+
+# ---------------------------------------------------------------------------
+# ADR-029 (reinstated per ADR-055 Part 1): config-driven import of a
+# built-but-unstated managed domain - the canonical greenfield Pass 1 recovery.
+#
+# When the Pass 1 create-wait (enable_conditional_access = false, azurerm-only)
+# times out waiting for the 2nd DC (e.g. slow DC2 / AADDS104) but Azure has already
+# built the domain (provisioningState Succeeded, replica set Running), the provider
+# never recorded the ID and the domain is NOT in Terraform state. A plain re-apply
+# would then hit azurerm's requires-import guard ("already exists"). This block
+# brings it into state during the normal CI plan/apply - NO local `terraform import`
+# (CI-only-apply rule). Re-apply, still with enable_conditional_access = false, to
+# finish Pass 1.
+#
+# COMPOSITE import ID (verified against the azurerm v4.71 provider import docs): the
+# ID for azurerm_active_directory_domain_service is
+#   <domain resource ID>/initialReplicaSetId/<initial replica set GUID>
+# NOT the plain resource ID. Construction rules (ADR-029):
+#   - The domain resource ID is built from the RG resource's .id (so the
+#     subscription GUID comes from in-config state, never a committed literal) plus
+#     the same name expression the resource uses. Keep this name in lockstep with
+#     azurerm_active_directory_domain_service.this.name above.
+#   - The replica set GUID is supplied at apply time via
+#     var.aadds_import_replica_set_id (TF_VAR_aadds_import_replica_set_id in CI) -
+#     never baked into committed HCL.
+# GATING: for_each over a 0-or-1-element set makes the import a NO-OP when the
+# variable is empty (a normal deploy has no domain to import), and a single import
+# when the recovery GUID is set. The `to` resolves to the count-index-0 domain
+# instance; with at most one set element it maps uniquely. Import is a metadata read
+# (no create-wait), so it succeeds even while the 2nd DC is still healing;
+# subsequent plans show 0 changes.
+# ONE-SHOT (LESSON 52): interpolate the id from variables (done - no literal GUID)
+# and REMOVE this block in a cleanup commit as soon as the recovery apply lands; a
+# stale import block broke a later plan and blocked teardown (ADR-029, commit
+# d5f775e).
+# NOTE: validate cannot confirm the import ID resolves against real state - the CI
+# plan is the real gate (it must show "import", not "create", for the domain).
+import {
+  for_each = var.aadds_import_replica_set_id != "" ? toset([var.aadds_import_replica_set_id]) : []
+
+  to = azurerm_active_directory_domain_service.this[0]
+  id = "${azurerm_resource_group.identity_aadds[0].id}/providers/Microsoft.AAD/domainServices/aadds-${var.org_prefix}-${var.environment}/initialReplicaSetId/${each.value}"
 }
 
 # ---------------------------------------------------------------------------

@@ -131,6 +131,17 @@ jobs:
       TF_VAR_pim_approver_group_object_id: ${{ secrets.PIM_APPROVER_GROUP_OBJECT_ID }}
       TF_VAR_sentinel_owner_group_object_id: ${{ secrets.SENTINEL_OWNER_GROUP_OBJECT_ID }}
       TF_VAR_honeypot_user_principal_name: ${{ secrets.HONEYPOT_USER_PRINCIPAL_NAME }}
+      # ADR-029 recovery import, REINSTATED for the ADR-055 greenfield two-pass (code-review
+      # BLOCK, cross-lane wiring gap): replica-set ID of an Entra DS managed domain that exists
+      # in Azure but not in Terraform state (Pass 1 recovery only, when the AADDS create-wait
+      # times out - see DEPLOYMENT.md Step 4 / platform/identity/variables.tf). Unset Secret =>
+      # empty string => TF_VAR_aadds_import_replica_set_id="" => the import block's
+      # `for_each = var.aadds_import_replica_set_id != "" ? toset([...]) : []` is INERT (empty
+      # set, zero import operations) => a normal plan/apply is completely unaffected. Matches
+      # the variable's own default = "" (platform/identity/variables.tf), so even a fully unset
+      # env var falls through to the same inert state. Originally removed as dead wiring in
+      # commit 010d4a9 when the .tf side was also dead; both sides are live again together.
+      TF_VAR_aadds_import_replica_set_id: ${{ secrets.AADDS_IMPORT_REPLICA_SET_ID }}
       TF_VAR_cost_pattern_budget_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
       TF_VAR_cost_guardrails_alert_emails: '["${{ secrets.BUDGET_ALERT_EMAIL }}"]'
       # Wave B2 - AKS (ADR-043/044)
@@ -160,6 +171,24 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # ADR-055 Part 2 (durable OIDC token refresh for long applies, resolves OQ-022) -
+      # explicitly export the OIDC request inputs so BOTH Terraform providers (azurerm and
+      # azuread) re-mint a fresh GitHub id-token on every access-token acquisition, instead of
+      # relying on version-gated auto-detection of ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN. This
+      # closes the exposure behind the identity root's AADSTS700024 failure (run 29055619749):
+      # azurerm re-minted correctly across a 2h11m poll, but azuread reused a stale job-start
+      # assertion on a tail Graph call ~3h later. MUST go through $GITHUB_ENV in a `run:` step -
+      # the job-level `env:` map below does NOT shell-expand runtime vars, so a literal
+      # `ARM_OIDC_REQUEST_URL: ${ACTIONS_ID_TOKEN_REQUEST_URL}`-style entry there would not
+      # resolve to the actual value. ACTIONS_ID_TOKEN_REQUEST_URL / _TOKEN are auto-present in
+      # every step's environment because `permissions: id-token: write` is already set above
+      # (line ~92) - not re-requested here. Universal safety net: this runs for every root,
+      # harmless (near-zero cost) even for short applies that never approach the token window.
+      - name: Export OIDC request inputs for provider token refresh (ADR-055 Part 2)
+        run: |
+          echo "ARM_OIDC_REQUEST_URL=$ACTIONS_ID_TOKEN_REQUEST_URL" >> "$GITHUB_ENV"
+          echo "ARM_OIDC_REQUEST_TOKEN=$ACTIONS_ID_TOKEN_REQUEST_TOKEN" >> "$GITHUB_ENV"
 
       # ADR-025 — open the firewalled state SA for this run by flipping default_action
       # to Allow (opt-in). Off by default; see the manage_runner_ip input docs. Captures
