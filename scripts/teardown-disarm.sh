@@ -13,9 +13,15 @@
 # never an error - ARM delete operations are delete-if-exists (deleting an absent resource
 # returns success, not a 404), and `az policy assignment delete` follows that same ARM
 # semantics for a name that does not exist at a valid MG scope. A re-dispatch after a previous
-# run already removed an MG (remove_mg_hierarchy=true) is a legitimate case too - that scope's
-# list calls then return a genuine NotFound, distinct from an auth failure (see amendment
-# below).
+# run already removed an MG (remove_mg_hierarchy=true) is a legitimate case too - CORRECTED
+# 2026-07-20 (second amendment / ADR-054 point 11): a policy-assignment LIST call against that
+# deleted MG scope does NOT return a genuine NotFound - ARM evaluates RBAC on the scope BEFORE
+# confirming it exists, so the read comes back HTTP-403 `AuthorizationFailed: ... or the scope
+# is invalid. ... please refresh your credentials.`, which is_auth_error correctly matches (the
+# "credentials" tail). An earlier version of this comment claimed the opposite (a genuine
+# NotFound) - that was factually wrong and is exactly why the MG-existence gate below exists:
+# the disambiguation happens BEFORE the list call, by probing `az account management-group show`
+# directly, not by inspecting the list call's own error text.
 #
 # NOTE for anyone testing this by hand on Windows Git Bash (MSYS): a leading "/" in --scope
 # gets auto-converted to a Windows path by MSYS's POSIX-to-Windows path translation - this is
@@ -36,8 +42,34 @@
 # otherwise-clean call can never corrupt the result either (Finding #2's same fix) - and
 # classifies a non-zero exit with `is_auth_error`: an auth/transport failure is FAIL LOUD
 # (fail=1, this scope is NOT counted as disarmed), never silently read as "already disarmed /
-# scope gone". A genuine NotFound (the legitimate re-dispatch-after-MG-removal case above) still
-# reads as "nothing here" - it is not an auth error, so it is not conflated with one.
+# scope gone".
+#
+# AMENDED again 2026-07-20 (second amendment / ADR-054 point 11, docs/teardown-redesign.md
+# sections 10.2 and 11) - MG-EXISTENCE GATE, mandatory for a re-dispatch against an already-empty
+# estate (attempt 4). The Finding #1 fix above correctly hardened the list calls, but it did NOT
+# account for a re-dispatch AFTER a prior run already deleted the MGs (remove_mg_hierarchy=true):
+# a policy-assignment list against a DELETED MG scope is not a clean NotFound - ARM evaluates RBAC
+# on the scope BEFORE confirming it exists, so the read comes back HTTP-403 `AuthorizationFailed:
+# ... or the scope is invalid. ... please refresh your credentials.`, which is_auth_error correctly
+# matches (the "credentials" tail). Without a gate, that trips the `elif is_auth_error` branch on
+# every already-deleted scope and fails DISARM loud at Phase 0, before VERIFY ever runs (this is
+# LOAD-BEARING: run 29749656053 only reached VERIFY because Phase 0 ran while the MGs were still
+# live - the same run's Phase 3 then failed on the mirror-image bug in VERIFY 1's policy list,
+# see teardown-verify.sh). Fix: before ANY policy-assignment or role-assignment work for an MG,
+# probe its existence with a direct capture (NOT az_run - only exit code + stderr are consumed):
+# `mg_show_out="$(az account management-group show --name "$mg" --output none 2>&1)"`, mirroring
+# the same oracle already used in teardown-verify.sh VERIFY 4 and teardown-az-sweep.sh step 4 -
+# both of which correctly reported every MG gone in run 29749656053. Three-way branch:
+#   - show succeeds -> MG EXISTS -> proceed with the identity-scan / role-assignment / policy-
+#     assignment logic below EXACTLY as today (a dead token or a real permission gap at a LIVE
+#     scope must still fail loud - this is not loosened).
+#   - show fails AND is_auth_error -> genuine dead token/transport error probing existence itself
+#     -> fail=1 (cannot certify this scope disarmed), continue to the next MG.
+#   - show fails AND NOT is_auth_error -> genuine NotFound -> the MG is gone -> nothing to disarm
+#     at a nonexistent scope -> continue (not a failure). This is the branch that makes a
+#     re-dispatch against an already-empty estate pass DISARM cleanly.
+# is_auth_error itself is NOT loosened - the disambiguation is scope existence, resolved by this
+# gate, not by relaxing the classifier (which would re-open the exact swallow bug Finding #1 closed).
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +81,20 @@ fail=0
 for mg in "${MG_SCOPES[@]}"; do
   scope="/providers/Microsoft.Management/managementGroups/${mg}"
   echo "== DISARM scope: ${mg} =="
+
+  # MG-existence gate (see the amendment comment at the top of this file) - probe BEFORE any
+  # policy/role-assignment work at this scope. Direct capture, not az_run: only the exit code
+  # and stderr matter here, and this is the same oracle teardown-verify.sh VERIFY 4 and
+  # teardown-az-sweep.sh step 4 already use successfully.
+  if ! mg_show_out="$(az account management-group show --name "$mg" --output none 2>&1)"; then
+    if is_auth_error "$mg_show_out"; then
+      echo "::error::DISARM: MG ${mg} existence probe failed with an auth/transport error - cannot certify this scope disarmed off a dead token: ${mg_show_out}"
+      fail=1
+    else
+      echo "  MG ${mg}: gone (genuine NotFound) - nothing to disarm at a nonexistent scope."
+    fi
+    continue
+  fi
 
   # Capture (name, principalId) for DINE assignments with a system-assigned identity BEFORE
   # deleting the assignment - the identity's role assignment does not vanish with it.

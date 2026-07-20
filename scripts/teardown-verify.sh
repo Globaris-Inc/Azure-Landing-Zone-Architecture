@@ -58,25 +58,50 @@ else
 fi
 
 # --- 1. No MG-scope policy assignments remain ---
+# MG-EXISTENCE GATE (2026-07-20, second amendment / ADR-054 point 11, docs/teardown-redesign.md
+# sections 10.4 and 11): a policy-assignment read on a DELETED MG scope is not a clean NotFound -
+# ARM evaluates RBAC on the scope BEFORE confirming it exists, so the read returns HTTP-403
+# `AuthorizationFailed: ... or the scope is invalid. ... please refresh your credentials.`, which
+# is_auth_error correctly matches (the "credentials" tail) - this is NOT a dead token, it is a
+# 403-shaped response for a read on a scope that no longer exists. In remove_mg_hierarchy=true
+# mode Phase 2 has already deleted the MGs by the time VERIFY runs, so without a gate every one
+# of the 11 scopes fails loud here even though the estate is genuinely clean (run 29749656053).
+# Fix: probe the MG's existence FIRST with a direct capture (NOT az_run - only the exit code and
+# stderr are consumed here, mirroring VERIFY 4 below and teardown-az-sweep.sh step 4, which used
+# this exact oracle and both correctly reported every MG gone in that same run). Three-way branch:
+#   - show succeeds -> MG EXISTS -> list its assignments with auth-fail-loud UNCHANGED (a dead
+#     token or a real permission gap at a LIVE scope must still fail loud - this is not loosened).
+#   - show fails AND is_auth_error -> genuine dead token/transport error probing existence itself
+#     -> FAIL LOUD (cannot certify this scope one way or the other).
+#   - show fails AND NOT is_auth_error -> genuine NotFound -> the MG is gone -> VERIFY 4 below
+#     owns the gone-assertion for remove_mg_hierarchy=true; here it is simply not a remnant.
+# is_auth_error itself is NOT loosened - the disambiguation is scope existence, not text
+# classification (loosening the matcher would re-open the exact swallow bug section 9.4 closed).
 echo "== VERIFY 1: MG-scope policy assignments =="
 for mg in "${MG_SCOPES[@]}"; do
   scope="/providers/Microsoft.Management/managementGroups/${mg}"
-  if az_run remaining policy assignment list --scope "$scope" --query "length(@)" -o tsv; then
-    # shellcheck disable=SC2154  # remaining is assigned indirectly by az_run's printf -v
-    if [ "${remaining:-0}" != "0" ]; then
-      note_fail "MG ${mg} still has ${remaining} policy assignment(s) - DISARM did not fully complete."
+  if mg_show_out="$(az account management-group show --name "$mg" --output none 2>&1)"; then
+    if az_run remaining policy assignment list --scope "$scope" --query "length(@)" -o tsv; then
+      # shellcheck disable=SC2154  # remaining is assigned indirectly by az_run's printf -v
+      if [ "${remaining:-0}" != "0" ]; then
+        note_fail "MG ${mg} still has ${remaining} policy assignment(s) - DISARM did not fully complete."
+      else
+        echo "  ${mg}: clean (0 assignments)."
+      fi
+    elif is_auth_error "$AZ_RUN_STDERR"; then
+      # A dead token here must NEVER be read as "0 assignments" (this is exactly bugs #2/#3 from
+      # the 2026-07-20 incident) - fail loud instead of silently certifying this scope clean.
+      note_fail "MG ${mg} policy assignment list failed with an auth/transport error - cannot certify this scope clean off a dead token: ${AZ_RUN_STDERR}"
     else
-      echo "  ${mg}: clean (0 assignments)."
+      note_fail "MG ${mg} policy assignment list failed for an unexpected non-auth reason at a LIVE scope - cannot certify this scope clean: ${AZ_RUN_STDERR}"
     fi
-  elif is_auth_error "$AZ_RUN_STDERR"; then
-    # A dead token here must NEVER be read as "0 assignments" (this is exactly bugs #2/#3 from
-    # the 2026-07-20 incident) - fail loud instead of silently certifying this scope clean.
-    note_fail "MG ${mg} policy assignment list failed with an auth/transport error - cannot certify this scope clean off a dead token: ${AZ_RUN_STDERR}"
+  elif is_auth_error "$mg_show_out"; then
+    note_fail "MG ${mg} existence probe failed with an auth/transport error - cannot certify this scope clean off a dead token: ${mg_show_out}"
   else
-    # Not an auth error: the only other realistic non-zero here is the MG itself no longer
-    # existing (a genuine NotFound, expected when remove_mg_hierarchy removed it in Phase 2).
-    # VERIFY 4 below independently confirms the MG tree state, so this is not double-counted.
-    echo "  ${mg}: clean (MG itself no longer exists): ${AZ_RUN_STDERR}"
+    # Genuine NotFound: the MG is gone. VERIFY 4 (below) independently confirms and owns the
+    # gone-assertion for remove_mg_hierarchy=true - this is not a remnant, so it is not
+    # double-counted here.
+    echo "  ${mg}: clean (MG gone - VERIFY 4 owns the gone-assertion)."
   fi
 done
 

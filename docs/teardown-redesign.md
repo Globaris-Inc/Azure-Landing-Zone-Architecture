@@ -11,6 +11,14 @@
 > rulings on token durability, async-delete / verify reconciliation, and auth-fail-loud) and
 > **section 10** (the exact DevSecOps fix-spec per script). Read sections 9 and 10 as overriding
 > the Phase 2 mechanics wherever they differ from section 3.
+>
+> **AMENDED again 2026-07-20** (teardown run 29749656053): the token-durability fix WORKED and the
+> estate was fully, live-verified torn down - but the workflow went red on a VERIFY 1 false-positive
+> (a deleted-MG scope returns a 403 AuthorizationFailed on a policy-assignment read, which
+> `is_auth_error` correctly matches but which VERIFY 1 wrongly treated as a dead-token failure rather
+> than a gone scope). The fix is an MG-EXISTENCE GATE in the two loops that iterate MG scopes -
+> VERIFY 1 AND DISARM. See **section 11** (disposition + the ruling) and the amendments to **10.2**
+> and **10.4**.
 
 ---
 
@@ -362,6 +370,29 @@ list is exactly the "empty read mis-interpreted as done" pattern that sank Phase
 - DISARM stays a short job with a single job-start `azure/login`; no `az_relogin` loop is needed
   here (it does not long-poll), but it MUST import `is_auth_error` from teardown-common.sh (10.1).
 
+- **AMENDED (2026-07-20, second amendment / ADR-054 point 11) - MG-EXISTENCE GATE, mandatory for
+  attempt 4.** DISARM iterates the 11 MG scopes and runs `az policy assignment list --scope <mg>`
+  per scope. On a re-dispatch AFTER a prior run already deleted the MGs (exactly attempt 4's
+  situation - the estate is already empty), that list hits a DELETED scope, and ARM returns HTTP-403
+  `AuthorizationFailed: ... or the scope is invalid. ... please refresh your credentials.`, which
+  `is_auth_error` matches (via the "credentials" tail). Without a gate, the `elif is_auth_error`
+  branch fails DISARM loud at Phase 0 and the run never reaches VERIFY. The header comment's current
+  claim that a deleted-MG list "returns a genuine NotFound, distinct from an auth failure" is FALSE
+  and must be corrected. Fix: before the two policy-assignment `list` calls in the per-MG loop, probe
+  MG existence with `mg_show_out="$(az account management-group show --name "$mg" --output none 2>&1)"`
+  (direct capture + `rc=$?`, NOT `az_run` - the show output is consumed only for exit code + stderr).
+  Three-way branch, identical to the one already in teardown-az-sweep.sh step 4:
+    - `show` succeeds -> MG EXISTS -> run the identity list + assignment list + deletes with the
+      auth-fail-loud logic EXACTLY as today (a dead token or a real permission gap at a live scope
+      still fails loud).
+    - `show` non-zero AND `is_auth_error "$mg_show_out"` -> FAIL LOUD (`fail=1`; genuine dead token /
+      transport error - cannot certify this scope disarmed).
+    - `show` non-zero AND NOT `is_auth_error` -> genuine NotFound, the MG is gone -> `continue`
+      (nothing to disarm at a nonexistent scope; not a failure). This is the case that makes attempt 4
+      pass.
+  `is_auth_error` is NOT loosened (see 10.4 and ADR-054 point 11 - the disambiguation is scope
+  existence, not text classification).
+
 ### 10.3 `scripts/teardown-az-sweep.sh` (Phase 2)
 
 - **Step 1 Databricks:** the workspace delete MUST pass `--force-deletion` - a plain delete no
@@ -411,6 +442,38 @@ list is exactly the "empty read mis-interpreted as done" pattern that sank Phase
   is unnecessary (the workflow `azure/login` step already provides a fresh token and VERIFY is fast)
   - but the auth-fail-loud hardening above is mandatory.
 
+- **AMENDED (2026-07-20, second amendment / ADR-054 point 11) - VERIFY 1 MG-EXISTENCE GATE.** As
+  originally hardened, VERIFY 1 loops the 11 MG scopes and runs `az policy assignment list --scope
+  <mg>`, then on a non-zero result classifies with `is_auth_error`. In remove_mg_hierarchy=true mode
+  the MGs have just been deleted by Phase 2, so this list hits a DELETED scope and ARM returns
+  HTTP-403 `AuthorizationFailed: ... or the scope is invalid. ... please refresh your credentials.`
+  `is_auth_error` matches it (via the "credentials" tail), so the `elif is_auth_error` branch fires
+  and VERIFY 1 fails loud on 11 scopes that are correctly gone - a false-positive (run 29749656053).
+  VERIFY 1 and VERIFY 4 are structurally contradictory here: VERIFY 4 requires the MGs GONE, and
+  VERIFY 1 then cannot read a scope that no longer exists. Fix (same gate as DISARM / 10.2 / and the
+  already-shipped VERIFY 4 and Phase-2 step-4 code): before the per-MG `policy assignment list`,
+  probe existence with `mg_show_out="$(az account management-group show --name "$mg" --output none
+  2>&1)"; rc=$?`:
+    - `show` succeeds -> MG EXISTS -> run the `az_run remaining policy assignment list ...` check with
+      the existing auth-fail-loud logic UNCHANGED (a dead token or real permission gap at a live scope
+      still fails loud - do not lose this).
+    - `show` non-zero AND `is_auth_error "$mg_show_out"` -> `note_fail` (FAIL LOUD - genuine dead
+      token / transport error; cannot certify).
+    - `show` non-zero AND NOT `is_auth_error` -> genuine NotFound, the MG is gone -> print
+      "`${mg}: clean (MG gone - VERIFY 4 owns the gone-assertion)`" and continue; NOT a failure. This
+      replaces the current bare `else` branch (lines that print "clean (MG itself no longer exists)"
+      off the back of a policy-list error) - that branch is now UNREACHABLE for a deleted MG because
+      `is_auth_error` catches the 403 first, which is exactly the bug.
+  Use the direct `$(az ... 2>&1)` capture form for the `show` (as VERIFY 4 does), NOT `az_run`. Do NOT
+  loosen `is_auth_error`: at a LIVE scope its match of AuthorizationFailed / "refresh your
+  credentials" is correct and must keep failing loud; the deleted-vs-live disambiguation is a
+  scope-existence question, resolved by the gate. VERIFY 4 (MG-gone) and VERIFY 2/3/5 are unchanged.
+- Attempt-4 correctness note: with the gate applied to BOTH DISARM (10.2) and VERIFY 1, a re-dispatch
+  against the already-empty estate has every MG `show` return NotFound, so both loops skip cleanly and
+  VERIFY goes green (VERIFY 4 already confirms every MG gone; VERIFY 2/3/5 lists over the still-present
+  subscriptions succeed with zero rows). Fixing VERIFY 1 without also fixing DISARM leaves attempt 4
+  failing at Phase 0.
+
 ### 10.5 `.github/workflows/teardown.yml`
 
 - **az-sweep step env:** in addition to the existing `*_SUBSCRIPTION_ID` secrets and
@@ -434,3 +497,71 @@ list is exactly the "empty read mis-interpreted as done" pattern that sank Phase
 - Phase 3 VERIFY is green (immediate, unwaited) after a genuinely complete teardown; loud on any
   real remnant; and can itself never certify "clean" on a dead token.
 - Re-dispatch (idempotent) finishes any over-ceiling straggler; no manual deletion.
+
+---
+
+## 11. DISPOSITION 2026-07-20 - run 29749656053 SUCCEEDED; the workflow-red is a VERIFY 1 false-positive
+
+### 11.1 What actually happened (facts, live-verified)
+
+Dispatch: mode=az-sweep, remove_mg_hierarchy=true, feature/teardown-redesign. This was the first live
+test of the token-durability fix (section 9). It HELD end to end:
+
+- **Phase 0 DISARM: success** - deleted every MG-scope policy assignment while the MGs still existed
+  (proves the OIDC SP holds policyAssignments read+delete at MG scope).
+- **Phase 2 AZ SWEEP: success in about 10 minutes** - NO 55-minute hang, ZERO AADSTS / token /
+  az_relogin errors. `--force-deletion` (section 10.3 / C1) cleared the Databricks managed RG.
+- **Live Azure state after the run:** Databricks workspace gone; both landingzones workload RGs gone;
+  rg-amba-monitoring-001 gone; all 11 globaris-tree MGs deleted (only the tenant root remains);
+  0 policy assignments at every scope. The estate is genuinely, fully torn down.
+- **Phase 3 VERIFY:** VERIFY 2 (RGs), VERIFY 3 (Databricks), VERIFY 5 (KVs) clean; VERIFY 4 (MG
+  hierarchy removed) confirmed every MG gone. ONLY VERIFY 1 failed - on remnants that do not exist.
+
+The token-durability hypothesis under test (section 3 of the pre-clearance) PASSED. The teardown
+objective was fully met and live-verified. The red is a completion-gate defect, not a teardown or
+auth-durability failure.
+
+### 11.2 The bug
+
+VERIFY 1 (and DISARM) iterate the 11 MG scopes and run `az policy assignment list --scope <mg>`.
+Phase 2 had just deleted those MGs. ARM evaluates RBAC on the scope BEFORE confirming the scope
+exists, so a policy read on a deleted MG returns HTTP-403 `AuthorizationFailed: ... does not have
+authorization to perform action 'Microsoft.Authorization/policyAssignments/read' over scope
+'.../managementGroups/<mg>' or the scope is invalid. ... please refresh your credentials.`
+`is_auth_error` matches that (the `credential` token catches the "refresh your credentials" tail), so
+VERIFY 1's `elif is_auth_error` branch failed loud for all 11 gone MGs. It is NOT a dead token and NOT
+a real permission gap - it is a 403-shaped response for a policy read on a NONEXISTENT scope. The
+pre-hardening VERIFY 1 swallowed this ("clean, or MG no longer exists"); the correct auth-fail-loud
+hardening (section 9.4) now over-catches this one benign case. VERIFY 1 and VERIFY 4 are structurally
+contradictory in remove_mg_hierarchy=true mode - VERIFY 4 requires the MGs gone, VERIFY 1 then cannot
+read them.
+
+### 11.3 The ruling (implemented by DevSecOps - see 10.2 and 10.4, and ADR-054 point 11)
+
+1. **MG-existence gate in BOTH loops (VERIFY 1 and DISARM), not a matcher change.** Probe
+   `az account management-group show --name <mg>` first: it returns a CLEAN non-auth HTTP-404
+   `ManagementGroupNotFound` on a deleted MG (proven - VERIFY 4 and Phase-2 step-4 use this exact
+   oracle and both reported every MG gone in this same run). Branch: show succeeds -> list with
+   auth-fail-loud unchanged; show fails + is_auth_error -> fail loud; show fails + not is_auth_error ->
+   MG gone, skip clean.
+2. **DISARM is affected identically and this is load-bearing for attempt 4.** DISARM passed this run
+   only because it runs FIRST, when MGs were live. Attempt 4 runs against the already-empty estate, so
+   DISARM's per-MG policy list hits the deleted-scope 403 and, ungated, fails loud at Phase 0 before
+   VERIFY runs. Fixing VERIFY 1 alone leaves attempt 4 red. The DISARM header comment claiming a
+   deleted-MG list returns "a genuine NotFound" is wrong and must be corrected.
+3. **`is_auth_error` STAYS AS-IS.** AuthorizationFailed / "refresh your credentials" CAN be a real
+   symptom; at a LIVE scope it must keep failing loud. The disambiguation is scope existence, resolved
+   by the gate, not by loosening the classifier (which would re-open a swallow bug).
+4. **Attempt 4 goes green** with the gate in both loops: every MG `show` returns NotFound -> both
+   loops skip; Phase 2 is a near-no-op (its step-4 gate already handles gone MGs; RG/KV/Databricks
+   lists over the still-present subscriptions succeed with zero rows); VERIFY 4 confirms gone; VERIFY
+   2/3/5 clean -> Phase 3 green.
+
+### 11.4 4-attempt bar (architect recommendation; the user decides)
+
+Recommend NOT counting run 29749656053 against the bar: the estate was fully and live-verifiably torn
+down with zero manual steps, the token-durability fix passed cleanly, and the red is a new,
+benign, post-success verify-gate class distinct from attempt 1 (F1 cascade - destroyed nothing) and
+attempt 2 (token death mid-sweep - destroyed nothing); each retry has narrowed the failure class
+(LESSON 59). Candid counter-argument: by the design's own bar ("green Phase 3 IS success") Phase 3 was
+red - attempt 4 (post-fix, empty estate) is the confirmation run that must produce the green Phase 3.

@@ -10,7 +10,58 @@
 > scripts, .github/workflows/teardown.yml.
 > **Last updated:** 2026-07-20
 
-**One-line verdict: GO-CONDITIONAL.** The token-durability fix (ADR-054 amendment) is code-review
+---
+
+## OUTCOME - run 29749656053 (this dispatch): teardown SUCCEEDED; workflow-red is a VERIFY 1 false-positive
+
+The dispatch ran (mode=az-sweep, remove_mg_hierarchy=true, feature/teardown-redesign) with C1(a)
+applied (`--force-deletion` in step 1). The pre-clearance's central hypothesis PASSED:
+
+- **Phase 0 DISARM: success** (cleared every MG-scope policy assignment while MGs still existed).
+- **Phase 2 AZ SWEEP: success in about 10 minutes** - the section-3 PASS bars all met: NO AADSTS /
+  "valid time range" / token / az_relogin error anywhere (3.a PASS), the reconcile completed under the
+  30-minute ceiling (3.b PASS), the fresh OIDC assertion minted inside the job (3.c PASS). C1 held -
+  `--force-deletion` cleared the Databricks managed RG (2.3 closed).
+- **Live estate after the run:** Databricks workspace gone, both landingzones workload RGs gone,
+  rg-amba-monitoring-001 gone, all 11 globaris-tree MGs deleted (only tenant root remains), 0 policy
+  assignments at every scope. Genuinely, fully torn down (live-verified).
+- **Phase 3 VERIFY:** VERIFY 2/3/4/5 clean/consistent-with-clean; ONLY VERIFY 1 failed.
+
+**The failure is a benign VERIFY 1 false-positive, NOT the section-4.2 auth-class STOP.** VERIFY 1
+runs `az policy assignment list --scope <mg>` on the 11 MGs Phase 2 had just deleted; ARM returns a
+403 `AuthorizationFailed ... or the scope is invalid ... refresh your credentials`, which
+`is_auth_error` matches (via the "credentials" tail) and VERIFY 1 wrongly treated as a dead token. It
+is a deleted-scope response, not an auth-durability failure. The token-durability mechanism this
+pre-clearance existed to test did NOT fail - it worked. Full disposition + fix ruling: ADR-054
+point 11 and docs/teardown-redesign.md section 11 (fix = MG-existence gate in VERIFY 1 AND DISARM).
+
+**This does NOT trigger the section-4.2 "diagnose before attempt 4" auth-STOP** (that STOP is for the
+durability fix NOT holding; it held). It IS routed to the architect per the mandate, and the
+disposition is issued (above). Architect recommendation on the 4-attempt bar: do NOT count this as a
+teardown failure (estate fully torn down and live-verified; a new benign verify-gate class distinct
+from attempts 1-2). The user decides. See section 11.4 of the redesign doc for the reasoned
+recommendation and the candid counter-argument.
+
+### Attempt-4 bar (post-fix confirmation run)
+
+Attempt 4 re-dispatches the SAME inputs after the MG-existence-gate fix lands in teardown-disarm.sh
+AND teardown-verify.sh (both loops - fixing only VERIFY leaves attempt 4 failing at Phase 0 DISARM,
+which on an already-empty estate hits the identical deleted-scope 403). It runs against an
+already-empty estate, so DISARM and Phase 2 are near-no-ops.
+
+- **PASS (the required outcome):** every MG `show` returns NotFound -> DISARM and VERIFY 1 skip each
+  scope cleanly; Phase 2 step-4 (already gated) skips gone MGs; RG/KV/Databricks lists over the
+  still-present subscriptions succeed with zero rows; VERIFY 4 confirms every MG gone -> **Phase 3
+  GREEN**. This green run is the confirmation the design's "green Phase 3 IS success" bar demands.
+- **STOP:** any auth-classified fail at DISARM / Phase 2 / VERIFY that is NOT a deleted-MG `show`
+  NotFound (i.e. a genuine dead token or transport error) - that would be a real auth-durability
+  regression; diagnose, do not blind re-dispatch.
+- The fix requires a focused DevSecOps change to two scripts + a code-review re-approval before
+  attempt 4 (mirrors the C1(a) surgical-change-plus-focused-review pattern from section 6).
+
+---
+
+**One-line verdict (original dispatch): GO-CONDITIONAL.** The token-durability fix (ADR-054 amendment) is code-review
 APPROVED and sound to LIVE-test, but a current-docs sweep found a stale design premise that will very
 likely fail this run as-is: **an Azure Databricks workspace delete no longer self-cleans its managed
 resource group** (retention is now the default; force deletion is required). Condition **C1** below must
