@@ -1,27 +1,69 @@
 # .github/workflows/teardown.yml
-# Purpose: Manual, guarded teardown of ONE root or the WHOLE environment (reverse order).
-# Section: 10 — Pipeline & Tooling (ADR-019, OQ-012/OQ-013).
-# Last updated: 2026-07-16
+# Purpose: Manual, guarded, RELIABLE end-to-end teardown of the whole environment or one
+#          root - zero manual deletion (ADR-054 / docs/teardown-redesign.md).
+# Section: 10 - Pipeline & Tooling (ADR-019, ADR-054, OQ-012/OQ-013).
+# Last updated: 2026-07-19
 #
 # Guards (destroy is irreversible):
 #   1. `confirm` must be typed exactly as `destroy` (a cheap pre-check before any login).
-#   2. Every destroy job runs in the `production-destroy` GitHub Environment (required reviewer).
-# Scope (OQ-012): default tears down the 9 workload/platform roots ONLY and KEEPS the
-#   bootstrap state backend + OIDC app, so redeploy is immediate. include_bootstrap=true
-#   surfaces a MANUAL scorched-earth runbook (the SP can't delete its own OIDC app, and the
-#   state-backend RG name is non-deterministic — LESSON 18 gap).
+#   2. `mode=az-sweep` requires `target=all` - az-sweep is a whole-estate fallback (Phase
+#      0/2/3 are target=all only, Phase 1 is mode=terraform only), so az-sweep + a
+#      single-root target would run NOTHING and still report green. Rejected before login.
+#   3. Every destructive job runs in the `production-destroy` GitHub Environment (required
+#      reviewer) - this is also the ONLY federated credential trust configured for these
+#      operations (bootstrap/identity.tf), so it doubles as an OIDC auth requirement.
 #
-# Order = reverse of deploy.yml: synthetic -> spokes -> {connectivity,security} -> management
-#   -> management-groups ; identity before management-groups. terraform destroy keeps state
-#   consistent for clean re-apply. (Brute-force `az group delete` for stuck destroys is a
-#   documented refinement — see docs/cicd-deploy-teardown.md §6.)
+# Four-phase design (ADR-054, full fix-spec docs/teardown-redesign.md), fixing 4 root causes
+# from an earlier E2E failure that forced manual deletion:
+#   Phase 0 - DISARM   (scripts/teardown-disarm.sh)   - az, always, first, target=all only.
+#             Deletes every MG-scope policy ASSIGNMENT across the globaris tree BEFORE any
+#             resource deletion, so DINE remediation cannot re-create resources mid-sweep
+#             (fixes F3 - the rg-amba-monitoring-001 resurrection loop).
+#   Phase 1 - DESTROY  (terraform, per root, incl. synthetic) - mode=terraform only, reverse
+#             order. `needs` is for ORDERING ONLY; every root job's `if:` uses `!cancelled()`
+#             (NOT `!failure()`), so one root's failure never cascade-skips the others
+#             (fixes F1). `synthetic` IS a real root - synthetic/*.tf define real resources
+#             (RGs, red-team ACA jobs, cost-pattern VM/storage) gated behind
+#             `var.enable_synthetic_workload` (currently false) - it is hardened with the
+#             same `!cancelled()` fix as every other root, not deleted from the graph; the F1
+#             fix is the resilience fix, not root removal. `_tf-root.yml` also gained a
+#             `terraform state list` pre-step that no-ops (exit 0) when state is empty/absent,
+#             so an undeployed/already-emptied root (including a currently-inert synthetic)
+#             can never even attempt a failing destroy.
+#   Phase 2 - AZ SWEEP (scripts/teardown-az-sweep.sh) - az, target=all only, both modes.
+#             Fallback for mode=az-sweep (state gone, fixes F4) AND a remnant-catch pass
+#             after Phase 1 in mode=terraform. Databricks workspace-delete cascade (never
+#             `az group delete` the RP-managed RG directly - deny-assignment, fixes F2),
+#             orphaned-RG naming-pattern sweep, KV soft-delete/purge, and (gated on
+#             `remove_mg_hierarchy`) bottom-up MG-hierarchy removal for a clean redeploy
+#             slate (ADR-054 section 5 - subs are only re-parented to the tenant root, never
+#             deleted).
+#   Phase 3 - VERIFY   (scripts/teardown-verify.sh)   - az, always, last, target=all only.
+#             FAILS LOUDLY (non-zero) if any estate remnant remains. A green Phase 3 IS the
+#             definition of "teardown succeeded E2E" - never a silent half-teardown.
+#
+# Scope (OQ-012, unchanged): default tears down the 9 workload/platform roots ONLY and KEEPS
+#   the bootstrap state backend + OIDC app, so redeploy is immediate. include_bootstrap=true
+#   surfaces a MANUAL scorched-earth runbook (the SP can't delete its own OIDC app, and the
+#   state-backend RG name is non-deterministic - LESSON 18 gap).
+# Scope note (ADR-054): Phase 0/2/3 (disarm/az-sweep/verify) only run for target=all - they
+#   are whole-estate operations (MG-scope policy disarm, RG naming-pattern sweep, MG
+#   hierarchy removal) that would be destructive surprises on an ad hoc single-root destroy.
+#   A single-root destroy (target != all) runs ONLY that root's Phase 1 terraform-destroy,
+#   unaffected by the new phases - the same behavior as before this redesign, plus the
+#   state-empty resilience fix in `_tf-root.yml` (which applies universally).
+#
+# Order = reverse of deploy.yml: synthetic -> spokes -> {connectivity,security} ->
+#   management -> management-groups ; identity before management-groups. deploy.yml applies
+#   synthetic LAST (after all 5 spokes, ordering hygiene only - see deploy.yml's comment),
+#   so teardown destroys it FIRST. terraform destroy keeps state consistent for clean re-apply.
 name: Teardown (manual)
 
 on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Root to destroy, or 'all' for the whole environment (reverse order)"
+        description: "Root to destroy, or 'all' for the whole environment (reverse order). Phase 0/2/3 (disarm/az-sweep/verify, ADR-054) only run for target=all."
         type: choice
         default: all
         options:
@@ -37,12 +79,23 @@ on:
           - landing-zones/bank-app-p1
           - landing-zones/bank-data-p1
           - synthetic
+      mode:
+        description: "terraform = state intact (Phase 1 primary reverse-order destroy). az-sweep = state gone (Phase 1 skipped, Phase 2 az fallback does the work). DISARM (0) and VERIFY (3) always run for target=all, in both modes."
+        type: choice
+        default: terraform
+        options:
+          - terraform
+          - az-sweep
       confirm:
         description: "Type 'destroy' to confirm. Anything else aborts before any login."
         type: string
         default: ""
       include_bootstrap:
-        description: "Also tear down the state backend + OIDC app (scorched earth). Default false."
+        description: "Also tear down the state backend + OIDC app (scorched earth, manual runbook). Default false."
+        type: boolean
+        default: false
+      remove_mg_hierarchy:
+        description: "Phase 2: move the 5 subscriptions to the tenant root and delete the globaris MG tree bottom-up (ADR-054 section 5 - required for a clean redeploy against empty state; subs are preserved, only re-parented). Default false - set true explicitly at dispatch time for a full-estate teardown."
         type: boolean
         default: false
 
@@ -60,17 +113,62 @@ jobs:
         env:
           CONFIRM: ${{ inputs.confirm }}
           TARGET: ${{ inputs.target }}
+          MODE: ${{ inputs.mode }}
           INCLUDE_BOOTSTRAP: ${{ inputs.include_bootstrap }}
+          REMOVE_MG_HIERARCHY: ${{ inputs.remove_mg_hierarchy }}
         run: |
           if [ "$CONFIRM" != "destroy" ]; then
             echo "::error::'confirm' must be exactly 'destroy' to proceed. Aborting."
             exit 1
           fi
-          echo "Confirmed. target=$TARGET include_bootstrap=$INCLUDE_BOOTSTRAP"
+          # Reject mode=az-sweep with a single-root target: Phase 0/2/3 (disarm/az-sweep/
+          # verify) only run for target=all (whole-estate operations) and Phase 1 root jobs
+          # only run for mode=terraform, so mode=az-sweep + target!=all would run NOTHING
+          # and still report green - the exact "green means nothing happened" anti-pattern
+          # this redesign exists to eliminate. az-sweep is a whole-estate fallback; a
+          # single-root ad hoc destroy must use mode=terraform.
+          if [ "$MODE" = "az-sweep" ] && [ "$TARGET" != "all" ]; then
+            echo "::error::mode=az-sweep requires target=all. az-sweep (Phase 2 fallback + Phase 0 disarm + Phase 3 verify) is a whole-estate operation and does not run for a single-root target - dispatching this combination would do nothing and still report green. For a single-root destroy use mode=terraform (the default)."
+            exit 1
+          fi
+          echo "Confirmed. target=$TARGET mode=$MODE include_bootstrap=$INCLUDE_BOOTSTRAP remove_mg_hierarchy=$REMOVE_MG_HIERARCHY"
 
-  synthetic:
+  # Phase 0 - DISARM (ADR-054). Runs first, before any resource deletion, so DINE
+  # remediation cannot resurrect anything Phase 1/2 delete. target=all only (see header).
+  disarm:
+    name: "Phase 0 - DISARM (MG-scope policy assignments)"
     needs: [guard]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'synthetic') }}
+    if: ${{ !cancelled() && needs.guard.result == 'success' && inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    environment: production-destroy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Disarm all MG-scope policy assignments
+        run: bash scripts/teardown-disarm.sh
+
+  # Phase 1 - synthetic. A REAL root (synthetic/*.tf define real resources - RGs, red-team
+  # ACA jobs, cost-pattern VM/storage, etc. - gated behind var.enable_synthetic_workload,
+  # currently false). deploy.yml applies it LAST (needs: the 5 spokes - "ordering hygiene",
+  # it does not actually consume their outputs), so teardown destroys it FIRST, mirroring
+  # that order. Hardened with the SAME resilience fix as every other root (`!cancelled()` +
+  # `_tf-root.yml`'s state-empty no-op) rather than deleted - the F1 fix works via
+  # resilience, not via removing a root from the graph. This closes the correctness gap a
+  # deleted job would leave: a populated synthetic root (flag flipped true and applied) must
+  # get a real `terraform destroy` so its Terraform state is retired cleanly, not just have
+  # its RGs caught out-of-band by the Phase 2 naming-pattern sweep (which would leave
+  # synthetic's own state drifted - "exists in state, gone in Azure").
+  synthetic:
+    needs: [guard, disarm]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'synthetic') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: synthetic
@@ -80,8 +178,8 @@ jobs:
     secrets: inherit
 
   corp-a1:
-    needs: [guard, synthetic]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a1') }}
+    needs: [guard, disarm, synthetic]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/corp-a1
@@ -91,8 +189,8 @@ jobs:
     secrets: inherit
 
   corp-a2:
-    needs: [guard, synthetic]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a2') }}
+    needs: [guard, disarm, synthetic]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a2') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/corp-a2
@@ -102,8 +200,8 @@ jobs:
     secrets: inherit
 
   online-p1:
-    needs: [guard, synthetic]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/online-p1') }}
+    needs: [guard, disarm, synthetic]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/online-p1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/online-p1
@@ -113,8 +211,8 @@ jobs:
     secrets: inherit
 
   bank-app-p1:
-    needs: [guard, synthetic]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/bank-app-p1') }}
+    needs: [guard, disarm, synthetic]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/bank-app-p1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/bank-app-p1
@@ -124,8 +222,8 @@ jobs:
     secrets: inherit
 
   bank-data-p1:
-    needs: [guard, synthetic]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'landing-zones/bank-data-p1') }}
+    needs: [guard, disarm, synthetic]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/bank-data-p1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/bank-data-p1
@@ -135,8 +233,8 @@ jobs:
     secrets: inherit
 
   connectivity:
-    needs: [guard, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/connectivity') }}
+    needs: [guard, disarm, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/connectivity') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/connectivity
@@ -146,8 +244,8 @@ jobs:
     secrets: inherit
 
   security:
-    needs: [guard, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/security') }}
+    needs: [guard, disarm, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/security') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/security
@@ -157,8 +255,8 @@ jobs:
     secrets: inherit
 
   identity:
-    needs: [guard]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/identity') }}
+    needs: [guard, disarm]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/identity') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/identity
@@ -168,8 +266,8 @@ jobs:
     secrets: inherit
 
   management:
-    needs: [guard, connectivity, security]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/management') }}
+    needs: [guard, disarm, connectivity, security]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/management') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/management
@@ -179,8 +277,8 @@ jobs:
     secrets: inherit
 
   management-groups:
-    needs: [guard, management, identity]
-    if: ${{ !failure() && !cancelled() && (inputs.target == 'all' || inputs.target == 'platform/management-groups') }}
+    needs: [guard, disarm, management, identity]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/management-groups') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/management-groups
@@ -189,13 +287,75 @@ jobs:
       gh_environment: production-destroy
     secrets: inherit
 
+  # Phase 2 - AZ SWEEP (ADR-054). Fallback for mode=az-sweep (state gone) AND a
+  # remnant-catch pass after Phase 1 in mode=terraform. `needs` lists every Phase 1 job for
+  # ORDERING only (run after them) - `!cancelled()` means none of their individual outcomes
+  # gates this job, only guard's confirm check does. target=all only (see header).
+  az-sweep:
+    name: "Phase 2 - AZ SWEEP (fallback / remnant-catch)"
+    needs: [guard, disarm, synthetic, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1, connectivity, security, identity, management, management-groups]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    environment: production-destroy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: AZ sweep (Databricks cascade, RG naming-pattern delete, KV purge, MG hierarchy)
+        env:
+          MANAGEMENT_SUBSCRIPTION_ID: ${{ secrets.MANAGEMENT_SUBSCRIPTION_ID }}
+          CONNECTIVITY_SUBSCRIPTION_ID: ${{ secrets.CONNECTIVITY_SUBSCRIPTION_ID }}
+          IDENTITY_SUBSCRIPTION_ID: ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
+          SECURITY_SUBSCRIPTION_ID: ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
+          LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
+          REMOVE_MG_HIERARCHY: ${{ inputs.remove_mg_hierarchy }}
+        run: bash scripts/teardown-az-sweep.sh
+
+  # Phase 3 - VERIFY (ADR-054). Always last, always runs for target=all. FAILS the run if
+  # any estate remnant is found - a green Phase 3 is the definition of "teardown succeeded
+  # E2E". Read-only (no deletions) but still needs the production-destroy environment for
+  # OIDC (the only federated credential trust configured for this class of operation).
+  verify:
+    name: "Phase 3 - VERIFY (loud completion check)"
+    needs: [guard, disarm, synthetic, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1, connectivity, security, identity, management, management-groups, az-sweep]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    environment: production-destroy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify zero estate remnants (fails loudly if any remain)
+        env:
+          MANAGEMENT_SUBSCRIPTION_ID: ${{ secrets.MANAGEMENT_SUBSCRIPTION_ID }}
+          CONNECTIVITY_SUBSCRIPTION_ID: ${{ secrets.CONNECTIVITY_SUBSCRIPTION_ID }}
+          IDENTITY_SUBSCRIPTION_ID: ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
+          SECURITY_SUBSCRIPTION_ID: ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
+          LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
+          REMOVE_MG_HIERARCHY: ${{ inputs.remove_mg_hierarchy }}
+        run: bash scripts/teardown-verify.sh
+
   # Scorched earth (OQ-012 = false by default). The SP cannot delete its own OIDC app
   # (needs Entra/Graph rights, not ARM Owner) and the state-backend RG name is
-  # non-deterministic (LESSON 18 gap) — so this emits the manual runbook rather than a
-  # blind delete. Only runs for target=all with include_bootstrap=true.
+  # non-deterministic (LESSON 18 gap) - so this emits the manual runbook rather than a
+  # blind delete. Only runs for target=all with include_bootstrap=true, after Phase 3.
   teardown-bootstrap:
-    needs: [guard, management-groups]
-    if: ${{ !failure() && !cancelled() && inputs.include_bootstrap && inputs.target == 'all' }}
+    needs: [guard, verify]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && inputs.include_bootstrap && inputs.target == 'all' }}
     runs-on: ubuntu-latest
     environment: production-destroy
     steps:

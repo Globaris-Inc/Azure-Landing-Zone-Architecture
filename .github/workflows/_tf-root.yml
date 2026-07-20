@@ -21,6 +21,12 @@
 # supported default (manage_runner_ip: false) is to keep the runner CIDR/IP in bootstrap
 # `ip_allow_list` as a documented PREREQUISITE (docs/cicd-deploy-teardown.md §8). See that
 # input's docs — single-root only; the default_action flip races on target=all.
+#
+# Destroy resilience (ADR-054 / docs/teardown-redesign.md, F1 fix): action=destroy runs a
+# `terraform state list` pre-step first and skips the actual destroy (exit 0) when state is
+# empty or absent, so a never-deployed or already-emptied root can never fail. This is the
+# root-level half of the teardown redesign; the workflow-level half (no cascade-skip on a
+# sibling root's failure) lives in teardown.yml.
 name: _terraform-root
 
 on:
@@ -266,8 +272,34 @@ jobs:
         working-directory: ${{ inputs.root }}
         run: terraform apply -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve
 
-      - name: Terraform Destroy
+      # Destroy resilience pre-step (F1 core fix, ADR-054 / docs/teardown-redesign.md
+      # section 4). A never-deployed or already-emptied root has no state, so a plain
+      # `terraform destroy` there either errors or has nothing to do. Before this fix that
+      # was harmless in isolation, but teardown.yml's blanket `if: !failure()` turned ONE
+      # such error into a whole-run cascade-skip of every other root (F1). The workflow-level
+      # fix is switching to `!cancelled()`; this step is the matching root-level fix so an
+      # empty root can never even ATTEMPT (and fail) a no-op destroy: `terraform state list`
+      # empty or erroring (no state) means skip destroy entirely and exit 0.
+      - name: Check Terraform state (destroy resilience)
+        id: state_check
         if: ${{ inputs.action == 'destroy' }}
+        working-directory: ${{ inputs.root }}
+        run: |
+          set +e
+          state_list="$(terraform state list 2>&1)"
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ] || [ -z "$state_list" ]; then
+            echo "No state (or state list errored) for root '${{ inputs.root }}' - nothing to destroy. Skipping destroy (idempotent no-op)."
+            echo "has_state=false" >> "$GITHUB_OUTPUT"
+          else
+            count="$(printf '%s\n' "$state_list" | grep -c . || true)"
+            echo "Found $count resource(s) in state for root '${{ inputs.root }}'."
+            echo "has_state=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Terraform Destroy
+        if: ${{ inputs.action == 'destroy' && steps.state_check.outputs.has_state == 'true' }}
         working-directory: ${{ inputs.root }}
         run: terraform destroy -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve
 
