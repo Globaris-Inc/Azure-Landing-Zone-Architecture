@@ -37,6 +37,69 @@
 
 <!-- Newest at the top. -->
 
+### ADR-056: Branch topology and lifecycle - feature -> integration (banking) -> main, one workstream per branch, delete-on-merge after clearance, and MANDATORY verification of branch state against origin/* refs (never trust local pointers)
+
+- **Date:** 2026-07-20
+- **Section:** 10 (Pipeline & Tooling) / cross-cutting process
+- **Status:** Accepted (architect; process ADR - binds every role)
+- **Decision makers:** user (repeated stale-local-ref confusion prompted it), claude (architect)
+
+**Context:**
+
+The build runs across three long-lived doc/code lines - short-lived `feature/*` branches, the `banking`
+integration line (the real build: B1-B9 + O&M phase 1 + security + teardown redesign, merged via PR #39),
+and `main` (now fully current via PR #31; `main..banking` is empty). During the ADR-055 pre-clearance a
+prior agent was repeatedly misled because LOCAL branch pointers were stale and did not reflect the remote:
+local refs suggested reconciliations were outstanding that were in fact already merged. The working state had
+to be cleaned up and re-verified against the remote before any real work could proceed. This is a recurring,
+expensive failure mode (agents re-derive an incorrect estate/branch picture from stale local git and then
+act on it), and it directly threatens the user's hard bar (4 straight deploy failures moves the project off
+Claude Code) because a wrong branch picture can send an apply from the wrong code.
+
+Nothing in the ADR log had codified the branch flow or the "verify against origin/*" rule, so each agent
+improvised. This ADR makes the topology and the verification discipline explicit.
+
+**Decision:**
+
+1. **Branch flow is `feature/* -> banking (integration) -> main`.** Feature work is done on a dedicated
+   `feature/<workstream>` branch, flows into `banking` for integration, and `banking` reconciles to `main`.
+   Never propose a commit straight to `main` (memory: dev-and-feature-branch-strategy).
+2. **One workstream per branch.** A `feature/*` branch carries exactly one coherent workstream (e.g.
+   `feature/adr-055-oidc-durability`, `feature/teardown-redesign`). Do not pile unrelated changes onto an
+   in-flight feature branch.
+3. **Delete-on-merge AFTER clearance.** A `feature/*` branch is deleted once it has merged and the merge is
+   cleared (reviewer approve + any pre-clearance/QA gate its change requires). Deleting before clearance
+   loses the recovery point; keeping stale merged branches around is what breeds the local-pointer confusion.
+4. **MANDATORY: verify branch/estate state against `origin/*` refs, NEVER local pointers.** Before any agent
+   reasons about "what is on branch X" or "is Y merged", it MUST consult the REMOTE-tracking refs
+   (`git fetch` then read `origin/<branch>`, `git log origin/main..origin/banking`, `gh` for PR state) and
+   treat local branch pointers as UNTRUSTED until reconciled. A local pointer that disagrees with `origin/*`
+   is stale by default. When a task hand-off supplies remote-verified ground-truth facts (tip commits,
+   which line contains what), those SUPERSEDE anything the agent infers from local git.
+5. **Corollary for deploys:** because an apply runs the code on the dispatched ref, confirming the ref
+   against `origin/*` is part of the pre-clearance gate - a plan/apply must never be dispatched from a branch
+   whose remote state the agent has not verified.
+
+**Alternatives considered:**
+- Trunk-based single-branch flow - rejected: the build's role hand-offs (architect -> engineer/devsecops ->
+  reviewer) and batched per-iteration reviews need an integration line distinct from `main`, and feature
+  isolation is what lets a workstream be reviewed and cleared as a unit.
+- Rely on local branch hygiene / agent memory of git state - rejected: this is the exact failure this ADR
+  exists to stop. Local pointers drift; only `origin/*` is authoritative.
+- Long-lived feature branches - rejected: they accumulate cross-workstream drift and are the classic source
+  of stale-ref confusion; one workstream per branch, delete-on-merge keeps the set small and legible.
+
+**Consequences:**
+- Positive: a single documented topology every role follows; the stale-local-ref failure mode is named and
+  guarded (verify against `origin/*`); deploys cannot be dispatched from an unverified ref; the branch set
+  stays small (delete-on-merge).
+- Negative / trade-offs: an explicit `git fetch` + `origin/*` check is now a required step before branch/
+  merge reasoning (small, cheap); delete-on-merge means a merged branch is gone once cleared (the merge
+  commit + `main`/`banking` history are the recovery point, which is the intent).
+- Follow-ups required: none code-side (process ADR). It binds the architect pre-clearance gate (point 5) and
+  every agent's branch reasoning (point 4). Consistent with the propose-commits-not-run rule (ADR / memory:
+  propose-commits-dont-run) - this ADR does not change WHO commits, only how branch state is established.
+
 ### ADR-055: Durable greenfield fix for OIDC token expiry on the identity root's 1-3h AADDS create + trailing Graph ops (resolves OQ-022) - refresh-enabled provider OIDC (explicit ARM_OIDC_REQUEST_URL/TOKEN export) PLUS decouple the multi-hour create from the azuread Graph phase via a single umbrella enable-flag two-pass, NOT a root split and NOT a stored long-lived credential
 
 - **Date:** 2026-07-20

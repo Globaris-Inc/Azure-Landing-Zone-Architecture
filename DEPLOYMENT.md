@@ -195,34 +195,42 @@ subjects (incl. both `environment:*`); the state SA is `default_action = Deny` w
 
 - **Creates:** the identity VNet (peered to the primary hub), **Entra Domain Services** (Standard managed
   domain, `identity_mode = "entra-ds"`), the identity **Recovery Services Vault**, PIM eligible assignments, and
-  **8 Conditional Access policies** (report-only; `geo_block` gated off by default, ADR-030 - so 7 of 8 create).
-- **Depends on:** 1 (MGs) + the primary-hub Secrets from step 3 for the peering. **Secrets:** identity sub ID,
-  the PIM/break-glass group object IDs, `HONEYPOT_USER_PRINCIPAL_NAME`; leave `AADDS_IMPORT_REPLICA_SET_ID`
+  **8 Conditional Access policies** (report-only; `geo_block` is enabled by default - ADR-030 resolved the
+  Graph 1040 root cause - so all 8 create, not 7 of 8).
+- **Depends on:** 1 (MGs, incl. the identity-MG `Deny-Public-IP` assignment the ADR-028 exemption targets by
+  literal ID) + the primary-hub Secrets from step 3 for the peering. **Secrets:** identity sub ID, the
+  PIM/break-glass group object IDs (optional - skip harmlessly if unset); leave `AADDS_IMPORT_REPLICA_SET_ID`
   **unset** on greenfield (the import block is a no-op - ADR-029).
 - **Pre-step:** the one-time manual DS SP + `AAD DC Administrators` group (§1.1).
-- **Run (greenfield TWO-PASS, ADR-055 Part 1 - `enable_conditional_access` defaults to `true` in code; this is
-  a tfvars OVERRIDE at dispatch time, NOT a code/default change):**
-  - **Pass 1:** `plan` then `apply` with an `enable_conditional_access=false` override. This creates the
+- **Run (greenfield TWO-PASS, ADR-055 - `enable_conditional_access` defaults to `true` in code. The per-run
+  override is the `Deploy (manual)` workflow_dispatch input `enable_conditional_access_override`, wired ONLY
+  into the identity job, NOT a tfvars or code change. Full step-by-step procedure, pre-dispatch checklist
+  mapped to every GO-CONDITIONAL bar, plan-scan gates, recovery paths, live-monitoring rule, and a
+  STOP/rollback matrix: [`docs/identity-two-pass-dispatch-runbook.md`](docs/identity-two-pass-dispatch-runbook.md).
+  Summary:**
+  - **Pass 1:** `plan` then `apply` with `enable_conditional_access_override=false`. This creates the
     identity VNet/NSG and the Entra DS managed domain as an azurerm-ONLY apply - no azuread Graph writes run
     at the tail, so the 1-3 hour create-wait has no trailing-Graph-op exposure even on a multi-hour create.
     Proven token-safe: azurerm re-mints a fresh OIDC assertion on every access-token acquisition, and Part 2's
     explicit `ARM_OIDC_REQUEST_URL` / `ARM_OIDC_REQUEST_TOKEN` export (`_tf-root.yml`, ADR-055) makes that
     refresh reliable for every root, not just this one.
-  - **Pass 1 recovery** (only if the create-wait itself times out, e.g. a slow DC2 / `AADDS104`): reinstate
-    ADR-029's config-driven `import {}` block for `azurerm_active_directory_domain_service.this[0]` (composite
-    ID `<domain resource ID>/initialReplicaSetId/<replica set GUID>`, GUID supplied by the operator per
-    ADR-029) and re-apply, still with `enable_conditional_access=false`. This is the canonical greenfield
-    recovery path, not a new mechanism.
-  - **Pass 2:** `apply` with `enable_conditional_access=true` (the default - dispatch again without the Pass-1
-    override). The domain already exists, so azurerm does a Read (seconds) and the azuread Conditional Access
-    writes (named location + CA-001..CA-008) run early in a short apply under a fresh, just-minted token.
-  - **Steady-state and every non-greenfield apply is exactly Pass 2 alone** (single apply, flag stays at its
-    default `true`) - the two-pass sequence is a GREENFIELD-ONLY runbook step, never a permanent workflow or
-    default change. ADR-029's untaint / force-unlock state-recovery paths (`deploy.yml`) still apply if either
-    pass is interrupted.
+  - **Pass 1 recovery** (only if the create-wait itself times out, e.g. a slow DC2 / `AADDS104`): either
+    `action=untaint` on `azurerm_active_directory_domain_service.this[0]` (the proven path, run
+    `29068343843`), or reinstate ADR-029's config-driven `import {}` block via the
+    `AADDS_IMPORT_REPLICA_SET_ID` Secret (composite ID `<domain resource ID>/initialReplicaSetId/<replica
+    set GUID>`, GUID supplied by the operator), and re-apply, still with
+    `enable_conditional_access_override=false`.
+  - **Pass 2:** `apply` with `enable_conditional_access_override=true`. The domain already exists, so azurerm
+    does a Read (seconds) and the azuread Conditional Access writes (named location + CA-001..CA-008 - 9
+    azuread resources + 1 `time_sleep` = 10 plan addresses) run early in a short apply under a fresh,
+    just-minted token.
+  - **Steady-state and every non-greenfield apply is exactly Pass 2 alone** (single apply,
+    `enable_conditional_access_override` left BLANK so the code default `true` applies) - the two-pass
+    sequence is a GREENFIELD-ONLY runbook step, never a permanent workflow or default change. `deploy.yml`'s
+    `untaint` / `force-unlock` state-recovery actions still apply if either pass is interrupted.
 - **Validate:** after Pass 1, managed domain `provisioningState: Succeeded` (no CA policies yet - expected,
-  since `enable_conditional_access=false`). After Pass 2, 7/8 CA policies present (as before; `geo_block` still
-  gated off by default, ADR-030).
+  since the flag is false). After Pass 2, all 8/8 CA policies present including `geo_block` (ADR-030
+  resolved; see the dispatch runbook §0 for the corrected plan-scan count).
 
 ### Step 5 - `platform/security`
 
