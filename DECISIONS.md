@@ -49,32 +49,42 @@
 **Context:**
 Today's teardown failed E2E and forced manual deletion - the user set a hard requirement that
 teardown be a reliable zero-manual CI/CD process. Four root causes: (F1) `needs: [..., synthetic]`
-+ `if: !failure()` let the never-deployed synthetic root's failed destroy cascade-skip every real
-root - the workflow destroyed nothing; (F2) terraform-destroy alone cannot finish the Databricks
-managed RG (RP deny-assignment - must delete the workspace to cascade), APIM/AKS slow deletes, KV
-purge-protection; (F3) MG-scope DINE policy assignments kept RE-REMEDIATING (recreated
-rg-amba-monitoring-001) during resource deletion; (F4) state was emptied for a fresh redeploy, so
-terraform-destroy can no longer finish the current half-destroy - no az fallback existed.
++ `if: !failure()` let the synthetic root's failed destroy (empty/absent state) cascade-skip every
+real root - the workflow destroyed nothing (`synthetic` IS a real root - `synthetic/*.tf` define
+real resources gated behind `var.enable_synthetic_workload`, currently false - the cascade was
+about the destroy failing against empty state, not about the root not existing); (F2)
+terraform-destroy alone cannot finish the Databricks managed RG (RP deny-assignment - must delete
+the workspace to cascade), APIM/AKS slow deletes, KV purge-protection; (F3) MG-scope DINE policy
+assignments kept RE-REMEDIATING (recreated rg-amba-monitoring-001) during resource deletion; (F4)
+state was emptied for a fresh redeploy, so terraform-destroy can no longer finish the current
+half-destroy - no az fallback existed.
 
 **Decision:**
 1. **Disarm the policy layer FIRST** (Phase 0, az, always): delete every MG-scope policy assignment
    (globaris root + all descendants; base ALZ + the 223 AMBA) before/independent of resource
    deletion, so DINE stops re-remediating. The single most important reordering (fixes F3).
-2. **No empty/undeployed root may cascade** (fixes F1): delete the synthetic job; `needs` for
-   ordering only; every root `if:` uses `!cancelled()` NOT `!failure()`; `_tf-root.yml` destroy
-   gets a pre-step that no-ops (exit 0) when `terraform state list` is empty/absent.
+2. **No empty/undeployed root may cascade** (fixes F1): `needs` for ordering only; every root
+   `if:` uses `!cancelled()` NOT `!failure()`; `_tf-root.yml` destroy gets a pre-step that no-ops
+   (exit 0) when `terraform state list` is empty/absent. `synthetic` stays in the Phase-1 graph,
+   hardened with this same fix - NOT deleted (corrected 2026-07-19, reviewer BLOCK: deleting a
+   real root's job would leave a future populated `synthetic` root's Terraform state undestroyed
+   and drifted; the resilience fix, not root removal, is what makes an empty root safe).
 3. **Two modes, one workflow** (fixes F4): a `mode` input - `terraform` (state intact, primary
    reverse-order destroy) and `az-sweep` (state gone, az fallback that deletes orphaned/re-
    remediated RGs, Databricks-workspace-cascade, KV soft-delete, MG-hierarchy removal). DISARM
-   (Phase 0) and VERIFY (Phase 3) run in both modes.
+   (Phase 0) and VERIFY (Phase 3) run in both modes, target=all only (a single-root target skips
+   the whole-estate phases); `mode=az-sweep` with a non-`all` target is rejected by the `guard` job
+   before login (it would otherwise run nothing and report green).
 4. **F2 handling:** Databricks = delete the WORKSPACE (never the managed RG directly - cascades);
    APIM/KV = provider purge features (APIM added at B4) + 360-min ceiling; KV purge-protected =
    soft-delete + redeploy recover (recover_soft_deleted_key_vaults).
-5. **Full MG-hierarchy teardown for the Wednesday redeploy** (remove_mg_hierarchy=true): subs are
-   reused, and a fresh avm-ptn-alz apply against EMPTY state collides on a live hierarchy; so the
-   az sweep moves subs to the tenant root and deletes the MGs bottom-up as the LAST step, giving
-   the fresh apply a clean slate. Rejected: terraform-import (heavy/fragile for a full ALZ tree)
-   and idempotent-reconcile (alz provider does not adopt pre-existing MGs into empty state).
+5. **Full MG-hierarchy teardown for the Wednesday redeploy, dispatched explicitly**
+   (`remove_mg_hierarchy` input, default **false** - a checked-in default that deletes the whole MG
+   tree is too much blast radius; the redeploy runbook passes `true` explicitly at dispatch): subs
+   are reused, and a fresh avm-ptn-alz apply against EMPTY state collides on a live hierarchy; so
+   the az sweep moves subs to the tenant root and deletes the MGs bottom-up as the LAST step,
+   giving the fresh apply a clean slate. Rejected: terraform-import (heavy/fragile for a full ALZ
+   tree) and idempotent-reconcile (alz provider does not adopt pre-existing MGs into empty state).
 6. **Loud verification** (Phase 3, always, last): the run FAILS on any remnant (policy assignments,
    workload/orphaned RGs, Databricks managed RGs, live MG tree). A green Phase 3 IS "teardown
    succeeded E2E"; no manual step for the default (non-bootstrap) scope.
@@ -99,6 +109,12 @@ terraform-destroy can no longer finish the current half-destroy - no az fallback
   resilience pre-step + the az disarm/sweep/verify scripts); use it immediately in `az-sweep` mode
   to finish today's half-destroy; keep the RG-naming patterns in sync with the estate; the
   include_bootstrap scorched-earth path stays manual by design (SP cannot self-delete its OIDC app).
+- Correction (2026-07-19, reviewer BLOCK on the DevSecOps implementation, applied before merge):
+  the initial implementation deleted the `synthetic` job entirely and set `remove_mg_hierarchy`
+  default to `true`, both since corrected in this ADR text and in docs/teardown-redesign.md -
+  `synthetic` is restored as a hardened Phase-1 job (point 2 above) and `remove_mg_hierarchy`
+  defaults to `false` (point 5 above). The `guard` az-sweep/target=all rejection (point 3) was
+  also added at this correction pass.
 
 ### ADR-053: Wave B9 security/compliance rulings + the B9-vs-B-R split principle - B9 does additive/Audit-first/net-new (CMK, PCI/SOC visibility, platform-MG Audit, OpenAI-guardrails Audit); B-R does enforcement (Deny-promotion) + live-network flips; most founding-B9 scope is already built
 

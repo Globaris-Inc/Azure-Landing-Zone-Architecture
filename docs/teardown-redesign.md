@@ -12,7 +12,7 @@
 
 | # | Failure | Root cause |
 |---|---|---|
-| F1 | **Workflow destroyed NOTHING** | `needs: [..., synthetic]` on every spoke + `if: ${{ !failure() ... }}`. The never-deployed `synthetic` root's destroy FAILED (empty/absent state), which put the run into `failure()` state, so `!failure()` evaluated FALSE on EVERY downstream job -> all skipped. One empty root cascade-skipped the entire teardown. |
+| F1 | **Workflow destroyed NOTHING** | `needs: [..., synthetic]` on every spoke + `if: ${{ !failure() ... }}`. `synthetic` is a real root (synthetic/*.tf define real resources - RGs, red-team ACA jobs, cost-pattern VM/storage - gated behind `var.enable_synthetic_workload`, currently false), so its destroy against empty/absent state FAILED, which put the run into `failure()` state, so `!failure()` evaluated FALSE on EVERY downstream job -> all skipped. One empty-state root cascade-skipped the entire teardown. Fix note (reviewer BLOCK, 2026-07-19): the original fix-spec below said to DELETE the `synthetic` job - that was corrected to HARDEN it instead (same `!cancelled()` + state-empty resilience fix as every other root), since `synthetic` is a real root that must retire its own Terraform state via a real destroy, not just have its RGs caught by the naming-pattern az-sweep (which would leave state drifted). |
 | F2 | terraform-destroy alone can't finish some resources | Databricks MANAGED RG carries an RP deny-assignment (cannot `az group delete` directly - must delete the WORKSPACE to cascade it); APIM/AKS are slow deletes; KV purge-protection blocks re-create by name. |
 | F3 | **Policy layer keeps RE-REMEDIATING** | MG-scope DINE policy ASSIGNMENTS (base ALZ Deploy-* + the 223 AMBA objects) stay live during resource deletion and RE-CREATE resources (rg-amba-monitoring-001 was re-remediated). Resource deletion races live remediation and loses. |
 | F4 | terraform-destroy can no longer help | State was cleaned to EMPTY (for a fresh redeploy), so `terraform destroy` sees nothing and cannot finish the CURRENT half-destroyed estate. No fallback existed. |
@@ -39,7 +39,16 @@
 
 New inputs on `teardown.yml`: `confirm` (unchanged, must equal `destroy`), `mode` (choice:
 `terraform` = state intact / primary; `az-sweep` = state gone / fallback; default `terraform`),
-`include_bootstrap` (unchanged), `remove_mg_hierarchy` (bool, default true - section 5).
+`include_bootstrap` (unchanged), `remove_mg_hierarchy` (bool, **default false** - section 5;
+implemented as false rather than true, a deliberate safety call: a checked-in default that
+silently deletes the whole MG tree on a plain dispatch is too much blast radius for a default -
+the runbook passes `remove_mg_hierarchy=true` explicitly at dispatch time for a full-estate
+teardown).
+
+**Guard:** `mode=az-sweep` requires `target=all`. Phase 0/2/3 only run for `target=all` and
+Phase 1 only runs for `mode=terraform`, so `mode=az-sweep` with a single-root `target` would run
+NOTHING and still report green - the guard job rejects this combination before any login
+(reviewer BLOCK, 2026-07-19).
 
 ### Phase 0 - DISARM (az, runs ALWAYS, first, both modes)
 
@@ -56,18 +65,27 @@ A single job after `guard`, `az`-based (works with or without state):
 
 ### Phase 1 - DESTROY (terraform primary; skipped when mode=az-sweep)
 
-Reverse-dependency-order terraform-destroy per root, with the F1 fix:
+Reverse-dependency-order terraform-destroy per root (INCLUDING `synthetic`), with the F1 fix:
 - **`needs` for ORDERING only; `if: ${{ !cancelled() && (mode == 'terraform') && (target == 'all' || target == '<root>') }}`** - NOTE: `!cancelled()` NOT `!failure()`, so a failed/no-op predecessor does NOT skip successors.
-- **DELETE the `synthetic` job entirely** (never deployed; not a real root). Remove `synthetic`
-  from every `needs`.
+- **`synthetic` stays a real Phase-1 job, hardened not deleted** (reviewer BLOCK correction,
+  2026-07-19): `synthetic/*.tf` define real resources (RGs, red-team ACA jobs, cost-pattern
+  VM/storage) gated behind `var.enable_synthetic_workload` (currently false) - it is a real
+  root, not a placeholder. The original diagnosis correctly identified that a never-deployed
+  root's failed destroy must not cascade-skip the run (F1), but the fix is the resilience fix
+  below (same `!cancelled()` + state-empty no-op as every other root), NOT removing the job -
+  deleting it would mean a future populated `synthetic` root (flag flipped true and applied)
+  never gets a real `terraform destroy`, leaving its Terraform state drifted against whatever
+  the Phase-2 naming-pattern az-sweep catches out-of-band. `synthetic` destroys FIRST (before
+  the 5 spokes), mirroring `deploy.yml`, which applies it LAST.
 - **`_tf-root.yml` destroy resilience (the core F1 fix):** a pre-step runs `terraform init` then
   `terraform state list`; if it errors (no state) or returns empty, echo "no state - nothing to
   destroy" and EXIT 0 (skip `terraform destroy`). An empty root can then NEVER fail. Applies to
-  every root, so a partially-deployed estate tears down cleanly.
-- Order (reverse of deploy): spokes (corp-a1/a2, online-p1, bank-app-p1, bank-data-p1) ->
-  {connectivity, security} -> identity -> management -> management-groups. management-groups LAST
-  (its assignments are already gone from Phase 0; terraform destroy now removes the policy DEFS +
-  MG hierarchy from state cleanly, or the `remove_mg_hierarchy` az step does it in Phase 2).
+  every root, so a partially-deployed estate (including an inert `synthetic`) tears down cleanly.
+- Order (reverse of deploy): synthetic -> spokes (corp-a1/a2, online-p1, bank-app-p1,
+  bank-data-p1) -> {connectivity, security} -> identity -> management -> management-groups.
+  management-groups LAST (its assignments are already gone from Phase 0; terraform destroy now
+  removes the policy DEFS + MG hierarchy from state cleanly, or the `remove_mg_hierarchy` az step
+  does it in Phase 2).
 - **F2 handling inside terraform-destroy:**
   - Databricks: `terraform destroy` deletes the WORKSPACE resource, which cascades the RP-managed
     RG cleanup (the deny-assignment blocks direct RG delete but not workspace-triggered cleanup).
@@ -110,14 +128,21 @@ the default (non-bootstrap) scope.
 
 ---
 
-## 4. The synthetic/empty-state no-cascade fix (F1) - explicit
+## 4. The empty-state no-cascade fix (F1) - explicit
 
-The single highest-value change, stated precisely for the implementer:
-1. Delete the `synthetic` job; remove `synthetic` from all `needs`.
-2. Change every root job `if:` from `!failure()` to `!cancelled()` (predecessor failure must not
-   skip successors; `needs` still enforces ordering).
-3. Add the `_tf-root.yml` destroy pre-step: `terraform state list` empty/error -> exit 0 skip.
-Any one of these alone helps; all three together make an empty/partial estate tear down reliably.
+The single highest-value change, stated precisely for the implementer (corrected 2026-07-19 -
+reviewer BLOCK: `synthetic` is a real root and stays in the graph, hardened not removed):
+1. Change every root job `if:` from `!failure()` to `!cancelled()` (predecessor failure must not
+   skip successors; `needs` still enforces ordering). This applies to EVERY root, including
+   `synthetic` - it is NOT deleted from the graph.
+2. Add the `_tf-root.yml` destroy pre-step: `terraform state list` empty/error -> exit 0 skip.
+   This is what makes a currently-inert `synthetic` (or any other undeployed/emptied root) safe
+   to keep in the graph - its destroy simply no-ops instead of failing.
+3. `needs` is for ordering only, never for gating on a predecessor's success (see the
+   `disarm`-is-a-genuine-prerequisite exception in `teardown.yml`, which IS gated on success -
+   that is a real causal dependency, not the F1 anti-pattern).
+Any one of these alone helps; all three together make an empty/partial estate (including an
+undeployed `synthetic`) tear down reliably without needing to remove any root from the graph.
 
 ---
 
@@ -125,11 +150,13 @@ Any one of these alone helps; all three together make an empty/partial estate te
 
 The subs are REUSED Wednesday; a fresh `management-groups` apply runs against EMPTY state.
 
-**Ruled: FULL MG-hierarchy teardown** (Phase 2 `remove_mg_hierarchy=true`), because a fresh
-avm-ptn-alz apply against empty state will try to CREATE the MG tree + sub placements + policy
-objects, and a LIVE hierarchy causes "already exists" collisions on MGs/assignments (empty state
-has no record to reconcile against). Removing the hierarchy (subs moved to tenant root, MGs deleted
-bottom-up) lets Wednesday's apply build the tree from nothing - clean and collision-free.
+**Ruled: FULL MG-hierarchy teardown** - dispatch Phase 2 with `remove_mg_hierarchy=true`
+explicitly (the input DEFAULTS to false in the workflow - a safety call, section 3 - so this run
+needs the override set at dispatch time), because a fresh avm-ptn-alz apply against empty state
+will try to CREATE the MG tree + sub placements + policy objects, and a LIVE hierarchy causes
+"already exists" collisions on MGs/assignments (empty state has no record to reconcile against).
+Removing the hierarchy (subs moved to tenant root, MGs deleted bottom-up) lets Wednesday's apply
+build the tree from nothing - clean and collision-free.
 
 - **Rejected - `terraform import`** the live hierarchy into fresh state before apply: importing a
   full ALZ tree (11 MGs + placements + hundreds of policy defs/assignments) is heavy, fragile, and
