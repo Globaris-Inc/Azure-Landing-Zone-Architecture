@@ -31,6 +31,46 @@
 
 <!-- Newest at the top. -->
 
+### OQ-047: B9 CMK scope - which data stores get customer-managed keys, and is the cost/risk worth it?
+
+- **Raised:** 2026-07-19 (B9 design engagement, architect - ADR-053, docs/b9-security-design.md
+  section 4)
+- **Section:** Banking wave B9 (security/compliance)
+- **Blocking:** Only the CMK sub-scope of B9. The rest of B9 (PCI/SOC compliance, b11 Audit, b13
+  Audit) ships regardless.
+- **Priority:** Medium (answer before the B9 apply if CMK is wanted in this wave; else defer)
+
+**Question:**
+The estate has ZERO customer-managed keys / disk encryption sets today (live-verified). The
+founding design put "extend the CMK pattern to the new data stores" in B9. CMK is net-new
+infrastructure - a purge-protected Key Vault + RSA keys + user-assigned identities with Key Vault
+Crypto roles + per-resource CMK config - with a real availability-coupling risk: a deleted or
+inaccessible key makes the encrypted data inaccessible (purge protection + soft delete + key backup
+are mandatory). Which data stores get CMK?
+
+**Options being considered (per data-store granularity):**
+- A (recommended for a literal banking encryption-at-rest claim): CMK on the lakehouse ADLS
+  (`stlake`) + Foundry + AI Search + Databricks managed-services/DBFS-root. One CMK KV + keys +
+  identities. Cost ~$1-5/mo (KV + key ops) + operational key-management burden. Note: Databricks
+  CMK is a workspace UPDATE (plan-scan for ForceNew - if it forces a workspace replace on the live
+  QA-green workspace, that store drops to design-only).
+- B (minimal): CMK on ADLS `stlake` only (the primary lakehouse); the rest documented-design.
+- C (defer): CMK documented-design only; B9 ships without it; revisit at a later hardening pass.
+  Zero cost, thinner encryption story. Platform-managed keys (already in effect) still encrypt at
+  rest - CMK is about CUSTOMER control of the key, not about whether data is encrypted.
+
+**Architect recommendation:** A if the production/banking posture claim requires customer-managed
+keys across the data tier; B for a lighter footprint; C if the key-management operational burden is
+not wanted at POC. All three keep the rest of B9 intact.
+
+**RESOLVED 2026-07-19 (user): Option A - FULL data-tier CMK** across ADLS (`stlake`) + Foundry +
+AI Search + Databricks (managed-services + managed-disk). Finalized implementation contract in
+docs/b9-security-design.md section 3.1 (new dedicated network-hardened CMK Key Vault in
+bank-data-p1, one RSA-3072 key per resource with rotation, per-resource identity/role model,
+ordering, and the Databricks ForceNew watch). Recorded in ADR-053. Gated behind a separate
+`enable_cmk` sub-flag so the key-loss-sensitive / ForceNew-carrying CMK build is independently
+toggleable from the rest of B9.
+
 ### OQ-046: B-R production restoration - the consolidated fork list (one answer composes the end state)
 
 - **Raised:** 2026-07-19 (ADR-049 / docs/b-restoration-design.md; architect)

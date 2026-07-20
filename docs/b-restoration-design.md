@@ -15,6 +15,16 @@
 
 ---
 
+## 0a. B9-vs-B-R split (ADR-053, 2026-07-19) - read this before the register rows
+
+B9 and B-R both touch security/policy; the split is ruled in ADR-053 / docs/b9-security-design.md.
+Principle: **B9 = additive / Audit-first / net-new (non-enforcing, non-breaking); B-R = enforcement
+(Deny-promotion) + live-resource network flips + deviation-reversals.** So for the register items:
+b10 (KVs) DESIGNED at B9, FLIPPED at B-R; b11 platform-MG AUDIT assign at B9, DENY+exemptions at
+B-R; b13 OpenAI guardrails to AUDIT at B9, DENY at B-R; b9 finops SA flip at B-R. The b10/b11/b13
+rows below stay marked for B-R for their ENFORCEMENT half - the B9 Audit/design half is additive
+and does not contradict the user's enforce-at-B-R confirmation.
+
 ## 0. How to read the register
 
 Every deviation made across the build (ADR trail 015/022/031-048 + the estate-wide `enable_*`

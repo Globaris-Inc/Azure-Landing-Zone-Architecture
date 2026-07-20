@@ -37,6 +37,139 @@
 
 <!-- Newest at the top. -->
 
+### ADR-054: Reliable end-to-end teardown - disarm-policy-first, no-empty-root-cascade, two-mode (terraform primary + az sweep fallback), full MG-hierarchy teardown for clean redeploy, loud verification
+
+- **Date:** 2026-07-19
+- **Section:** Section 10 (pipeline) / teardown; supersedes the teardown ordering/gating of the
+  original teardown.yml (ADR-019 era). Full fix-spec: docs/teardown-redesign.md
+- **Status:** Accepted (user hard requirement: zero manual deletion; architect design; DevSecOps
+  implements)
+- **Decision makers:** user (requirement), claude (architect)
+
+**Context:**
+Today's teardown failed E2E and forced manual deletion - the user set a hard requirement that
+teardown be a reliable zero-manual CI/CD process. Four root causes: (F1) `needs: [..., synthetic]`
++ `if: !failure()` let the never-deployed synthetic root's failed destroy cascade-skip every real
+root - the workflow destroyed nothing; (F2) terraform-destroy alone cannot finish the Databricks
+managed RG (RP deny-assignment - must delete the workspace to cascade), APIM/AKS slow deletes, KV
+purge-protection; (F3) MG-scope DINE policy assignments kept RE-REMEDIATING (recreated
+rg-amba-monitoring-001) during resource deletion; (F4) state was emptied for a fresh redeploy, so
+terraform-destroy can no longer finish the current half-destroy - no az fallback existed.
+
+**Decision:**
+1. **Disarm the policy layer FIRST** (Phase 0, az, always): delete every MG-scope policy assignment
+   (globaris root + all descendants; base ALZ + the 223 AMBA) before/independent of resource
+   deletion, so DINE stops re-remediating. The single most important reordering (fixes F3).
+2. **No empty/undeployed root may cascade** (fixes F1): delete the synthetic job; `needs` for
+   ordering only; every root `if:` uses `!cancelled()` NOT `!failure()`; `_tf-root.yml` destroy
+   gets a pre-step that no-ops (exit 0) when `terraform state list` is empty/absent.
+3. **Two modes, one workflow** (fixes F4): a `mode` input - `terraform` (state intact, primary
+   reverse-order destroy) and `az-sweep` (state gone, az fallback that deletes orphaned/re-
+   remediated RGs, Databricks-workspace-cascade, KV soft-delete, MG-hierarchy removal). DISARM
+   (Phase 0) and VERIFY (Phase 3) run in both modes.
+4. **F2 handling:** Databricks = delete the WORKSPACE (never the managed RG directly - cascades);
+   APIM/KV = provider purge features (APIM added at B4) + 360-min ceiling; KV purge-protected =
+   soft-delete + redeploy recover (recover_soft_deleted_key_vaults).
+5. **Full MG-hierarchy teardown for the Wednesday redeploy** (remove_mg_hierarchy=true): subs are
+   reused, and a fresh avm-ptn-alz apply against EMPTY state collides on a live hierarchy; so the
+   az sweep moves subs to the tenant root and deletes the MGs bottom-up as the LAST step, giving
+   the fresh apply a clean slate. Rejected: terraform-import (heavy/fragile for a full ALZ tree)
+   and idempotent-reconcile (alz provider does not adopt pre-existing MGs into empty state).
+6. **Loud verification** (Phase 3, always, last): the run FAILS on any remnant (policy assignments,
+   workload/orphaned RGs, Databricks managed RGs, live MG tree). A green Phase 3 IS "teardown
+   succeeded E2E"; no manual step for the default (non-bootstrap) scope.
+
+**Alternatives considered:**
+- Keep `!failure()` gating - rejected: it is the exact F1 cascade-skip bug.
+- terraform-destroy only - rejected: cannot finish F2 resources or the F4 state-gone case, and does
+  not disarm F3 remediation before the resource race.
+- Leave the MG hierarchy for redeploy - rejected: empty-state fresh apply collides on live MGs.
+- Manual runbook for the stuck parts - rejected: violates the zero-manual requirement (the whole
+  point).
+
+**Consequences:**
+- Positive: a single dispatch tears down E2E, state-intact or state-gone, with zero manual steps;
+  remediation can no longer resurrect resources mid-sweep; Wednesday gets a clean redeploy slate;
+  verification prevents silent half-teardowns.
+- Negative / trade-offs: the disarm-first + full-MG-teardown makes the workflow more complex (4
+  phases); purge-protected KVs still require a redeploy-side recover (documented, not manual
+  deletion); the az-sweep uses naming-pattern RG matching (must stay in sync with the estate's RG
+  naming - a maintenance coupling).
+- Follow-ups: DevSecOps implements docs/teardown-redesign.md (the 4-phase workflow + `_tf-root.yml`
+  resilience pre-step + the az disarm/sweep/verify scripts); use it immediately in `az-sweep` mode
+  to finish today's half-destroy; keep the RG-naming patterns in sync with the estate; the
+  include_bootstrap scorched-earth path stays manual by design (SP cannot self-delete its OIDC app).
+
+### ADR-053: Wave B9 security/compliance rulings + the B9-vs-B-R split principle - B9 does additive/Audit-first/net-new (CMK, PCI/SOC visibility, platform-MG Audit, OpenAI-guardrails Audit); B-R does enforcement (Deny-promotion) + live-network flips; most founding-B9 scope is already built
+
+- **Date:** 2026-07-19
+- **Section:** Banking wave B9 (security/compliance); anchors register items b10/b11/b13 + CMK;
+  full spec docs/b9-security-design.md
+- **Status:** Accepted (architect rulings + the split; CMK scope is the OQ-047 user fork)
+- **Decision makers:** claude (architect); OQ-047 to the user
+- **Sequencing:** user moved B8 to last - B9 (now) -> B-R -> B8 -> B10
+
+**Context:**
+Live verification today collapsed most founding-B9 scope into already-built: Defender for Cloud
+runs 11 plans including Containers (the ADR-043 B2 flip) AND AI; NIST 800-53 R5 + CIS Azure 2.0 are
+assigned at the Globaris root. What remains net-new + the accumulated register items (b10 open KVs,
+b11 platform-MG missing public-endpoint Deny coverage, b13 OpenAI guardrails DoNotEnforce, CMK
+breadth - estate CMK=0) now overlap with B-R, which also touches security/policy. The user
+previously confirmed b9/b10/b11 ENFORCE at B-R (not pulled forward). Both KVs live pna=Enabled,
+no ACL; PCI DSS v4.0.1 + SOC 2 Type 2 built-ins exist (GUIDs captured).
+
+**Decision:**
+1. **The split principle:** B9 does the ADDITIVE / non-enforcing / non-breaking half (net-new
+   capability + Audit-first visibility that cannot block a create or break a running estate / a
+   later wave's CI); B-R does ENFORCEMENT (Deny-promotion) and live-resource network FLIPS
+   (operational/CI risk). Rule for future readers: could-block-or-flip -> B-R; adds-visibility-or-
+   capability -> B9. This honors the user's b9/b10/b11-at-B-R confirmation because Audit != enforce
+   and a spec != a flip.
+2. **B9 DEPLOYS:** (a) CMK breadth on the data stores, gated behind OQ-047 (sub-flag enable_cmk);
+   (b) PCI DSS v4.0.1 + SOC 2 Type 2 regulatory initiatives at root (assessment visibility, extend
+   the existing NIST/CIS assignment pattern); (c) b11 stage 1 - the Deny-PublicPaaSEndpoints
+   initiative at the platform MG parameterized to ALL members Audit (the visibility the platform
+   tree lacks; native assignment = lower blast radius than perturbing avm-ptn-alz); (d) b13 -
+   OpenAI/CogServ guardrails DoNotEnforce -> Audit. All behind enable_security_hardening (default
+   false, LESSON 42).
+3. **B9 DESIGNS but does NOT deploy:** b10 KV network hardening - the tfstate-KV JIT/Deny spec +
+   the security-KV consumer inventory; the FLIP is B-R (with b11 stage 2), so the KV goes private
+   exactly when the enforcing policy lands (no unprotected-but-hardened window; CI risk bundled
+   into restoration). Honors the user's b10-at-B-R.
+4. **Already built - no B9 action:** Defender for Containers (+AI), NIST 800-53 R5, CIS Azure 2.0.
+5. **Stays out:** all Deny/enforcement (B-R), the finops-SA flip (b9, B-R), tenant-Security-Admin-
+   gated features (B-R f10 after the grant), CA enforcement-mode flip (user decision), flag-restore
+   deviations (B-R).
+6. **CMK is the one genuine fork (OQ-047):** estate CMK=0, so it is net-new cost+complexity+
+   availability-coupling risk (KV key loss = data loss); scope per data store is the user's call.
+   No new module - CMK is config on existing modules (storage/Databricks/Foundry/Search
+   customer_managed_key inputs, verified) + a purge-protected KV + keys + identities.
+
+**Alternatives considered:**
+- B9 hardens the KVs now (founding put KV fix in B9) - rejected: flipping a live KV (esp. tfstate,
+  read every plan) to network-Deny mid-build carries CI-break risk, and the user confirmed b10 at
+  B-R; B9 designs, B-R flips with the enforcing policy.
+- B9 does the Deny-promotion (skip Audit-first) - rejected: the user confirmed enforce-at-B-R;
+  Deny-now also gambles policy-root applies on propagation timing for zero interim gain over Audit.
+- Re-build Defender/NIST/CIS in B9 - rejected: already live (would collide/replace).
+- CMK as an architect ruling (no fork) - rejected: material cost + availability-coupling risk with
+  zero estate precedent = a real user decision.
+- CMK on the RP-managed dbstorage via the storage module - rejected: dbstorage is Databricks-RP-
+  managed; CMK there is a workspace-level input requiring a workspace UPDATE (ForceNew plan-scan) -
+  its own OQ-047 sub-item, not a storage-module config.
+
+**Consequences:**
+- Positive: a clean, gap-free B9/B-R division that double-builds nothing and honors the user's
+  confirmations; B9 is additive/non-breaking (nothing enforced or flipped); the compliance story
+  gains PCI+SOC; the platform-tree policy blind spot gets Audit visibility now.
+- Negative / trade-offs: B9 is a THIN wave (most founding scope pre-built) - honest, not a gap; CMK
+  (if taken) adds operational key-management burden; the platform-MG Audit assignment will surface
+  many non-compliant flags (visibility, expected).
+- Follow-ups: OQ-047 CMK scope/cost user answer; cloud-engineer extends platform/security
+  (PCI/SOC + b13) + platform-MG (b11 Audit) + CMK config (if OQ-047=yes); architect pre-clearance
+  docs/preclearance/b9-security.md (Audit-only/pure-adds bar; Databricks-CMK ForceNew scan); QA per
+  design doc section 8; b10 spec handed to B-R.
+
 ### ADR-052: Wave B7 O&M Phase 1 build rulings - AMBA delivered by the TWO-part current mechanism (avm-ptn-alz assignments + avm-ptn-monitoring-amba-alz 0.4.0 supporting infra), DINE at platform + landingzones MG scopes, AMBA notifications converge to the operator stream (Phase 1); extends two existing platform roots, no new root
 
 - **Date:** 2026-07-19
