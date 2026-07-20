@@ -316,6 +316,16 @@ jobs:
           SECURITY_SUBSCRIPTION_ID: ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
           LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
           REMOVE_MG_HIERARCHY: ${{ inputs.remove_mg_hierarchy }}
+          # ADR-054 amendment (docs/teardown-redesign.md section 10.5): so the script's
+          # az_relogin helper can mint a FRESH GitHub OIDC assertion on demand and re-
+          # authenticate mid-job, instead of relying on az's own (structurally broken, one-
+          # time-assertion) token refresh. ACTIONS_ID_TOKEN_REQUEST_URL / _TOKEN are already
+          # auto-present because the workflow sets `permissions: id-token: write` above - not
+          # hardcoded here. Identity via repo Variables only, no client secret (secrets above
+          # only ever feed TF_VAR_*-equivalent subscription IDs, never credentials).
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: bash scripts/teardown-az-sweep.sh
 
   # Phase 3 - VERIFY (ADR-054). Always last, always runs for target=all. FAILS the run if

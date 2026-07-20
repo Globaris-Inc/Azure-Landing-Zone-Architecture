@@ -3,6 +3,28 @@
 # section 3). Runs ALWAYS, last, both modes. Asserts zero estate remnants and FAILS LOUDLY
 # (non-zero) if anything is found. A green Phase 3 IS the definition of "teardown succeeded
 # E2E" - the design's answer to "never a silent half-teardown" (design principle 5).
+#
+# AMENDED 2026-07-20 (ADR-054 amendment, docs/teardown-redesign.md sections 9-10, teardown
+# run 29712487341): VERIFY stays an IMMEDIATE, unwaited assertion (the wait now lives in
+# Phase 2's reconciliation step, never here - locked decision 9.3). Every az call below is
+# hardened against the swallow bug that caused the incident: the old `2>/dev/null || echo "0"`
+# and `2>/dev/null || true` patterns could not tell a genuinely empty/absent result from a dead
+# OIDC token, so a truth-gate call that failed on auth silently "passed" as clean - the worst
+# possible outcome for a completion gate. Every check below now captures stderr and, where the
+# scope being queried can never legitimately be gone on its own (VERIFY 2/3/5 - subscriptions,
+# which per design section 5 are only ever re-parented, never deleted), treats ANY non-zero
+# list call as FAIL LOUD. Where a genuine NotFound is a legitimate, expected outcome (VERIFY 1's
+# per-MG policy assignment list when remove_mg_hierarchy removed that MG; VERIFY 4's MG
+# existence check, whose success condition IS "not found"), only an auth-classified failure
+# (is_auth_error) fails loud - a real NotFound still reads as clean/gone, never treated as an
+# unclassified pass-through.
+#
+# AMENDED again 2026-07-20 (code-review BLOCK, Finding #2): every list call whose SUCCESS-path
+# output feeds a scalar comparison or `mapfile` now uses `az_run` (teardown-common.sh) instead
+# of a bare `2>&1` capture. The az CLI writes WARNING banners to stderr even on a clean exit-0
+# call - a merged capture could make a genuinely clean scope's length/count compare fail
+# falsely (a false VERIFY BLOCK on a legitimately complete teardown). `az_run` keeps stdout
+# (the data channel) and stderr (only inspected on the non-zero-exit path) fully separate.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,23 +57,84 @@ else
   echo "  ${#SUBS[@]}/${EXPECTED_SUB_COUNT} subscription ID(s) resolved."
 fi
 
+# --- MG-existence snapshot (2026-07-20, third amendment / ADR-054 point 12, docs/teardown-
+#     redesign.md sections 10.4 and 12) - ONE `az account management-group list` call for the
+#     whole script, shared by VERIFY 1 (below) and VERIFY 4. REPLACES the second-amendment
+#     per-MG `az account management-group show` gate (ADR-054 point 11, SUPERSEDED): `show` is
+#     itself principal-dependent for the scoped teardown SP - its MG-read grants are scoped to
+#     the globaris subtree (identity.tf) and are deleted WITH it, so `show` on a deleted MG
+#     returns HTTP-403 `AuthorizationFailed` (NOT a clean 404), which is_auth_error correctly
+#     matches, so a `show`-based gate fails loud on every benign already-gone MG (attempt 4, run
+#     29753193590). Empirical proof (probe run 29756715840, run AS THE SP): `list` SUCCEEDS and
+#     returns only the tenant root (every deleted globaris-tree MG absent); `show --name
+#     globaris` returns 403. The SP's surviving grant (Management Group Contributor at the
+#     tenant root, identity.tf, never deleted) carries managementGroups/read, so a `list` over
+#     that readable collection is always available - existence resolves by NAME MEMBERSHIP, no
+#     per-scope call, no deleted-scope 403. `mg_snapshot_load` (teardown-common.sh) is
+#     auth-fail-loud on its own: a non-zero list is the single call the SP is always entitled to
+#     make, so a failure there is a genuine dead token / transport error and VERIFY cannot
+#     proceed without a trustworthy snapshot. `is_auth_error` is NOT loosened; the per-MG `show`
+#     is REMOVED from VERIFY entirely (neither VERIFY 1 nor VERIFY 4 needs an EXISTING MG's
+#     detail as data, only its presence/absence).
+#
+# GUARD: `mg_snapshot_load` resets MG_SNAPSHOT to empty before attempting the list, so on a
+# FAILED load every `mg_in_snapshot` check would otherwise read as "absent" - i.e. every MG
+# would be silently reported "clean (gone)" below off the back of a snapshot we know is
+# untrustworthy. That is exactly the false-clean failure mode section 9.4 exists to prevent, so
+# `mg_snapshot_ok` gates VERIFY 1 and VERIFY 4 below: on a failed load, neither loop runs (the
+# note_fail here already fails the whole script) and each prints an explicit "cannot certify"
+# notice instead of a misleading per-scope "clean". ---
+mg_snapshot_ok=1
+if ! mg_snapshot_load; then
+  note_fail "VERIFY cannot proceed without a trustworthy MG-existence snapshot (az account management-group list failed - see the error above)."
+  mg_snapshot_ok=0
+fi
+
 # --- 1. No MG-scope policy assignments remain ---
+# Membership in the snapshot above: MG PRESENT -> list its assignments with auth-fail-loud
+# UNCHANGED (a dead token or a real permission gap at a LIVE scope must still fail loud - not
+# loosened). MG ABSENT -> the MG is gone -> VERIFY 4 below owns the gone-assertion for
+# remove_mg_hierarchy=true; here it is simply not a remnant (not double-counted).
 echo "== VERIFY 1: MG-scope policy assignments =="
-for mg in "${MG_SCOPES[@]}"; do
-  scope="/providers/Microsoft.Management/managementGroups/${mg}"
-  remaining="$(az policy assignment list --scope "$scope" --query "length(@)" -o tsv 2>/dev/null || echo "0")"
-  if [ "${remaining:-0}" != "0" ]; then
-    note_fail "MG ${mg} still has ${remaining} policy assignment(s) - DISARM did not fully complete."
-  else
-    echo "  ${mg}: clean (0 assignments, or MG itself no longer exists)."
-  fi
-done
+if [ "$mg_snapshot_ok" -eq 0 ]; then
+  echo "  Skipped - no trustworthy MG-existence snapshot (see the failure above); every MG-scope check is unresolved, not clean."
+else
+  for mg in "${MG_SCOPES[@]}"; do
+    scope="/providers/Microsoft.Management/managementGroups/${mg}"
+    if ! mg_in_snapshot "$mg"; then
+      echo "  ${mg}: clean (MG gone - VERIFY 4 owns the gone-assertion)."
+      continue
+    fi
+    if az_run remaining policy assignment list --scope "$scope" --query "length(@)" -o tsv; then
+      # shellcheck disable=SC2154  # remaining is assigned indirectly by az_run's printf -v
+      if [ "${remaining:-0}" != "0" ]; then
+        note_fail "MG ${mg} still has ${remaining} policy assignment(s) - DISARM did not fully complete."
+      else
+        echo "  ${mg}: clean (0 assignments)."
+      fi
+    elif is_auth_error "$AZ_RUN_STDERR"; then
+      # A dead token here must NEVER be read as "0 assignments" (this is exactly bugs #2/#3 from
+      # the 2026-07-20 incident) - fail loud instead of silently certifying this scope clean.
+      note_fail "MG ${mg} policy assignment list failed with an auth/transport error - cannot certify this scope clean off a dead token: ${AZ_RUN_STDERR}"
+    else
+      note_fail "MG ${mg} policy assignment list failed for an unexpected non-auth reason at a LIVE scope - cannot certify this scope clean: ${AZ_RUN_STDERR}"
+    fi
+  done
+fi
 
 # --- 2. No workload/platform/orphaned RGs remain (covers rg-amba-monitoring-001) ---
 echo "== VERIFY 2: workload/platform RGs (naming pattern) =="
 rg_clean=1
 for sub in "${SUBS[@]}"; do
-  mapfile -t rgs < <(az group list --subscription "$sub" --query "$RG_SWEEP_QUERY" -o tsv 2>/dev/null || true)
+  if ! az_run rgs_out group list --subscription "$sub" --query "$RG_SWEEP_QUERY" -o tsv; then
+    # Subscriptions are never deleted (design section 5 - only re-parented), so a failed list
+    # here has no legitimate "scope gone" explanation - any non-zero is FAIL LOUD.
+    note_fail "RG list failed for subscription ${sub} - a failed list is never read as 'no RGs' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
+    rg_clean=0
+    continue
+  fi
+  # shellcheck disable=SC2154  # rgs_out is assigned indirectly by az_run's printf -v
+  mapfile -t rgs <<< "$rgs_out"
   for rg in "${rgs[@]:-}"; do
     [ -z "$rg" ] && continue
     note_fail "RG ${rg} still present in subscription ${sub}."
@@ -63,33 +146,54 @@ done
 # --- 3. Databricks workspaces gone (belt check independent of the RG naming pattern) ---
 echo "== VERIFY 3: Databricks workspaces =="
 for sub in "${SUBS[@]}"; do
-  count="$(az databricks workspace list --subscription "$sub" --query "length(@)" -o tsv 2>/dev/null || echo "0")"
-  if [ "${count:-0}" != "0" ]; then
-    note_fail "${count} Databricks workspace(s) still present in subscription ${sub}."
+  if az_run count databricks workspace list --subscription "$sub" --query "length(@)" -o tsv; then
+    # shellcheck disable=SC2154  # count is assigned indirectly by az_run's printf -v
+    if [ "${count:-0}" != "0" ]; then
+      note_fail "${count} Databricks workspace(s) still present in subscription ${sub}."
+    else
+      echo "  sub ${sub}: clean (0 workspaces)."
+    fi
   else
-    echo "  sub ${sub}: clean (0 workspaces)."
+    # Same "subscription never deleted" reasoning as VERIFY 2 - any non-zero is FAIL LOUD.
+    note_fail "Databricks workspace list failed for subscription ${sub} - a failed list is never read as 'no workspaces' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
   fi
 done
 
 # --- 4. MG hierarchy gone, if remove_mg_hierarchy ---
+# Uses the SAME snapshot loaded above (shared with VERIFY 1, not re-fetched) - the assertion is
+# now name-ABSENCE from that snapshot, not a per-MG `show` (removed - see the amendment comment
+# above VERIFY 1: `show` 403s for the scoped SP on a deleted MG, which is exactly bug #2 from
+# the 2026-07-20 incident re-manifesting through a different call). Same mg_snapshot_ok guard:
+# a failed snapshot must never let this loop silently certify the hierarchy gone.
 if [ "$REMOVE_MG_HIERARCHY" = "true" ]; then
   echo "== VERIFY 4: MG hierarchy removed (remove_mg_hierarchy=true) =="
-  for mg in "${MG_SCOPES[@]}"; do
-    if az account management-group show --name "$mg" --output none 2>/dev/null; then
-      note_fail "MG ${mg} still exists - remove_mg_hierarchy=true requires the full tree gone."
-    else
-      echo "  ${mg}: gone."
-    fi
-  done
+  if [ "$mg_snapshot_ok" -eq 0 ]; then
+    echo "  Skipped - no trustworthy MG-existence snapshot (see the failure above); cannot certify the hierarchy gone."
+  else
+    for mg in "${MG_SCOPES[@]}"; do
+      if mg_in_snapshot "$mg"; then
+        note_fail "MG ${mg} still exists (present in the snapshot) - remove_mg_hierarchy=true requires the full tree gone."
+      else
+        echo "  ${mg}: gone."
+      fi
+    done
+  fi
 else
   echo "== VERIFY 4: MG hierarchy check skipped (remove_mg_hierarchy=false for this run) =="
 fi
 
-# --- 5. Soft-deleted KVs report (informational, not a failure condition) ---
-echo "== VERIFY 5 (informational): soft-deleted Key Vaults - redeploy recover list =="
+# --- 5. Soft-deleted KVs report - the redeploy recover list. A failed list call here still
+#     fails VERIFY loud (section 9.4 names az keyvault list-deleted explicitly); the CONTENT
+#     of a successful list (vaults found or not) stays informational, never itself a remnant. ---
+echo "== VERIFY 5: soft-deleted Key Vaults - redeploy recover list (informational content; list-call failures still fail loud) =="
 for sub in "${SUBS[@]}"; do
-  mapfile -t deleted_kvs < <(az keyvault list-deleted --subscription "$sub" \
-    --query "[].[name, properties.purgeProtectionEnabled]" -o tsv 2>/dev/null || true)
+  if ! az_run deleted_kvs_out keyvault list-deleted --subscription "$sub" \
+      --query "[].[name, properties.purgeProtectionEnabled]" -o tsv; then
+    note_fail "Key Vault list-deleted failed for subscription ${sub} - a failed list is never read as 'no soft-deleted vaults' (a dead token here would otherwise silently produce an incomplete redeploy-recover list): ${AZ_RUN_STDERR}"
+    continue
+  fi
+  # shellcheck disable=SC2154  # deleted_kvs_out is assigned indirectly by az_run's printf -v
+  mapfile -t deleted_kvs <<< "$deleted_kvs_out"
   for row in "${deleted_kvs[@]:-}"; do
     [ -z "$row" ] && continue
     echo "  sub ${sub}: ${row} (name, purgeProtectionEnabled - true means the redeploy must recover it, LESSON 56)"
@@ -98,7 +202,7 @@ done
 
 echo "----------------------------------------------------------------"
 if [ "$fail" -ne 0 ]; then
-  echo "::error::VERIFY FAILED - estate remnants remain. Teardown is NOT complete. Re-run (idempotent) to retry."
+  echo "::error::VERIFY FAILED - estate remnants remain (or a check could not be trusted). Teardown is NOT complete. Re-run (idempotent) to retry."
   exit 1
 fi
 echo "VERIFY PASSED - zero estate remnants. Teardown complete E2E."
