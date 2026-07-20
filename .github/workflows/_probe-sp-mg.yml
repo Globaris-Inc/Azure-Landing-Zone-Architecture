@@ -23,10 +23,18 @@
 #
 # Delete this file once the candidate fix above has been validated against its findings - it
 # has no reason to exist in the pipeline afterward.
+#
+# TRIGGER NOTE: this runs on `push` (scoped to this feature branch + this file's own path)
+# rather than `workflow_dispatch`, because workflow_dispatch only registers on the repo's
+# default branch and this throwaway has no business being pushed to protected main. Deleting
+# this file is itself a push that touches the path filter below, so removal triggers one final
+# harmless run (or none, if the delete lands outside the matched branch) - either way, safe.
 name: "[PROBE] SP management-group read behavior (temporary, delete after use)"
 
 on:
-  workflow_dispatch: {}
+  push:
+    branches: [feature/teardown-redesign]
+    paths: ['.github/workflows/_probe-sp-mg.yml']
 
 permissions:
   id-token: write
