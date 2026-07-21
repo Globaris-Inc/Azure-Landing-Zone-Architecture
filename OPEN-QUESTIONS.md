@@ -31,6 +31,164 @@
 
 <!-- Newest at the top. -->
 
+### OQ-052: The Defender `AI` plan is armed at Standard in the security subscription, is owned by nobody, and its free trial converts to billed on approximately 2026-08-15
+
+- **Raised:** 2026-07-21 (code review of the ADR-057 batch, Finding 3; live-verified by architect)
+- **Section:** 6 (Defender for Cloud) / 7 (FinOps); relates to ADR-040, ADR-057 decision 5, OQ-050
+- **Blocking:** No. Nothing in the rebuild touches it and nothing fails because of it. It is unowned
+  estate cost with a date on it, which is exactly the class of item that should not live only in a
+  review transcript.
+- **Priority:** Medium, and it becomes Low or moot the moment somebody rules on it
+
+**Question:**
+A live sweep of the security subscription found THREE Defender plans at `Standard` that are not in
+`platform/security`'s Terraform and are correctly not in the teardown's `DEFENDER_PLANS_TO_FREE`
+allow-list: `AI`, `Discovery` and `FoundationalCspm`. Two of them are not a cost question at all.
+`Discovery` and `FoundationalCspm` both report `freeTrialRemainingTime = PT0S` - they are the
+always-on foundational plans that report as Standard and are free permanently. **`AI` is different.**
+It reports `pricingTier = Standard`, `enablementTime = 2026-07-16`, and
+`freeTrialRemainingTime = P24DT12H40M` measured from 2026-07-21, i.e. a 30-day free trial that started
+when it was armed and **expires around 2026-08-15**. Nobody enabled it deliberately, nothing in the
+repo manages it, and no wave references it. Disable it before the trial ends, or accept it?
+
+**Date arithmetic, stated explicitly because it is easy to get wrong:** `freeTrialRemainingTime` is
+remaining time as of the moment of the query, NOT from the enablement date. Counting 24 days from the
+2026-07-16 enablement gives 2026-08-09 and is wrong; counting 24 days 12 hours from the 2026-07-21
+query gives approximately 2026-08-15, which also reconciles with a 30-day trial from 2026-07-16.
+Re-derive from a fresh query rather than from this note if the decision is made close to the date.
+
+**Expected financial exposure is small but is NOT the point.** Defender for AI bills per protected AI
+resource IN THAT SUBSCRIPTION. The security subscription has no AI resources today, and none is
+designed for it - the estate's AI platform (wave B6, ADR-051) lands in the landingzones subscription
+via `bank-data-p1`, not here. So the likely bill at conversion is at or near zero. The real defect is
+that an unmanaged, unowned, Standard-tier security plan with a billing cliff exists in the estate and
+would drift further every rebuild cycle.
+
+**Options being considered:**
+- A (RECOMMENDED): disable it before the conversion date with a one-line
+  `az security pricing create -n AI --tier Free --subscription <security-sub>`, and do NOT add it to
+  any allow-list or to Terraform. Rationale: the estate does not use it, ADR-040 already established
+  that this estate only arms plans it deliberately configures, and leaving an unmanaged Standard plan
+  running conflicts with that. Cheapest, reversible today (`AI` carries no `deprecated` flag, so it
+  can be re-armed if a later wave wants it - unlike the five blocked plans).
+- B: adopt it into `platform/security` as a managed plan, which means adding it to
+  `local.defender_extended_plans` AND to `DEFENDER_PLANS_TO_FREE` so teardown keeps covering it.
+  Only worth it if a future wave actually puts AI resources in the security subscription, which no
+  current design does.
+- C: accept it and let it convert. Defensible only because the expected charge is near zero, but it
+  leaves an unowned Standard plan drifting in the estate and re-raises this same question every cycle.
+
+**Recommended default:** A, actioned before 2026-08-15. It is a single command and it does not touch
+the rebuild, so it can be done at any convenient point and is NOT a gate on B0a.
+
+### OQ-051: The ADR-041 temporary tenant-root grants are five days past their time-box and have no revocation owner - who revokes, when, and what replaces them
+
+- **Raised:** 2026-07-21 (B0a pre-clearance refresh, architect; PC-6R(c))
+- **Section:** 10 (Pipeline & Tooling) / identity; extends OQ-008 and OQ-041, relates to ADR-021
+- **Blocking:** No for the rebuild (both grants are REQUIRED for it and must stay). Yes for closing
+  out ADR-041, which described them as time-boxed.
+- **Priority:** Medium
+
+**Question:**
+ADR-041 created two grants on the CI service principal as an explicit BRIDGE for the B0a redeploy:
+User Access Administrator at Tenant Root Group and Cost Management Contributor at Tenant Root Group.
+Both were created 2026-07-16 and both are still live on 2026-07-21, verified per scope. They were
+never revoked after the 2026-07-16 rebuild went green, and nothing in any workflow, runbook or
+checklist owns their removal. What is the durable answer: revoke after every rebuild and re-grant
+each time, replace with narrower standing rows, or accept them as permanent?
+
+**Why it matters now:** LESSON 57 says elevated grants stay attached THROUGH the work they enable and
+are revoked strictly after a verified-clean destroy. The estate is about to be rebuilt, so revoking
+today would break the rebuild. But "we keep forgetting" is not a policy, and an unrevoked tenant-root
+User Access Administrator on a CI principal is the single widest standing privilege in this estate.
+The ADR-058 QA checklist now asserts these grants are PRESENT after teardown (item 14), which makes
+their presence deliberate rather than accidental, but does not answer when they go away.
+
+**Options being considered:**
+- A (RECOMMENDED): keep both for the duration of the rebuild campaign, then revoke as an explicit,
+  owned step in the post-campaign runbook, and codify the Cost Management Contributor need as a
+  narrower standing bootstrap row at the Globaris root MG (the OQ-041 recommendation) so only the UAA
+  grant is ever temporary. Cost: one durable bootstrap row, one revocation step with a named owner.
+- B: revoke both after every green B0a and re-grant by hand before every rebuild. Least standing
+  privilege, but it is manual work on the critical path of every cycle and it is exactly the step that
+  has already been forgotten once.
+- C: accept both as permanent standing grants and close ADR-041's time-box language. Honest about
+  reality, but it moves directly against OQ-008 and ADR-021, which exist to REDUCE this principal's
+  footprint.
+
+**Recommended default:** A.
+
+### OQ-050: Teardown now writes Defender pricing plans to Free - how do we bound the risk that a plan disarmed at teardown can never be re-armed?
+
+- **Raised:** 2026-07-21 (teardown subscription-scope ruling, architect; ADR-057 decision 5)
+- **Section:** 10 (Pipeline & Tooling) / teardown; 6 (Defender for Cloud); relates to ADR-040, LESSON 41
+- **Blocking:** No - ADR-057 ships with the conservative allow-list, which is safe for all 8 plans as
+  of today's live check. This records the residual risk and asks for a policy on it.
+- **Priority:** Medium
+
+**Question:**
+ADR-057 makes teardown reset the 8 estate-configured Defender for Cloud plans to `Free`, because the
+azurerm provider refuses to create a pricing resource whose live tier is not Free. Setting a plan to
+Free is trivial. Re-arming it is NOT guaranteed: Microsoft blocks NEW Standard enablement of
+deprecated plans, and five plans in this very subscription are already in that state
+(KubernetesService, ContainerRegistry, Dns are API-flagged deprecated; KeyVaults and Arm were blocked
+on 2026-07-05 and are the reason ADR-040 removed them from config). If Microsoft deprecates one of the
+8 in the window between a teardown and the next rebuild, teardown will have permanently disarmed a
+control we cannot get back. How should that risk be bounded?
+
+**Options being considered:**
+- A (RECOMMENDED, shipped as the interim): the fixed allow-list in `teardown-common.sh`
+  (`DEFENDER_PLANS_TO_FREE`), which mirrors `platform/security` exactly and can never touch a plan the
+  estate does not configure, plus a mandatory lifecycle re-check of those 8 plans in every
+  pre-clearance that precedes a rebuild (the deprecation audit already exists as step 3d). Cheap, no
+  code beyond what ADR-057 specifies, and the pre-clearance is where a deprecation would surface
+  anyway.
+- B: stop resetting pricing at teardown entirely, and instead adopt the live plans on the deploy side
+  with config-driven `import` blocks. Nothing is ever disarmed, so nothing can become unre-armable.
+  Cost: 8 import blocks plus a mandatory removal commit every cycle (LESSON 52), on the critical path
+  of every rebuild, which is exactly the churn ADR-057 chose to avoid.
+- C: reset to Free only the plans whose live API response carries no `deprecated` flag, evaluated at
+  teardown time. Self-adjusting and it cannot disarm an already-deprecated plan. But it introduces a
+  live-state-dependent branch into teardown, and it does not help at all for the case that actually
+  matters (a plan that is current at teardown and deprecated by the next rebuild).
+
+**Recommended default:** A, with B reconsidered if any of the 8 is ever announced for deprecation.
+
+### OQ-049: Should `azurerm_resource_provider_registration` stop being managed inside `platform/management` (LESSON 54)?
+
+- **Raised:** 2026-07-21 (B0a pre-clearance refresh, architect; PC-6R(b))
+- **Section:** 10 (Pipeline & Tooling) / 7 (FinOps); relates to LESSON 54 and ADR-027
+- **Blocking:** No - ADR-057 sub-step 6c makes teardown unregister it, which closes the loop for now.
+  This asks whether the loop should exist at all.
+- **Priority:** Medium
+
+**Question:**
+`platform/management` manages `azurerm_resource_provider_registration.cost_management_exports`
+(`Microsoft.CostManagementExports`), required so the ADR-027 cost exports can write to a storage
+account in the management subscription. The provider resource hard-fails create when the namespace is
+already `Registered` (verified in azurerm v4.71.0 source: it returns requires-import), and destroy
+UNREGISTERS the namespace. That makes registration state a per-cycle liability: if teardown does not
+unregister, the next apply fails; if it does, the estate churns a subscription-wide setting on every
+build. LESSON 54 already says do not manage RP registration in the same root as the resources that
+need it. Should this resource be removed from the root?
+
+**Options being considered:**
+- A (RECOMMENDED): remove the resource from `platform/management`, register the namespace once,
+  out-of-band, as permanent subscription state (documented in the bootstrap runbook), and delete
+  ADR-057 sub-step 6c. Registration becomes a one-time environment fact rather than a per-cycle
+  toggle. Matches LESSON 54 exactly. Cost: one code change plus reviewer, one documented manual
+  prerequisite that only ever runs once per subscription, and a note that a brand-new subscription
+  needs it before the first management apply.
+- B: keep it in-root and rely on ADR-057 sub-step 6c to unregister at teardown. Zero code change,
+  fully CI/CD, but it keeps a subscription-wide setting coupled to a per-root lifecycle and adds a
+  permanent maintenance item to the teardown contract.
+- C: keep it in-root but add a permanent config-driven `import` block so an already-registered
+  namespace is adopted instead of failing. Rejected on sight: LESSON 52 says import blocks are
+  one-shot and must be removed once they land, so a permanent one is a standing trap.
+
+**Recommended default:** A, scheduled after the rebuild is green (it is a deploy-root change and
+should not be made on the critical path of a rebuild that is already waiting on a teardown re-run).
+
 ### OQ-048: Teardown SP cannot verify MG deletion via a per-scope read - list-snapshot oracle (canonical) vs a minimal tenant-root Management Group Reader grant
 
 - **Raised:** 2026-07-20 (teardown consolidation pass, architect; structural root of ADR-054 defect 3)

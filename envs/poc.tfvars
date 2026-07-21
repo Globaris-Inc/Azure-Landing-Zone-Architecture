@@ -301,7 +301,18 @@ enable_ai_platform = true
 # AMBA alert stream onto the same on-call target as the platform action group
 # (ADR-052 section 5). Supplied via TF_VAR_om_operator_notification_email in CI /
 # poc.secret.tfvars locally - NEVER committed here.
-enable_om_phase1 = true
+#
+# HELD FALSE FOR THE B0a GREENFIELD REBUILD (2026-07-21, PC-4R option A in
+# docs/preclearance/b0a-redeploy.md section 8). On an empty tenant the two roots are
+# circular with the flag true: platform/management-groups selects globaris-amba, whose
+# Deploy-AMBA-* DINE assignments reference id-amba-prod-001 by constructed resource id,
+# but that MI is created by platform/management, which cannot apply before the MG tree
+# exists (it writes a Globaris-root role assignment and three MG-scope budgets). False
+# reproduces the proven 2026-07-16 green B0a (globaris architecture, no AMBA module;
+# plan-scan precedents 537 / 36 / 48 adds). Flip back to true to re-land wave B7 as an
+# increment on a green estate, in the ORDERING above (platform/management first, verify
+# the MI is live, then platform/management-groups).
+enable_om_phase1 = false
 
 # ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)

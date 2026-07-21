@@ -46,6 +46,14 @@ The design fixes four root causes that made an earlier teardown fail and forced 
    absent thing is success). This is what makes E2E reliable across re-dispatch.
 5. **Loud completion verification.** The run FAILS if any remnant remains. Never a silent
    half-teardown. A green Phase 3 IS the definition of E2E success.
+   > **AMENDED 2026-07-21 (ADR-058, section 13).** A green Phase 3 is NECESSARY but no longer
+   > SUFFICIENT. Phase 3 is the in-workflow fail-loud gate; completion is certified by an INDEPENDENT
+   > qa-engineer pass against the section 13.3 checklist. The 2026-07-20 run was green on Phase 3 and
+   > was not torn down.
+6. **Subscription-scope completeness (added 2026-07-21, ADR-057, section 12).** Teardown must return
+   every subscription to the state a greenfield apply expects. Resource-group membership is an
+   implementation detail of the sweeper, never a boundary of the obligation. If leaving it makes the
+   next greenfield apply fail or drift, teardown owns it.
 
 ---
 
@@ -99,7 +107,14 @@ Reverse-dependency-order `terraform destroy` per root, with the F1 fix:
 ### Phase 2 - AZ SWEEP (`teardown-az-sweep.sh`; az, `target=all` only, both modes)
 
 Fallback for the state-gone case (`mode=az-sweep`, fixes F4) AND a remnant-catch pass after Phase 1
-in `mode=terraform`. Idempotent throughout; every delete is safe to re-run. Five ordered steps:
+in `mode=terraform`. Idempotent throughout; every delete is safe to re-run. Six ordered steps,
+numbered 1 to 4 then 6 and 7 to match the shipped code exactly.
+
+> **Numbering note (2026-07-21, ADR-057).** Before ADR-057 the reconcile was step 5. ADR-057 inserted
+> the subscription-scope pass and moved the reconcile to the end, so the code now runs 1, 2, 3, 4, 6,
+> 7 and **there is deliberately no step 5** - the number was retired rather than reused, so existing
+> run logs and cross-references that mention a "step 5" are unambiguously pre-ADR-057. Read the ORDER,
+> not the arithmetic.
 
 1. **Databricks workspace cascade** - submit `az databricks workspace delete --no-wait
    --force-deletion` (never `az group delete` the RP-managed RG directly; `--force-deletion` is what
@@ -115,8 +130,17 @@ in `mode=terraform`. Idempotent throughout; every delete is safe to re-run. Five
    (section 7). Bottom-up: for each MG still present, re-parent its subscriptions to the tenant root
    then delete the now-empty MG. Subscriptions are never deleted, only re-parented (section 8). MG
    ops are fast control-plane calls and stay synchronous (no `--no-wait`, no reconcile wait).
-5. **Reconciliation** - ONE bounded wait (section 4) for every RG submitted in steps 1 to 2 to
-   report gone. The wait lives HERE, never in VERIFY.
+6. **SUBSCRIPTION SCOPE (added 2026-07-21, ADR-057)** - the az sweep finds resources by RG naming
+   pattern and therefore cannot see anything that lives outside a resource group. This step covers
+   that surface explicitly: the four subscription-scoped object classes (budgets, cost exports at API
+   version `2025-03-01`, cost anomaly scheduled actions, subscription diagnostic settings), the
+   Defender for Cloud pricing reset to Free from a fixed allow-list, and the resource-provider
+   unregistration. Runs AFTER the MG removal in step 4 and BEFORE the reconcile in step 7. Full
+   contract, including exact API versions, discovery method, failure handling and the never-touch
+   lists: **section 12.3**.
+7. **Reconciliation** - ONE bounded wait (section 4) for every RG submitted in steps 1 to 2 to
+   report gone. The wait lives HERE, never in VERIFY. (This was step 5 before ADR-057; the shipped
+   code numbers it 7.)
 
 ### Phase 3 - VERIFY (`teardown-verify.sh`; az, always, last, `target=all` only)
 
@@ -151,7 +175,7 @@ workspace delete plus an in-session poll once drove one step to ~55 minutes and 
   serves fresh assertions for the whole job, so this bypasses az's structurally-broken refresh. A
   failed re-login is FAIL LOUD; never continue past it.
 - **(c) relogin-then-poll reconcile.** The single bounded reconcile wait (`wait_for_rgs_gone`,
-  section 3 Phase 2 step 5) calls `az_relogin` at the START of every iteration, so a poll can never
+  section 3 Phase 2 step 7) calls `az_relogin` at the START of every iteration, so a poll can never
   outlive its token. Ceiling 30 minutes (well under the 360-min job ceiling). Reaching the ceiling
   with stragglers is advisory (Phase 3 is authoritative; idempotent re-dispatch is the safety net);
   an auth-classified failure mid-wait is a hard non-zero exit.
@@ -179,7 +203,7 @@ regular RG and keeps its contents. So the workspace delete MUST pass `--force-de
 the managed RG. `--force-deletion` and `--no-wait` combine on `az databricks workspace delete`
 (independent optional flags, same parameter group, no exclusivity note; confirmed against the live
 CLI reference and proven in run 29749656053 where `--force-deletion` cleared the managed RG). The
-submission stays async; the actual cascade is what the reconcile step (section 3 Phase 2 step 5)
+submission stays async; the actual cascade is what the reconcile step (section 3 Phase 2 step 7)
 waits for. The managed RG is EXCLUDED from the step 2 direct-delete sweep because a direct delete on
 it is doomed by the deny-assignment until the workspace's own force-delete cascade completes.
 
@@ -385,6 +409,387 @@ class-A hardening only.
 - A fresh redeploy meets a clean slate (no MG-hierarchy collision, KV recover path documented).
 - Idempotent re-dispatch finishes any over-ceiling straggler; no manual deletion.
 
+Added 2026-07-21:
+
+- **Subscription scope is clean (ADR-057).** Zero estate-owned budgets, cost exports, cost anomaly
+  scheduled actions and subscription diagnostic settings across all 5 subscriptions; all 8
+  estate-configured Defender plans read `Free`; every managed resource-provider registration reads
+  not-`Registered`. Verified by VERIFY 6 to 8 in-workflow and by the section 13.3 QA checklist out of
+  band.
+- **An independent qa-engineer PASS against section 13.3 exists (ADR-058).** A green Phase 3 is an
+  input to that pass, never a substitute. Any verdict other than PASS blocks the rebuild.
+- **Nothing that must survive was destroyed**: state backend, OIDC federated credentials, the
+  bootstrap identity's standing role assignments, and the ADR-041 temporary tenant-root grants the
+  rebuild still needs.
+
+---
+
+## 12. Subscription-scope completeness (ADR-057) - the gap, the ruling, and the DevSecOps contract
+
+> Added 2026-07-21. Sections 1 to 11 above are unchanged and remain correct; this section ADDS a
+> Phase 2 step and a governing principle they did not have. Where section 3's phase list or section 11's
+> acceptance criteria are read in future, read them together with sections 12 and 13.
+
+### 12.1 Root cause, at mechanism level
+
+The 2026-07-21 B0a pre-clearance refresh found 21 deterministic, plan-invisible apply failures waiting
+for the rebuild. All 21 trace to one mechanical fact.
+
+**`terraform destroy` never ran for `platform/management` or `platform/security` in the 2026-07-19/20
+teardown.** Job-level inspection of the run history proves it:
+
+| Run | Date | What ran |
+|---|---|---|
+| 29706565357 | 2026-07-19 | Phase 1 attempted. `synthetic` FAILED, `identity` FAILED, and `security`, `connectivity`, `management`, `management-groups` and every spoke were SKIPPED. No DISARM job. |
+| 29712487341, 29749656053, 29753193590 | 2026-07-20 | `mode=az-sweep`. Every Phase 1 root job skipped by design. All three failed in Phase 2 or 3. |
+| **29765892057** | 2026-07-20 | `mode=az-sweep`. **DISARM success, every Phase 1 root job `skipped`, AZ-SWEEP success, VERIFY success.** This is the run recorded as GREEN E2E. |
+| 29773408578 | 2026-07-20 | `mode=az-sweep`, same shape, success. |
+
+So the answer to "does the current model run `terraform destroy` at all" is: **it can, but it did not,
+and has not since 2026-07-11.** Both halves of the question matter and they have different answers:
+
+- **Phase 1 exists and is real.** `mode=terraform` runs a per-root `terraform destroy`, and a destroy
+  covers subscription scope for free, because the provider that created an object deletes it
+  regardless of where it lives. This is precisely why the 2026-07-11 teardown produced a clean
+  greenfield and the 2026-07-16 rebuild was pure adds.
+- **The az sweep structurally cannot see non-RG-scoped objects.** It finds things by RESOURCE GROUP
+  NAMING PATTERN (`RG_SWEEP_QUERY` in `teardown-common.sh`,
+  `[?contains(name,'globaris') || contains(name,'amba-monitoring')].name`), plus three explicit
+  passes: Databricks workspaces, Key Vaults, and management groups. Nothing in it enumerates a
+  subscription-scope extension resource, a Defender pricing plan, or a provider registration. It never
+  did, and it never claimed to.
+
+**Therefore: nothing regressed inside the az sweep. What regressed is which mode runs.** ADR-054
+describes terraform-destroy as PRIMARY and az-sweep as FALLBACK. In practice the primary path
+cascade-failed once (the F1 class, on an empty `synthetic` root) and was then abandoned for five
+consecutive runs, so the fallback silently became the only path, while the design still asserted a
+primary that was not executing. Everything that lives outside a resource group survived every green
+run.
+
+The surviving classes, and why each one blocks a rebuild rather than merely lingering:
+
+| Class | Count | Owning resource | Create-time guard (source-verified) |
+|---|---|---|---|
+| Subscription budgets | 5 | `azurerm_consumption_budget_subscription` | `tf.ImportAsExistsError` |
+| Cost exports | 5 | `azapi_resource`, `Microsoft.CostManagement/exports@2025-03-01` | azapi "Resource already exists" |
+| Cost anomaly scheduled action | 1 | `azurerm_cost_anomaly_alert` | `ResourceRequiresImport` |
+| Subscription diagnostic setting | 1 | `azurerm_monitor_diagnostic_setting` | `tf.ImportAsExistsError` |
+| Defender pricing plans left Standard | 8 | `azurerm_security_center_subscription_pricing` | create returns requires-import unless the live tier is `Free` |
+| Provider registration left Registered | 1 | `azurerm_resource_provider_registration` | `metadata.ResourceRequiresImport` when already `Registered` |
+
+Each guard was read from the pinned provider source (azurerm v4.71.0), not from documentation or
+memory. All are invisible to `validate` and to `plan`.
+
+### 12.2 The ruling
+
+Governing principle (ADR-057 decision 1), stated so future waves inherit it rather than re-litigate it
+per object type:
+
+> **Teardown must return every subscription in the estate to the state a greenfield apply expects.**
+> "Torn down" is defined by what the NEXT apply will attempt to create, not by what the last sweep
+> happened to look at. Resource-group membership is an implementation detail of the sweeper, never a
+> boundary of the obligation. Where an object cannot be deleted (a subscription-level setting, a
+> provider registration), teardown owns returning it to its pre-apply VALUE.
+>
+> The one-line test that settles any future scope argument: **if leaving it makes the next greenfield
+> apply fail or drift, teardown owns it.**
+
+Mechanism (ADR-057 decision 3): **extend the az sweep with an explicit subscription-scope pass (new
+Phase 2 step 6) AND restore `mode=terraform` to real primary status.** Both, not either. The sweep must
+be able to finish the job unaided, because az-sweep is the only mode that has ever completed green
+since the redesign and it exists precisely for the state-empty world (F4). Terraform-destroy must be a
+live path again, because a provider destroying its own state has fidelity a naming-pattern sweep can
+never have. Declaring az-sweep the sole supported path was considered and REJECTED: it discards state
+fidelity and makes every future object class a silent gap.
+
+Because Phase 2 already runs in BOTH modes (fallback in `az-sweep`, remnant-catch in `terraform`),
+step 6 executes on the terraform path too, where it is a pure idempotent no-op because the destroys
+already removed everything.
+
+### 12.3 Implementation contract for DevSecOps (Phase 2 step 6)
+
+Placement: a new **step 6 in `scripts/teardown-az-sweep.sh`**, AFTER the MG-hierarchy step 4 and
+BEFORE the reconcile. The ORDER is the contract, the numbering is not. Order rationale:
+subscription-scope objects must be removed after the RG cascade has been submitted (so nothing
+re-creates them) and before the single bounded reconcile wait (so step 6's own submissions are covered
+by the existing wait and by Phase 3).
+
+**As shipped (2026-07-21):** the reconcile that used to be step 5 moved to **step 7**, and the number
+5 was retired rather than reused, so the script runs 1, 2, 3, 4, 6, 7. See the numbering note in
+section 3 Phase 2.
+
+Everything below inherits the existing conventions without exception: `az_run` for any call whose
+stdout is consumed as data (Trap 1), `is_auth_error` classification on every non-zero (Trap 2),
+auth-fail-loud, idempotent-absent-is-success, no new error conventions.
+
+**Sub-step 6a - the four subscription-scoped object classes.**
+
+Loop over `"${SUBS[@]}"` (the existing `teardown_subscriptions` array). For each subscription, for each
+class: LIST, then DELETE each row found. Discovery is by LIST, never by a hardcoded name list, so a
+renamed or added object is still caught. Filter the listed names by the same estate-ownership test the
+sweep already uses, `contains(name,'globaris')`, so a non-estate object in a shared subscription is
+never touched.
+
+| Class | List call | Delete call | Notes |
+|---|---|---|---|
+| Consumption budgets | `az_run out consumption budget list --subscription "$sub" --query "[?contains(name,'globaris')].name" -o tsv` | `az rest --method delete --url ".../subscriptions/$sub/providers/Microsoft.Consumption/budgets/$name?api-version=2023-05-01"` | `az consumption budget delete` also exists; prefer whichever the reviewer confirms is non-deprecated at implementation time. The REST form is version-explicit and is what was verified live. |
+| Cost exports | `az_run out rest --method get --url ".../subscriptions/$sub/providers/Microsoft.CostManagement/exports?api-version=2025-03-01" --query "join(',',value[?contains(name,'globaris')].name)" -o tsv` | `az rest --method delete --url ".../subscriptions/$sub/providers/Microsoft.CostManagement/exports/$name?api-version=2025-03-01"` | **The API version is load-bearing.** ADR-027 creates these at `2025-03-01`; a GET at an older version returns them as absent. This exact trap produced a false-negative QA finding on 2026-07-16. Do not "simplify" to `az costmanagement export list` unless the extension is confirmed to use `2025-03-01`. |
+| Cost anomaly alerts / scheduled actions | `az_run out rest --method get --url ".../subscriptions/$sub/providers/Microsoft.CostManagement/scheduledActions?api-version=2023-11-01" --query "join(',',value[?contains(name,'globaris')].name)" -o tsv` | `az rest --method delete --url ".../subscriptions/$sub/providers/Microsoft.CostManagement/scheduledActions/$name?api-version=2023-11-01"` | Only the management subscription carries one today, but the loop runs across all five so a future wave is covered. |
+| Subscription diagnostic settings | `az_run out monitor diagnostic-settings subscription list --subscription "$sub" --query "value[].name" -o tsv` | `az monitor diagnostic-settings subscription delete --name "$name" --subscription "$sub" --yes` | The estate name is `diag-activity-to-security-law` (NOT org-prefixed). Match it explicitly by name in addition to the `globaris` substring test, or the substring filter will miss it. This is the one class where the standard filter does not apply. |
+
+Failure handling for 6a, per call, matching the existing step 1 and step 2 shape exactly:
+- List call non-zero: this is a SUBSCRIPTION-scoped list, and per section 6's design boundary a
+  subscription can never legitimately be gone. **Any** non-zero is FAIL LOUD (`::error::`, `exit 1`).
+  Never read a failed list as "no objects".
+- Delete call non-zero: classify with `is_auth_error`. Auth-shaped means `::error::` plus `exit 1`.
+  Anything else means `::warning::` plus continue (idempotent-absent is success; Phase 3 and the QA
+  pass are the backstops).
+
+These are synchronous control-plane deletes that complete in well under a second. Do NOT add them to
+`wait_for_rgs_gone`; that helper is RG-shaped and these are not resource groups.
+
+**Sub-step 6b - Defender for Cloud pricing reset (security subscription only).**
+
+Define the allow-list in `teardown-common.sh` next to `MG_SCOPES` and `RG_SWEEP_QUERY`, so the sweep and
+any future check read one definition:
+
+```
+DEFENDER_PLANS_TO_FREE=(VirtualMachines StorageAccounts AppServices SqlServers \
+                        SqlServerVirtualMachines Containers OpenSourceRelationalDatabases CloudPosture)
+```
+
+This list mirrors `platform/security` exactly: `local.defender_basic_plans` (StorageAccounts) plus the
+`servers` resource (VirtualMachines) plus `local.defender_extended_plans` (the remaining six). Add a
+comment stating that it MUST be kept in lock-step with those three, the same coupling note
+`RG_SWEEP_QUERY` already carries.
+
+For each plan in the allow-list, in the SECURITY subscription only:
+`az security pricing create -n "$plan" --tier Free --subscription "$SECURITY_SUBSCRIPTION_ID"`
+
+Hard rules:
+- **Never iterate the live pricing list.** Iterate the allow-list. A live-list loop would eventually
+  disarm a plan this estate does not own, and disarming can be permanently irreversible (LESSON 41:
+  Microsoft blocks NEW enablement of deprecated plans, so a plan set to Free may never come back).
+- **Never attempt to set any plan to Standard.** Teardown only ever moves toward Free.
+- Explicit never-touch list, for the comment block: `KeyVaults`, `Arm`, `Dns`, `KubernetesService`,
+  `ContainerRegistry`, `CosmosDbs`, `Api`, `AI`, `Discovery`, `FoundationalCspm`.
+- Idempotency: setting an already-Free plan to Free is a successful no-op, so a re-dispatch is clean.
+- Failure handling: classify with `is_auth_error`; auth-shaped fails loud, anything else warns and
+  continues.
+- Guard on `SECURITY_SUBSCRIPTION_ID` being non-empty; if it is empty, that is already a VERIFY 0
+  failure class, so fail loud here too rather than silently skipping.
+
+**Sub-step 6c - resource-provider unregistration (management subscription only).**
+
+Runs strictly AFTER 6a, because unregistering a provider that still has resources fails.
+
+`az provider unregister --namespace Microsoft.CostManagementExports --subscription "$MANAGEMENT_SUBSCRIPTION_ID"`
+
+- Idempotent: unregistering an already-unregistered provider is a no-op.
+- Do NOT poll to `Unregistered` in-session. Submit, and let Phase 3 plus the QA checklist confirm.
+  Registration state transitions are fast, but an in-session poll is exactly the pattern the
+  token-durability model (section 4) exists to forbid.
+- Failure handling: `is_auth_error` classify; auth fails loud, otherwise warn and continue.
+- Namespace list kept in `teardown-common.sh` as `RP_NAMESPACES_TO_UNREGISTER=(Microsoft.CostManagementExports)`
+  so it is one line to extend and one line to empty if OQ-049 removes the need.
+
+**Phase 3 VERIFY additions (`scripts/teardown-verify.sh`).**
+
+Three new checks, using the existing `note_fail` pattern and the existing subscription-scoped
+fail-loud boundary (any non-zero list is a hard failure - subscriptions are never legitimately gone):
+
+- **VERIFY 6** - across all 5 subscriptions, each of the four 6a classes returns zero estate-owned
+  rows. Uses the same list calls and the same API versions as 6a.
+- **VERIFY 7** - in the security subscription, every plan in `DEFENDER_PLANS_TO_FREE` reads
+  `pricingTier == Free`.
+- **VERIFY 8** - in the management subscription, every namespace in `RP_NAMESPACES_TO_UNREGISTER`
+  reads a registration state that is not `Registered`. Accept `Unregistering` as a pass with a
+  `::notice::`, since the submission is async and VERIFY never waits (section 3 Phase 3 contract).
+
+**What does NOT change.** The four-phase shape; `!cancelled()` gating; mode and target logic; the
+`remove_mg_hierarchy` default; `az_run`; `is_auth_error` (not loosened); the MG snapshot oracle; the
+token-durability model; `--force-deletion`; the single bounded reconcile and its position as the ONLY
+wait. Step 6 adds a surface, not a convention.
+
+**Workflow wiring.** None required. The `az-sweep` job already exports all five `*_SUBSCRIPTION_ID`
+secrets plus `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID` for `az_relogin`, and the
+`verify` job already exports all five subscription IDs. Step 6 and VERIFY 6 to 8 need nothing new.
+
+### 12.4 RBAC feasibility - VERIFIED, no grant needed, no bootstrap re-apply
+
+The teardown identity is the scoped OIDC service principal, not the operator account. Every write step 6
+performs was checked three ways.
+
+**(a) Role definition, read live.** The SP holds **Contributor** at each of the five subscriptions.
+Contributor's `actions` is `["*"]` and its `notActions` are exactly:
+`Microsoft.Authorization/*/Delete`, `Microsoft.Authorization/*/Write`,
+`Microsoft.Authorization/elevateAccess/Action`, `Microsoft.Blueprint/blueprintAssignments/write`,
+`Microsoft.Blueprint/blueprintAssignments/delete`, `Microsoft.Compute/galleries/share/action`,
+`Microsoft.Purview/consents/write`, `Microsoft.Purview/consents/delete`,
+`Microsoft.Resources/deploymentStacks/manageDenySetting/action`, `Microsoft.Subscription/cancel/action`,
+`Microsoft.Subscription/enable/action`. **None of the actions step 6 needs appears in that list.**
+
+**(b) Each required operation confirmed to be a real ARM operation** (anti-hallucination, queried live
+from the provider operation catalogue):
+
+| Operation | Exists | Covered by Contributor |
+|---|---|---|
+| `Microsoft.Consumption/budgets/delete` | yes | yes |
+| `Microsoft.CostManagement/exports/delete` | yes | yes |
+| `Microsoft.CostManagement/scheduledActions/delete` | yes | yes |
+| `Microsoft.Insights/DiagnosticSettings/Delete` | yes | yes |
+| `Microsoft.Security/pricings/write` | yes | yes |
+| `Microsoft.CostManagementExports/register/action` (the namespace publishes register; unregister is the paired action on the same namespace and falls under Contributor's `*`) | yes | yes |
+| The matching `/read` operation for each of the above, for VERIFY 6 to 8 | yes | yes |
+
+**(c) Empirical proof by this exact principal.** The 2026-07-11 teardown ran `terraform destroy` AS
+THIS SP and successfully performed every one of these operations: it deleted the budgets, the exports,
+the anomaly alert and the diagnostic setting; it set every Defender plan to Free (recorded in the
+2026-07-12 pre-clearance as "all plans verified live Free, teardown V-5 held"); and it unregistered
+`Microsoft.CostManagementExports` (which is why the 2026-07-16 apply's registration succeeded). This is
+not an inference from a role definition; it is the same principal doing the same writes against the
+same subscriptions, eleven days ago.
+
+**(d) No deny assignments.** Queried live: zero deny assignments at every one of the five estate
+subscriptions, so nothing overrides the Contributor grant.
+
+**Verdict: GO. No new role assignment, no bootstrap re-apply, no change to `bootstrap/identity.tf`, no
+sequencing impact on the rebuild from RBAC.** This is consistent with OQ-008 and ADR-021 direction of
+travel: the fix adds zero standing privilege. If a future wave adds a class requiring an action outside
+Contributor, the contract is to name the precise action and scope and propose a least-privilege
+bootstrap row, never an Owner grant.
+
+### 12.5 Safety of the immediate re-run (2026-07-21, against a mostly-empty estate)
+
+Safe. Dispatch `mode=az-sweep`, `target=all`, `remove_mg_hierarchy=true`, `confirm=destroy`.
+
+Expected no-ops, all by design and all already proven on run 29765892057 which ran against an
+already-empty estate and went green:
+- The MG snapshot returns only the tenant root, so DISARM skips every globaris-tree scope, VERIFY 1
+  reports each as clean-because-gone, and step 4 no-ops.
+- The RG sweep finds no estate resource groups in any of the five subscriptions (verified live
+  2026-07-21: only the Terraform state RG plus service-created `NetworkWatcherRG`, plus non-estate RGs
+  in the landingzones subscription, none of which match `contains(name,'globaris')` or
+  `contains(name,'amba-monitoring')`).
+- Databricks: no workspaces exist, so step 1 lists zero rows.
+- Key Vault: no live estate vaults; the two soft-deleted vaults are purge-protected and are REPORTED,
+  not purged.
+- Step 6 is the only step that will actually do work.
+
+**Must NOT be touched, and is not touched by any of the above.** Stated explicitly so the re-run cannot
+be widened by mistake:
+- **The Terraform state backend.** `rg-tfstate-mgmt-eus2-001` and its storage account do not match the
+  RG sweep pattern and are outside the default teardown scope (`include_bootstrap` defaults false).
+  The rebuild is impossible without them.
+- **OIDC federation.** All five federated credentials on the app registration, including the
+  `banking`-branch one the rebuild dispatches from. Teardown does not touch the app registration.
+- **The bootstrap identity itself** (the service principal, its subscription-scope Contributor and
+  User Access Administrator rows, its Storage Blob Data Contributor on the state account).
+- **The ADR-041 temporary tenant-root grants** (User Access Administrator and Cost Management
+  Contributor at Tenant Root Group). The rebuild still needs both. LESSON 57: revocation happens
+  strictly after a verified-clean DESTROY of the estate that needed them, and the estate is about to be
+  rebuilt, so these stay. Do not let a "teardown means revoke" reflex remove them.
+- **Non-estate resources** in the landingzones and management subscriptions.
+
+---
+
+## 13. Completion is certified by an INDEPENDENT QA pass, not by Phase 3 (ADR-058)
+
+> Added 2026-07-21 on a user ruling. This CHANGES section 2 design principle 5 and section 11's first
+> acceptance criterion: a green Phase 3 is necessary, and is no longer sufficient.
+
+### 13.1 Why Phase 3 alone was never enough
+
+The 2026-07-20 teardown was reported GREEN on Phase 3 VERIFY alone. It was not green. VERIFY is a
+script inside the same workflow that did the work, auditing essentially the surface Phase 2 had just
+swept: resource groups by naming pattern, management groups, Databricks workspaces, Key Vaults. The 12
+subscription-scoped survivors, the 8 armed pricing plans and the registered provider were not in that
+surface, so VERIFY could not have found them however well it was written. **A self-check authored
+from the sweeper's model of the estate cannot discover a class the sweeper never modelled.**
+
+The deploy side already carries the correct rule (LESSON 60: apply-success is not green, QA-verified
+is green). Teardown never inherited it. It does now.
+
+### 13.2 Two gates, and why they are not redundant
+
+| | Phase 3 VERIFY | qa-engineer pass |
+|---|---|---|
+| Role | the ACTOR's own conscience | the AUDITOR |
+| Runs | inside the workflow, immediately, unwaited | out of band, after the run reaches a terminal state |
+| Identity | the SCOPED teardown OIDC SP, whose MG-read grants die with the subtree it deletes (the whole reason the section 7 snapshot oracle exists) | a differently-scoped identity that can read scopes the teardown SP structurally cannot |
+| Source of truth | what the sweeper models | a written checklist derived from what the ESTATE deploys |
+| May conclude | "no remnant was found in the surface this workflow models" | "the estate is torn down", or "it is not, here is the remnant list" |
+| May NEVER conclude | "the estate is torn down" | anything by inheriting VERIFY's result instead of querying live |
+
+Both exist because they fail differently. VERIFY catches a remnant fast, inside the run, and makes the
+run itself red so a broken teardown never exits 0. QA catches a remnant VERIFY was never built to see.
+A green VERIFY is an INPUT to QA, never a substitute for it.
+
+**Do not collapse them.** A future proposal to delete the QA pass because "VERIFY already checks that",
+or to fold the QA checklist into VERIFY so there is "one gate", is rejected by ADR-058: the checklist
+would then be authored and executed by the mechanism it is meant to audit, which is exactly the
+2026-07-20 blind spot rebuilt.
+
+### 13.3 The qa-engineer acceptance checklist
+
+Run after the teardown workflow reaches a terminal state, green or red. Every line is a concrete query.
+Record the result of each in the worklog. Any FAIL is a verdict of FAIL for the whole pass.
+
+**A. Resource-group and management-group surface**
+1. For each of the 5 subscriptions: `az group list --subscription <sub> --query "[?contains(name,'globaris') || contains(name,'amba-monitoring')].name" -o tsv` returns EMPTY.
+2. `az account management-group list --query "[].name" -o tsv` returns ONLY the tenant root; none of the 11 globaris-tree names is present.
+3. For each of the 5 subscriptions: `az databricks workspace list --subscription <sub> -o tsv` returns EMPTY.
+4. Confirm all 5 subscriptions are parented directly to the tenant root and none has been deleted.
+
+**B. The four subscription-scoped object classes (the 2026-07-20 blind spot)**
+5. Budgets, per subscription: `az rest --method get --url ".../subscriptions/<sub>/providers/Microsoft.Consumption/budgets?api-version=2023-05-01" --query "value[].name"` returns no estate-named row.
+6. **Cost exports, per subscription, AT API VERSION `2025-03-01`**: `az rest --method get --url ".../subscriptions/<sub>/providers/Microsoft.CostManagement/exports?api-version=2025-03-01" --query "value[].name"` returns no estate-named row. **This version is mandatory.** ADR-027 creates these at `2025-03-01`; a GET at `2023-11-01` or `2024-08-01` returns them as ABSENT and reads as a false PASS. That exact false negative was recorded on 2026-07-16 as a SEVERE QA finding that turned out to be a probe error. Do not repeat it in the opposite direction.
+7. Scheduled actions, per subscription: `az rest --method get --url ".../subscriptions/<sub>/providers/Microsoft.CostManagement/scheduledActions?api-version=2023-11-01" --query "value[].name"` returns no estate-named row.
+8. Subscription diagnostic settings, per subscription: `az monitor diagnostic-settings subscription list --subscription <sub> --query "value[].name"` returns no estate-named row (the estate name is `diag-activity-to-security-law`).
+
+**C. Subscription-level settings that must be RESET, not deleted**
+9. Defender pricing, security subscription: `az rest --method get --url ".../subscriptions/<security-sub>/providers/Microsoft.Security/pricings?api-version=2024-01-01" --query "value[].{plan:name,tier:properties.pricingTier}" -o table`. Every one of the 8 estate-configured plans reads `Free`. Plans the estate does not configure are NOT asserted on, and must not have been changed.
+10. Provider registration, management subscription: `az provider show --namespace Microsoft.CostManagementExports --subscription <management-sub> --query registrationState -o tsv` reads anything other than `Registered`. `Unregistering` is a PASS with a note.
+
+**D. Things that must SURVIVE untouched (a teardown that destroys these has failed differently)**
+11. State backend: the state resource group and its storage account still EXIST, provisioning `Succeeded`, firewall `defaultAction = Deny`, shared key access disabled. The rebuild is impossible without them.
+12. OIDC federation: `az ad app federated-credential list --id <ci-app-id> --query "[].name"` still returns all five credentials, including the `banking`-branch one the rebuild dispatches from.
+13. Bootstrap identity: the CI service principal still holds Contributor and User Access Administrator at each of the 5 subscriptions, and Storage Blob Data Contributor at the state storage account. Query per scope with an explicit `--scope` or an `atScope()` REST filter; the `--assignee --all` form under-reports and has produced wrong conclusions in this repo twice.
+14. **ADR-041 temporary tenant-root grants**: User Access Administrator AND Cost Management Contributor at Tenant Root Group are STILL PRESENT on the CI SP. The rebuild needs both. A teardown that removed them is a FAIL, not a bonus.
+15. Non-estate resources in the shared subscriptions are untouched.
+
+**E. Soft-delete inventory (informational, feeds the rebuild)**
+16. Record `az keyvault list-deleted` per subscription and `az monitor log-analytics workspace list-deleted-workspaces` per subscription, with delete dates, so the rebuild knows which names are reserved and whether a create will RECOVER or create fresh.
+
+**F. Deferred evidence item - MG-scope budget cascade (raised by code review 2026-07-21, Finding 4)**
+
+17. **CONDITIONAL, and it does not apply to the 2026-07-21 re-run.** `platform/management` creates 3 MG-scope budgets (`azurerm_consumption_budget_management_group`, at the globaris / platform / landingzones scopes). These are deliberately EXCLUDED from Phase 2 step 6, on the reasoning that they are extension resources on the management group and are removed when the MG itself is deleted in step 4. That reasoning is corroborated but **not directly proven**: Microsoft's documented MG-deletion prerequisites say nothing about extension resources, and the 2026-07-21 live re-audit found exactly 12 subscription-scoped survivors with no MG-scope budget among them, which is consistent with the cascade but was measured against an MG tree that was ALREADY gone. There was no live MG-scope budget left to test against, so the inference could not be converted to evidence this time.
+    - **Trigger:** the next teardown that runs against an MG hierarchy which actually carries live MG-scope budgets, i.e. a teardown of a fully-deployed estate rather than a re-run against an already-empty one.
+    - **What to do, IN THIS ORDER:** BEFORE dispatching, record the 3 budgets via `az rest --method get --url "https://management.azure.com/providers/Microsoft.Management/managementGroups/<mg>/providers/Microsoft.Consumption/budgets?api-version=2023-05-01" --query "value[].name"` at each of the globaris, platform and landingzones scopes. AFTER the run, re-query the same three scopes.
+    - **PASS:** the budgets are gone, and the MG itself is gone. Record the result so this item can be closed permanently and the exclusion becomes evidence-backed.
+    - **FAIL:** any budget still resolvable after its MG is deleted, OR an MG delete that fails citing a child extension resource. Either outcome means the exclusion is wrong and MG-scope budgets must be added to step 6 as sub-step 6d, ordered BEFORE the step 4 MG removal (not after, because the scope disappears with the MG). Route to the architect as a contract gap per section 13.4.
+    - Until this item is exercised once with a PASS, the exclusion stays flagged as inference, not fact. Do not let it be quietly inherited as settled.
+
+### 13.4 Ordering and failure semantics
+
+- The QA pass runs AFTER the workflow run reaches a terminal state, and it runs whether that state was
+  green or red. A red run tells you something failed; it does not tell you what survived.
+- QA does not reopen or edit the run. It produces a remnant list, classified per object:
+  - a remnant in a class the teardown ALREADY covers means a targeted, idempotent re-dispatch of the
+    same workflow, then a fresh QA pass;
+  - a remnant in a class the teardown does NOT cover is a CONTRACT GAP. It goes to the architect for a
+    design ruling and to DevSecOps for a change, before any re-dispatch. That is exactly what happened
+    on 2026-07-21 and it is why this section exists.
+- **Any QA verdict other than PASS BLOCKS the rebuild.** No deploy dispatch of any root may start while
+  a teardown QA pass is outstanding or failed. This mirrors the pre-clearance gate on the deploy side.
+- The verdict and the evidence are recorded in the worklog per class.
+
+### 13.5 First application
+
+The 2026-07-21 teardown re-run is the FIRST teardown held to this gate, and **its QA pass is the
+artifact that clears the B0a rebuild to start.** A green workflow run is not the clearance. The
+qa-engineer PASS against section 13.3 is.
+
 ---
 
 ## Appendix A. Audit trail / changelog (dated, run-numbered)
@@ -441,3 +846,32 @@ GUIDs or subscription IDs.
   narrative was rewritten into the single coherent design in sections 1 to 11; the class-A DISARM
   hardening (section 10.1) is specified for DevSecOps as the one residual item; the list-snapshot
   oracle is ruled the canonical design (ADR-054, OQ-048), not a workaround.
+
+- **2026-07-21 - defect 4: the green teardown was not a complete teardown (ADR-057, sections 12 and
+  13).** The B0a pre-clearance refresh for the rebuild found 21 deterministic, plan-invisible apply
+  failures waiting in the two roots the teardown was supposed to have cleared. Cause, established by
+  job-level inspection of the run history rather than inference: `terraform destroy` has not run for
+  `platform/management` or `platform/security` since 2026-07-11. Run 29706565357 attempted Phase 1 and
+  cascade-failed on `synthetic` and `identity`, skipping every downstream root; runs 29712487341,
+  29749656053, 29753193590, 29765892057 and 29773408578 all ran `mode=az-sweep`, where Phase 1 root
+  jobs are SKIPPED by design. The az sweep locates resources by RG naming pattern plus three explicit
+  passes (Databricks, Key Vault, MG), so it never had, and never claimed, any coverage of
+  subscription-scope objects. Nothing regressed inside the sweep; what regressed is that the mode
+  which covers subscription scope for free (terraform-destroy, via the owning providers) stopped
+  running while the design still called it PRIMARY. Survivors: 5 subscription budgets, 5 cost exports,
+  1 cost anomaly scheduled action, 1 subscription diagnostic setting, 8 Defender pricing plans left at
+  Standard, 1 provider registration left Registered - each colliding at create against a provider
+  requires-import guard verified in azurerm v4.71.0 source. Fix: Phase 2 step 6 (section 12.3) plus
+  VERIFY 6 to 8, and `mode=terraform` restored to real primary status by policy. RBAC verified GO with
+  no new grant (section 12.4), including empirical proof that this same SP performed every one of these
+  writes during the 2026-07-11 teardown.
+
+- **2026-07-21 - governance change: teardown gains a mandatory independent QA gate (ADR-058, section
+  13).** User ruling. The 2026-07-20 teardown was declared GREEN on Phase 3 VERIFY alone, and Phase 3
+  structurally could not see any of defect 4's survivors, because it is a script inside the same
+  workflow auditing the surface that workflow models. Teardown now inherits the deploy-side rule
+  (LESSON 60): completion is certified by an independent qa-engineer pass against a written checklist
+  (section 13.3), run out of band by a differently-scoped identity. Phase 3 is retained unchanged as
+  the in-workflow fail-loud gate; the two are explicitly non-collapsible (section 13.2). Any QA verdict
+  other than PASS blocks the rebuild. The 2026-07-21 re-run is the first teardown held to this gate and
+  its QA pass is what clears the B0a rebuild to start.
