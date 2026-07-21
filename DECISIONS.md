@@ -37,6 +37,256 @@
 
 <!-- Newest at the top. -->
 
+### ADR-058: Teardown completion is certified by an INDEPENDENT qa-engineer pass, not by the workflow's own Phase 3 VERIFY - two gates, two actors, two identities, and neither may be collapsed into the other
+
+- **Date:** 2026-07-21
+- **Section:** 10 (Pipeline & Tooling) / teardown governance; extends ADR-054, symmetric with the
+  deploy-side rule in LESSON 60
+- **Status:** Accepted (user ruling 2026-07-21, recorded by architect; process ADR - binds the
+  teardown lane the way LESSON 60 binds the deploy lane)
+- **Decision makers:** user (the ruling), claude (architect, the mechanism and the boundary)
+
+**Context:**
+The 2026-07-20 teardown was declared GREEN on the strength of Phase 3 VERIFY alone (run 29765892057).
+It was not green. Twelve subscription-scoped objects, eight armed Defender for Cloud pricing plans and
+one registered resource provider survived, and every one of them was invisible to VERIFY. The reason is
+structural, not a coding slip: VERIFY is a script that lives inside the same workflow that did the
+work, and it audits essentially the same surface Phase 2 had just swept (resource groups by naming
+pattern, management groups, Databricks workspaces, Key Vaults). A self-check written against the
+sweeper's own model of the estate cannot discover a class of object the sweeper never modelled. That
+is the definition of a blind spot, and no amount of hardening inside VERIFY removes it, because the
+hardening is authored from the same model.
+
+The deploy side already solved this. LESSON 60 says apply-success is not green, QA-verified is green,
+and no root is marked complete until an independent qa-engineer pass validates live state against
+intent. Teardown simply never inherited the rule. ADR-054's design principle 5 ("a green Phase 3 IS
+the definition of E2E success") is, in hindsight, exactly the claim that let a half-teardown be
+reported as complete.
+
+There is also an identity asymmetry that makes the two checks genuinely non-redundant. VERIFY runs as
+the SCOPED teardown OIDC service principal, whose management-group read grants are deleted along with
+the subtree it just deleted (this is the whole reason the ADR-054 list-snapshot oracle exists, OQ-048).
+Its view of the tenant is deliberately narrow and partly self-referential. A qa-engineer pass reads
+live Azure as a differently-scoped identity that can see scopes the teardown SP structurally cannot.
+Two identities, two vantage points, two independent chances to see a remnant.
+
+**Decision:**
+1. **Teardown is not complete, and must not be reported as green, until an independent qa-engineer
+   pass confirms live state matches "torn down" against explicit, written acceptance criteria.** This
+   is a rule of the teardown lane, not a step in one runbook. It applies to every teardown of this
+   estate, in either mode, forever, and is inherited by any future wave without re-litigation.
+2. **Phase 3 VERIFY is retained unchanged in role and is NOT downgraded.** It remains the in-workflow,
+   fail-loud, instant truth-gate: it makes the workflow itself fail on a detectable remnant so a
+   broken run never exits 0. It is the ACTOR's own conscience.
+3. **The QA pass is structurally independent and is the AUDITOR.** Different actor (qa-engineer, not
+   the workflow), different time (after the run completes, out of band), different identity (reads
+   live Azure with a vantage the scoped teardown SP does not have), different source of truth (a
+   written acceptance checklist derived from what the ESTATE deploys, not from what the sweeper
+   sweeps).
+4. **What each is allowed to conclude, stated so the two can never be collapsed again.**
+   - Phase 3 VERIFY may conclude: "no remnant was found in the surface this workflow models." It may
+     NEVER conclude "the estate is torn down." A green VERIFY is a necessary condition and an input to
+     QA, never a verdict.
+   - The qa-engineer pass may conclude: "the estate is torn down" or "it is not, here is the remnant
+     list." Only this verdict clears a rebuild.
+   - Neither may be derived from the other. If a future session proposes deleting the QA pass because
+     "VERIFY already checks that", or folding the QA checklist into VERIFY so there is "one gate",
+     that proposal is rejected by this ADR: it recreates the exact 2026-07-20 blind spot, because the
+     checklist would then be authored and executed by the mechanism it is meant to audit.
+5. **Ordering and failure semantics (no judgment call in the moment).**
+   - The QA pass runs AFTER the teardown workflow run reaches a terminal state, and it runs whether
+     the run was green or red. A red run still gets a QA pass, because a red run tells you something
+     failed but not what survived.
+   - QA finding a remnant does NOT reopen or edit the workflow run. It produces a remnant list
+     classified per object, and the disposition is fixed by class: a remnant in a class the teardown
+     ALREADY covers is a targeted idempotent re-dispatch of the same workflow; a remnant in a class the
+     teardown does NOT cover is an architect gate item (a contract gap, which is what happened here)
+     and goes to a design ruling plus a DevSecOps change before any re-dispatch.
+   - **A QA verdict of anything other than PASS BLOCKS the rebuild.** No deploy dispatch of any root
+     may start while a teardown QA pass is outstanding or failed. This is the teardown-side mirror of
+     the pre-clearance gate on the deploy side.
+6. **The QA verdict is recorded**, per root class, in the worklog, with the concrete queries run and
+   their results, so the next teardown inherits an evidence trail rather than a claim.
+
+**Consequences:**
+- Positive: the failure mode that produced 21 latent apply failures cannot recur silently. The two
+  gates fail in different ways for different reasons, which is what makes them worth having.
+- Positive: symmetry with the deploy side. One rule ("the actor never certifies itself") now governs
+  both directions, which is easier to hold than two different standards.
+- Positive: the identity asymmetry is turned from a liability (OQ-048's 403-on-deleted-scope problem)
+  into an asset - the auditor sees what the actor cannot.
+- Negative / trade-offs: teardown gains a human-in-the-loop step and is no longer "one dispatch, walk
+  away". Accepted deliberately: the walk-away property is exactly what produced a false green.
+  Wall-clock cost is minutes against a rebuild that costs hours when it starts dirty.
+- Negative: the acceptance checklist is now a maintained artifact. It must grow whenever a wave adds a
+  new non-RG-scoped object class. That maintenance obligation is stated in ADR-057 decision 2 and is
+  the honest price of the rule.
+- Follow-ups required: the checklist lives in `docs/teardown-redesign.md` section 13.3 and is the
+  qa-engineer's entry point. The FIRST teardown held to this gate is the 2026-07-21 re-run, and that
+  run's QA pass is the artifact that clears the B0a rebuild to start.
+
+---
+
+### ADR-057: Teardown must return each subscription to the state a greenfield apply expects - subscription-scope completeness as a first-class teardown obligation, delivered by an explicit Phase 2 step 6 sweep, with terraform-destroy restored as a real (not nominal) primary path
+
+- **Date:** 2026-07-21
+- **Section:** 10 (Pipeline & Tooling) / teardown; AMENDS ADR-054 (adds a design principle and a Phase
+  2 step; does not supersede it - the four-phase shape, token-durability model, force-deletion,
+  auth-fail-loud rule and MG list-snapshot oracle all stand)
+- **Status:** Accepted (architect ruling; user directed the fix-the-teardown path over any manual
+  cleanup, 2026-07-21)
+- **Decision makers:** claude (architect); user (ruled that cleanup must be CI/CD, never manual, even
+  at the cost of losing a same-day rebuild start)
+
+**Context:**
+The 2026-07-21 B0a pre-clearance refresh found 21 deterministic, plan-invisible apply failures waiting
+for the rebuild: 12 in `platform/management`, 9 in `platform/security`. Every one traces to a single
+mechanical cause.
+
+The estate's teardown has TWO modes. `mode=terraform` runs Phase 1, a per-root `terraform destroy`, so
+every state-managed object is destroyed by the provider that owns it. `mode=az-sweep` skips Phase 1
+entirely and relies on Phase 2, which finds things by RESOURCE GROUP NAMING PATTERN
+(`RG_SWEEP_QUERY`), plus explicit passes for Databricks workspaces, Key Vaults and management groups.
+
+Run history is decisive. The 2026-07-11 teardown ran `terraform destroy` and produced a clean
+greenfield, which is exactly why the 2026-07-16 rebuild was pure adds. The 2026-07-19/20 teardown never
+completed a single `terraform destroy`: the one attempt (run 29706565357) cascade-failed on `synthetic`
+and `identity` and skipped every downstream root including `management` and `security`, and every
+subsequent attempt (29712487341, 29749656053, 29753193590, 29765892057, 29773408578) ran
+`mode=az-sweep`, where Phase 1 root jobs are SKIPPED by design. Job-level inspection of the green run
+confirms it: `Phase 0 - DISARM` success, every Phase 1 root job `skipped`, `Phase 2 - AZ SWEEP`
+success, `Phase 3 - VERIFY` success.
+
+So nothing in the az sweep regressed. The az sweep never had a subscription-scope pass, and it never
+claimed to. What changed is that the mode which does have subscription-scope coverage
+(terraform-destroy, via the owning providers) stopped running, while ADR-054 still described it as
+PRIMARY. The design's stated primary path was not the path that ran, and the fallback silently became
+the only path. Everything that lives at subscription scope rather than inside a resource group was
+therefore never deleted:
+
+- 5 `azurerm_consumption_budget_subscription` budgets, one per subscription
+- 5 cost exports created via azapi at `Microsoft.CostManagement/exports@2025-03-01`
+- 1 `azurerm_cost_anomaly_alert` scheduled action in the management subscription
+- 1 subscription-scope `azurerm_monitor_diagnostic_setting` in the security subscription
+- 8 `azurerm_security_center_subscription_pricing` plans left at Standard in the security subscription
+- 1 `azurerm_resource_provider_registration` (`Microsoft.CostManagementExports`) left Registered
+
+and each collides at create because the corresponding provider resource carries a create-time
+requires-import guard, verified in azurerm v4.71.0 source and in the azapi provider.
+
+**Decision:**
+
+1. **The governing principle (this is the part future waves inherit):**
+   > **Teardown must return every subscription in the estate to the state a greenfield apply expects.
+   > "Torn down" is defined by what the NEXT apply will attempt to create, not by what the last sweep
+   > happened to look at.**
+   >
+   > Operationally: for every object a root creates, teardown owns its removal or its reset,
+   > REGARDLESS of scope. Resource-group membership is an implementation detail of the sweeper, never
+   > a boundary of the obligation. An object that lives at subscription, tenant or management-group
+   > scope is exactly as in-scope as one inside a resource group. Where an object cannot be deleted
+   > (a subscription-level setting such as a pricing tier, or a provider registration), teardown owns
+   > returning it to its pre-apply VALUE.
+   >
+   > The test that settles any future "is this in scope" argument, in one line: **if leaving it makes
+   > the next greenfield apply fail or drift, teardown owns it.**
+
+2. **Coverage is a definition-of-done for every wave.** Any wave that introduces a non-RG-scoped
+   object class must extend the Phase 2 step 6 class list and the section 13.3 QA checklist in the
+   same change that introduces it. This is stated as a standing obligation so the gap cannot silently
+   reopen the next time a root gains a subscription-scope resource.
+
+3. **Mechanism: the design fork is resolved as BOTH, with explicit primacy.** Three options were
+   considered:
+   - **Option A - extend the az sweep with an explicit subscription-scope pass.** Enumerate and delete
+     the four object classes, reset the pricing plans, unregister the provider.
+   - **Option B - restore a real per-root `terraform destroy`** so state-managed objects are destroyed
+     by their owner, and let the az sweep go back to being a genuine backstop.
+   - **Option C - abandon terraform-destroy entirely** and declare az-sweep the only supported path,
+     making the sweep exhaustive.
+
+   **Ruling: Option A is implemented NOW as the mechanism, and Option B is restored as policy, with
+   Option C explicitly rejected.**
+
+   Reasoning:
+   - **Option A alone is insufficient as a philosophy but necessary as a mechanism.** The estate's
+     ONLY green teardowns since the redesign have been `mode=az-sweep`, because ADR-054 was built for
+     a world where state is empty, partial, or unreachable (F4) and where a long delete outlives an
+     OIDC assertion. That reliability is the thing we cannot regress. A teardown that only works when
+     state is intact is not a teardown; it is a happy path. So the az sweep must be able to finish the
+     job unaided, which means it must cover subscription scope.
+   - **Option B alone is insufficient and is what just failed.** `terraform destroy` covers
+     subscription scope for free, because the owning provider deletes what it created. But it is
+     precisely the path that cascade-failed on an empty `synthetic` root and then was abandoned for
+     five consecutive runs. Relying on it is relying on the mode that does not run.
+   - **Option C is rejected** because it throws away the only mechanism that has state fidelity. A
+     naming-pattern sweep can never know about an object whose name nobody predicted; a provider
+     destroying its own state can. Deleting Phase 1 would also strand any future populated root and
+     would make every new object class a silent gap until someone notices, which is exactly the defect
+     being fixed.
+   - Therefore: az-sweep becomes genuinely complete (Option A), AND `mode=terraform` is restored to
+     real primary status by policy (Option B) so the two mechanisms cross-check each other. Phase 2
+     already runs in BOTH modes as a remnant-catch pass, so step 6 executes on the terraform path too
+     and is idempotent there (everything already deleted reads as absent and no-ops).
+
+4. **Scope ruling per class** (full detail and exact API versions in `docs/teardown-redesign.md`
+   section 12.3):
+   - The 12 subscription-scoped objects: **IN**, Phase 2 new step 6, sub-step 6a.
+   - Defender for Cloud pricing reset to Free: **IN**, Phase 2 step 6, sub-step 6b, with a hard
+     allow-list and an explicit never-touch list (see decision 5).
+   - `Microsoft.CostManagementExports` unregistration: **IN**, Phase 2 step 6, sub-step 6c, ordered
+     strictly AFTER 6a so the provider has no dependent resources when it is unregistered.
+   - Placement is step 6, i.e. AFTER the RG sweep and Key Vault steps and BEFORE the reconcile wait,
+     so an RG-scoped cascade cannot race a subscription-scope delete, and so step 6's own work is
+     covered by the existing bounded reconcile and by Phase 3.
+
+5. **The pricing reset carries a hard safety rule.** Teardown resets to Free ONLY the plans this
+   estate's `platform/security` root actually configures, read from an explicit allow-list that
+   mirrors the config. It must NEVER touch a plan the estate does not configure, and must NEVER
+   attempt to re-arm anything. The reason is LESSON 41 asymmetry: setting a plan to Free is trivially
+   easy and may be permanently irreversible, because Microsoft blocks NEW enablement of deprecated
+   plans. A blanket "reset everything to Free" would eventually disarm a plan that can never be turned
+   back on. The residual risk (a currently-current plan being deprecated in the window between a
+   teardown and the next rebuild) is real and is raised as OQ-050 rather than hidden.
+
+6. **The RP unregistration is accepted as a teardown obligation only while the resource is managed
+   in-root.** LESSON 54 says do not manage provider registration in the same root as the resources
+   that need it. If that durable fix lands (OQ-049), sub-step 6c is deleted rather than maintained.
+   Until then, teardown owns returning the registration to its pre-apply state, because the deploy
+   root will otherwise fail on it every single cycle.
+
+7. **Everything in ADR-054 that is not named here is unchanged**: the four-phase shape, `!cancelled()`
+   ordering, the guard's mode/target rejection, `remove_mg_hierarchy` defaulting false, the
+   `--no-wait` plus single bounded reconcile token-durability model, `az_relogin`, the `az_run`
+   stdout/stderr separation, `is_auth_error` (NOT loosened), the MG list-snapshot oracle, Databricks
+   `--force-deletion`, and the auth-fail-loud rule. Step 6 inherits all of them; it does not get its
+   own error conventions.
+
+**Consequences:**
+- Positive: the next greenfield apply meets a real greenfield. The 21 known failures go to zero without
+  a single manual `az` command, which is the user's standing requirement.
+- Positive: the fix is additive. No existing step changes behaviour, so the proven-green E2E path is
+  not disturbed; step 6 is new code on a new surface with its own fail-loud handling.
+- Positive: naming the principle in terms of "what the next apply expects" makes future coverage
+  decisions mechanical instead of a debate per object type.
+- Negative / trade-offs: the sweep now has an object-class list that must be maintained per wave
+  (decision 2). A naming-pattern sweep is self-maintaining; an explicit class list is not. Accepted,
+  because the alternative is the silent gap this ADR exists to close, and decision 2 plus the ADR-058
+  QA checklist give it two places where the omission surfaces.
+- Negative: teardown now performs a WRITE (the pricing reset) rather than only deletes, which is a
+  small widening of blast radius. Bounded by the allow-list in decision 5 and by the fact that the
+  write only ever moves a plan toward the cheaper, less-privileged state.
+- Negative: restoring `mode=terraform` to real primary status means the F1 class (an empty root
+  failing and cascading) must stay fixed. It is - the `_tf-root.yml` state-empty no-op pre-step is the
+  ADR-054 fix - but it is now load-bearing again rather than academic.
+- Follow-ups required: OQ-049 (durable LESSON 54 fix for the in-root provider registration), OQ-050
+  (the irreversible-disarm risk in the pricing reset), OQ-051 (the ADR-041 tenant-root grants are
+  still attached and un-revoked). The implementation contract for DevSecOps is
+  `docs/teardown-redesign.md` section 12; the QA checklist that certifies the result is section 13.3
+  under ADR-058.
+
+---
+
 ### ADR-056: Branch topology and lifecycle - feature -> integration (banking) -> main, one workstream per branch, delete-on-merge after clearance, and MANDATORY verification of branch state against origin/* refs (never trust local pointers)
 
 - **Date:** 2026-07-20
