@@ -31,6 +31,60 @@
 
 <!-- Newest at the top. -->
 
+### OQ-054: Should a recovery-only input ever live as a standing repo Secret? Second incident of a stale standing Secret silently changing a run's behaviour
+
+- **Raised:** 2026-07-21 (greenfield `platform/identity` plan failure, run 29851615122; ADR-059
+  decision 4)
+- **Section:** 10 (Pipeline & Tooling) / CI inputs; relates to ADR-029, ADR-055 Part 1, LESSON 32,
+  LESSON 52
+- **Blocking:** No. ADR-059 decisions 2, 3 and 5 make tomorrow's run safe without this. This is the
+  durable fix.
+- **Priority:** Medium
+
+**Question:**
+`AADDS_IMPORT_REPLICA_SET_ID` is a ONE-SHOT recovery input carried as a standing GitHub repo Secret.
+It silently armed a config-driven import block on a greenfield plan, because a stale value from the
+July recovery era was never cleared. This is the SECOND time a stale standing Secret has silently
+changed a run's behaviour in this repo. Should recovery-only inputs be carried as `workflow_dispatch`
+inputs instead of standing Secrets, as a general rule?
+
+**Why a standing Secret is a poor carrier for a one-shot input, specifically:**
+- **Write-only.** It cannot be read back to diagnose (LESSON 32). Nobody can answer "is it set?" by
+  looking at the repo.
+- **Masked.** An operator cannot tell armed from unarmed. The ONLY available oracle is an indirect
+  artifact: GitHub renders `***` for a non-empty secret and nothing for an empty one in a job log.
+  That artifact is literally how this failure was diagnosed, after it had already broken a run.
+- **Persistent.** It survives every teardown, every branch, every rebuild cycle, and every document
+  that discusses it. Three separate documents touched this Secret (the 2026-07-12 gate said delete it,
+  ADR-055 reinstated the wiring, the 2026-07-21 refresh marked the delete instruction superseded) and
+  none of them owned the VALUE.
+- **No dispatch-time signal.** It arms a code path with nothing visible at the moment a human decides
+  to run something.
+
+A `workflow_dispatch` input inverts every one of those properties: blank by default, plainly visible
+in the run's own UI, typed deliberately by a human for one specific run, structurally incapable of
+surviving to the next run, and fail-closed on a malformed value. The `enable_conditional_access_override`
+input added by ADR-055 Part 1 is the working precedent in this same workflow.
+
+**Options being considered:**
+- A (RECOMMENDED): convert `aadds_import_replica_set_id` to a `workflow_dispatch` input on the
+  ADR-055 override pattern, and adopt the general rule that **recovery-only and one-shot inputs are
+  dispatch inputs, never standing Secrets**. Standing Secrets remain correct for durable
+  configuration (subscription IDs, contact addresses, group object IDs) - the distinction is
+  one-shot versus durable, not secret versus not. Cost: a small `deploy.yml` plus `_tf-root.yml`
+  change, mirroring code that already exists.
+- B: keep the Secret and add a mandatory pre-dispatch verification step to every affected gate (check
+  the `***` artifact in the previous run's log, or re-set the Secret to empty before each greenfield
+  run). Zero code change, but it is a procedural control over a mechanism that has now failed twice,
+  and it depends on an indirect oracle.
+- C: keep the Secret and have the root itself fail loudly when the input is non-empty on what looks
+  like a greenfield plan. Rejected: the root cannot reliably tell greenfield from recovery at plan
+  time, which is the whole problem.
+
+**Recommended default:** A, implemented AFTER `platform/identity` is green. Deliberately not before:
+it modifies the workflows whose two-pass behaviour tomorrow's run exists to prove, and changing the
+subject of a proof immediately before that proof is bad practice (ADR-059 decision 4).
+
 ### OQ-053: Two Terraform state blobs were deleted from the firewalled state account and nobody can say when, how, or by whom - the data survived, the forensics did not
 
 - **Raised:** 2026-07-21 (teardown QA pass finding 1, run 29847433748; architect ruling PC-7R)

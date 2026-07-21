@@ -318,10 +318,10 @@ the `Deny-Public-IP` assignment the ADR-028 exemption targets) and after **Step 
 
 | # | GO condition |
 |---|---|
-| **PC-1G** | Pass 1 gate proof: the flag-false plan is azurerm-ONLY; ZERO azuread resources appear. Any azuread address at flag-false = STOP (the umbrella gate did not take). |
+| **PC-1G** | Pass 1 gate proof: the flag-false plan is azurerm-ONLY; ZERO azuread resources appear. Any azuread address at flag-false = STOP (the umbrella gate did not take). **AMENDED 2026-07-21 (ADR-059), then CORRECTED the same day after code review: the Pass 1 plan step must EXIT ZERO and its output must contain NO `Error:` diagnostic anywhere.** Judge this by the step's exit status / CI red-green, NEVER by the presence of a `Plan: N to add ...` summary line. **A plan tally and a fatal error COEXIST in this project - verified, not theoretical.** In run 29851615122 the `Error: Invalid import id argument` was emitted FIRST, and `Plan: 25 to add, 0 to change, 0 to destroy.` plus a full `Changes to Outputs:` block followed it 29 milliseconds later in the same stream, before `##[error]Process completed with exit code 1`. Terraform renders the hypothetical plan for context even when a resource errors the run out, so **a tally is not evidence of success.** Two blocking fixes are prerequisites to this condition being testable: the import ID must be constructed from variables (ADR-059 decision 2, cloud-engineer) and the `AADDS_IMPORT_REPLICA_SET_ID` Secret VALUE must be cleared (ADR-059 decision 3, user). See addendum A10. |
 | **PC-2G** | Ordering: Step 1 `platform/management-groups` applied and the identity-MG `Deny-Public-IP` assignment LIVE before Pass 1 (the ADR-028 exemption targets it by literal id; missing => exemption PUT 404s). `Enable-DDoS-VNET` = DoNotEnforce confirmed. Step 3 primary-hub Secrets present for the peering. |
 | **PC-3G** | Tenant prereqs: manual DS publisher SP + "AAD DC Administrators" group + CI SP membership in place (Pass 1); Graph app roles (Policy.ReadWrite.ConditionalAccess, Policy.Read.All, Application.Read.All) + **Entra ID P2 active** before Pass 2. P2 gates CA-007/008; a lapse fails only the short Pass 2 (cheap retry after relicensing), never the multi-hour Pass 1. **Operator confirmed P2 ACTIVE 2026-07-20 - PC-3G P2 sub-condition SATISFIED.** |
-| **PC-4G** | Recovery armed but inert: `AADDS_IMPORT_REPLICA_SET_ID` UNSET for the first Pass-1 apply. On a create-wait timeout use `untaint` (tainted-in-state) or supply the replica-set GUID (absent-from-state / import); re-apply still at flag-false. Remove the import block after recovery (LESSON 52). |
+| **PC-4G** | Recovery armed but inert: `AADDS_IMPORT_REPLICA_SET_ID` UNSET for the first Pass-1 apply. On a create-wait timeout use `untaint` (tainted-in-state) or supply the replica-set GUID (absent-from-state / import); re-apply still at flag-false. Remove the import block after recovery (LESSON 52). **REWRITTEN 2026-07-21 (ADR-059): this condition was CORRECT but UNVERIFIABLE as written, and it failed silently.** The Secret was NOT unset, and nothing in the gate could have detected that, because repo Secrets are write-only (LESSON 32). **Verification method, now mandatory:** GitHub renders a non-empty secret as `***` in a job log and an empty one as nothing at all. Confirm `TF_VAR_aadds_import_replica_set_id` renders EMPTY in the Pass 1 job environment. That artifact is the only available oracle and is what diagnosed run 29851615122. If recovery IS used, the Secret is CLEARED immediately after the recovery apply lands, as a runbook step, not an intention (ADR-059 decision 5). |
 | **PC-5G** | Plan-scan both passes to the A6 bars. Pass 1: azurerm-only, 0 destroy/replace. Pass 2: domain 0 change/0 replace (FullySynced pin holds - a `-/+` on the domain = STOP), **TEN pure adds** = all 8 CA policies CA-001..CA-008 INCLUDING geo_block/CA-005 + the named location + `time_sleep.wait_named_location` (geo_block IS created - `enable_geo_block_ca_policy` defaults true, code-verified; a plan showing geo_block ABSENT or only 9 adds = investigate before apply), no touch to VNet/NSG/RSV/exemption/peering. |
 | **PC-6G** | LIVE-PROOF caveat (the honest crux): the durable-token fix is STRUCTURAL but only PROVEN by this multi-hour greenfield apply. QA/architect confirm on the run: Pass 1 completes (or times out + recovers) with NO AADSTS700024 and azurerm token refresh across the long poll; Pass 2 Graph writes succeed under a fresh token. A SECOND identical AADSTS700024 = STOP (do not burn a 3rd multi-hour cycle - counts against the user's 4-fail bar). |
 | **PC-7G** | The `enable_conditional_access = false` override is GREENFIELD-ONLY. NEVER apply it to a live estate that already carries the CA policies - true -> false on a populated estate DESTROYS all ten gated addresses (the nine azuread Graph resources - 8 CA policies incl. geo_block + the named location - plus the `time_sleep`) via count 1 -> 0. On greenfield they never existed, so Pass 1 -> Pass 2 is purely additive. Guard the override to the clean-room rebuild. |
@@ -337,3 +337,95 @@ the `Deny-Public-IP` assignment the ADR-028 exemption targets) and after **Step 
   exemption scoped to `rg-identity-aadds` only, RSV ZoneRedundant, identity VNet DNS -> DC IPs.
 - Token-durability evidence (PC-6G): the smoking-gun check - the Pass 1 log shows azurerm polling the create
   for its full duration with NO auth failure, and Pass 2 Graph writes under a fresh assertion.
+
+---
+
+## A10. ADDENDUM 2026-07-21 - greenfield plan failure on the ADR-029 import block (ADR-059)
+
+> Appended, not rewritten. Sections A1 to A9 above are the 2026-07-20 record and stand.
+> Found by an exploratory greenfield plan the user asked for, NOT by a gate condition.
+
+### What happened
+
+`platform/identity`, `action=plan`, ref `banking`, greenfield: **run 29851615122 FAILED at Terraform
+Plan** (`##[error]Process completed with exit code 1`):
+
+```
+Error: Invalid import id argument
+  on domain-services.tf line 198, in import:
+  The import block "id" argument depends on resource attributes that cannot be
+  determined until apply, so Terraform cannot plan to import this resource.
+```
+
+> **THE TRAP, and it is the most operationally useful fact in this addendum (corrected 2026-07-21
+> after code review; an earlier revision of this section wrongly said the run failed "before producing
+> any resource summary").** It did not. The raw log shows the `Error:` at 17:09:06.212, then
+> `Plan: 25 to add, 0 to change, 0 to destroy.` at 17:09:06.241 - **29 milliseconds later, in the same
+> stream** - followed by a full `Changes to Outputs:` block and several `Warning:` blocks, and only
+> then the non-zero exit. Terraform renders the hypothetical plan for context even when a resource has
+> already errored the run out. **A `Plan: N to add` tally is therefore NOT evidence that a plan
+> succeeded**, and an operator who scans for the tally and stops reading will conclude a failed plan
+> passed. Judge a plan by the step's EXIT STATUS and the absence of any `Error:` diagnostic, never by
+> the summary line. This matters concretely for tomorrow: if the Secret is not actually cleared, Pass 1
+> fails instead with `Cannot import non-existent remote object` (a config-driven import performs its
+> Read during PLAN), and on this run's demonstrated behaviour that error will very likely coexist with
+> a full tally too.
+
+Two compounding causes, both established from the run log:
+
+1. **The import block was ACTIVE, not inert.** `TF_VAR_aadds_import_replica_set_id` rendered as `***`
+   in the job environment. GitHub masks a NON-EMPTY secret and prints nothing for an empty one, so the
+   `***` is positive evidence that the repo Secret still carries a stale replica-set ID from the July
+   recovery era. The `for_each` guard demonstrably passed, since evaluation reached the `id` line.
+   **PC-4G already required this Secret to be UNSET.** The condition was right; it was also
+   unverifiable as written, and nobody could have checked it.
+2. **The ID is structurally unplannable on greenfield.** It interpolated
+   `azurerm_resource_group.identity_aadds[0].id`; on a clean tenant that RG does not exist, so `.id`
+   is "known after apply". **This is not a stale-value artifact.** It would fail identically with a
+   fresh, valid GUID, because ADR-055 Pass 1 is greenfield by definition.
+
+### Why cause 2 is the serious one
+
+The recovery path is MOST LIKELY to be needed on exactly the run where it is currently broken. ADR-029
+exists because the AADDS create is a 1 to 3 hour operation that can time out with the domain built but
+unstated. If that happens during Pass 1, the recovery plan would fail too, under precisely the time
+pressure the mechanism exists to relieve. Fixing the ID is therefore NOT deferrable to "the day we
+need it".
+
+### The fix (ADR-059, option C - both halves)
+
+| # | Fix | Lane | Why both are needed |
+|---|---|---|---|
+| 1 | **Construct the import ID from variables**, not from a managed resource attribute: prefix becomes `/subscriptions/${var.identity_subscription_id}/resourceGroups/rg-identity-aadds-${var.org_prefix}-${var.environment}`, remainder unchanged. Verified against the azurerm v4.71.0 import docs at the pinned tag. ADR-029's intent (no GUID literal in committed HCL) is FULLY preserved - the subscription arrives as a variable. | **cloud-engineer**, then reviewer | Makes the block work on the day it is actually needed |
+| 2 | **Clear the `AADDS_IMPORT_REPLICA_SET_ID` Secret VALUE.** Do not delete the Secret and do not remove the wiring - ADR-055 Part 1 reinstated both deliberately and they are correct. Only the value is wrong. | **user** (repo Settings, Secrets) | Makes tomorrow's Pass 1 plan inert and correct |
+
+Neither substitutes for the other. Fix 1 alone leaves a greenfield run attempting to import a replica
+set that no longer exists. Fix 2 alone leaves a recovery path that fails when used.
+
+### Verdict for tomorrow's two-pass: **STILL GO**, once both fixes land
+
+- Both fixes are small, off the multi-hour path, and independently verifiable before dispatch. **Fix 1
+  is proven by the Pass 1 plan step EXITING ZERO with no `Error:` diagnostic in its output - NOT by
+  the plan reaching a resource summary** (corrected 2026-07-21 after code review: run 29851615122
+  produced a full `Plan: 25 to add, 0 to change, 0 to destroy.` tally AFTER its fatal error and still
+  exited 1, so a tally proves nothing - see the trap note above). Fix 2 is proven by
+  `TF_VAR_aadds_import_replica_set_id` rendering EMPTY in the job environment (PC-4G, rewritten;
+  GitHub Actions dumps the job-level `env:` block at the top of every step, so it is visible in the
+  Terraform Plan step's own env dump without any step printing it).
+- **No other GO condition is affected.** PC-2G, PC-3G, PC-5G, PC-6G, PC-7G and PC-8G are unchanged.
+  The umbrella-gate mechanism, the token-durability fix that this run exists to prove, the CA policy
+  set, and the ordering prerequisites are all untouched by this finding.
+- **The gate worked, at a cost.** PC-1G would have caught this at the plan-scan step. It was caught
+  earlier and more cheaply by an exploratory plan, which is the better outcome: had it surfaced
+  tomorrow it would have consumed the Wednesday window and counted toward the user's four-failure bar.
+- Sequence tomorrow is unchanged: fixes land on `banking` -> Pass 1 plan (`enable_conditional_access_override = false`)
+  -> scan to the A6 bars -> Pass 1 apply -> Pass 2 plan -> Pass 2 apply.
+
+### Recorded for the record
+
+This is the SECOND time a stale standing repo Secret has silently changed a run's behaviour. The
+governance question - whether recovery-only inputs should ever be standing Secrets rather than
+per-run `workflow_dispatch` inputs - is raised as **OQ-054**, with the ADR-055
+`enable_conditional_access_override` input as the working precedent. It is deliberately NOT
+implemented before tomorrow: it would modify the very workflows whose two-pass behaviour tomorrow's
+run exists to prove.
