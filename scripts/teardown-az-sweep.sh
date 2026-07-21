@@ -57,6 +57,19 @@
 # See step 4's own comment below for the corrected mechanism (`mg_snapshot_load` /
 # `mg_in_snapshot`, teardown-common.sh).
 #
+# AMENDED a fourth time 2026-07-21 (ADR-057, docs/teardown-redesign.md section 12.3): added
+# step 6 - the four subscription-scoped object classes, the Defender for Cloud pricing reset
+# to Free, and the Microsoft.CostManagementExports provider unregistration. Root cause: the az
+# sweep finds things by RESOURCE GROUP naming pattern (steps 1-3) plus MG scope (step 4), and
+# structurally cannot see anything that lives outside a resource group or a management group.
+# It never claimed to. What actually regressed is that `terraform destroy` (mode=terraform,
+# Phase 1) - which covers subscription scope for free, because the owning provider deletes
+# what it created - had not run for platform/management or platform/security since 2026-07-11,
+# while every teardown since then ran mode=az-sweep (Phase 1 skipped by design) and reported
+# green. Step 6 makes the az sweep genuinely complete on its own, restoring the reliability
+# az-sweep exists for (the state-gone/F4 case) without depending on mode=terraform actually
+# having run. Full root-cause account: docs/teardown-redesign.md section 12.1.
+#
 # Order matters:
 #   1. Databricks: submit the WORKSPACE delete --no-wait --force-deletion (never `az group
 #      delete` the managed RG directly - it still carries an RP deny-assignment, F2, even with
@@ -76,7 +89,18 @@
 #      Subscriptions are never deleted, only re-parented (docs/teardown-redesign.md
 #      section 5). MG ops are fast control-plane calls and stay synchronous (no --no-wait,
 #      no reconcile wait needed for MGs, per locked decision 9.3).
-#   5. Reconciliation: ONE bounded wait for every RG submitted in steps 1-2 to report gone.
+#   6. Subscription scope (ADR-057, docs/teardown-redesign.md section 12.3): the four
+#      subscription-scoped object classes (budgets, cost exports at api-version 2025-03-01,
+#      cost anomaly scheduled actions, subscription diagnostic settings) across all 5 subs;
+#      the Defender for Cloud pricing reset to Free from the DEFENDER_PLANS_TO_FREE allow-list
+#      (security subscription only, teardown-common.sh); and the RP_NAMESPACES_TO_UNREGISTER
+#      provider unregistration (management subscription only, strictly after the object-class
+#      deletes). Runs after step 4 and before step 7 so nothing here races a live MG-scope
+#      remediation and step 6's own submissions are covered by the existing reconcile + Phase 3.
+#   7. Reconciliation: ONE bounded wait for every RG submitted in steps 1-2 to report gone.
+#      Step 6's writes are synchronous sub-second control-plane calls, not RGs - they are
+#      deliberately NOT added to this wait (wait_for_rgs_gone is RG-shaped); Phase 3 VERIFY
+#      (VERIFY 6-8) and the QA pass are their completion gate instead.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -280,13 +304,193 @@ else
   done
 fi
 
-# --- 5. Reconciliation: ONE bounded wait for everything submitted in steps 1-2 (section 9.3).
+# --- 6. SUBSCRIPTION SCOPE (ADR-057, docs/teardown-redesign.md section 12.3, added
+#     2026-07-21). Everything in steps 1-4 finds resources by RESOURCE GROUP naming pattern or
+#     by MG scope; neither can see an object that lives at subscription scope. This step
+#     covers that surface explicitly: 6a the four subscription-scoped object classes, 6b the
+#     Defender for Cloud pricing reset to Free (a WRITE, not a delete - the one genuinely
+#     dangerous operation here), 6c the Microsoft.CostManagementExports provider
+#     unregistration. Runs AFTER step 4 (nothing here races a live MG-scope remediation) and
+#     BEFORE step 7's reconcile (so step 6's own submissions are covered by the existing wait
+#     and by Phase 3 - no new wait is introduced). Inherits every existing convention without
+#     exception: az_run for any call whose stdout is consumed as data (Trap 1), is_auth_error
+#     classification on every non-zero (Trap 2), auth-fail-loud, idempotent-absent-is-success.
+echo "== Phase 2 step 6: subscription-scope objects (budgets, cost exports, cost anomaly, diagnostic settings, Defender pricing reset, RP unregister) =="
+ARM_BASE="https://management.azure.com"
+
+# --- 6a. Four subscription-scoped object classes, all 5 subscriptions. Discovery is by LIST,
+#     never a hardcoded name list, so a renamed or added object is still caught. Filtered by
+#     the same estate-ownership test the RG sweep already uses (contains(name,'globaris')) so
+#     a non-estate object in a shared subscription is never touched - subscription diagnostic
+#     settings are the one exception (the estate name is not org-prefixed; see below).
+#     List-call failure: a SUBSCRIPTION-scoped list can never legitimately be gone (section 9.4
+#     design boundary - subscriptions are only re-parented, never deleted), so ANY non-zero is
+#     FAIL LOUD, matching steps 1-3 above. Delete-call failure: classify with is_auth_error -
+#     auth-shaped fails loud, anything else warns and continues (idempotent-absent is success;
+#     Phase 3 VERIFY 6 and the QA pass are the backstops). These are synchronous sub-second
+#     control-plane deletes, not RGs - deliberately not added to wait_for_rgs_gone in step 7.
+echo "-- 6a: consumption budgets, cost exports, cost anomaly scheduled actions, subscription diagnostic settings --"
+for sub in "${SUBS[@]}"; do
+  # Consumption budgets (Microsoft.Consumption/budgets, api-version 2023-05-01).
+  if ! az_run budget_names_out consumption budget list --subscription "$sub" \
+      --query "[?contains(name,'globaris')].name" -o tsv; then
+    echo "::error::consumption budget list failed for subscription ${sub} - a failed list is never read as 'no budgets' (section 9.4): ${AZ_RUN_STDERR}"
+    exit 1
+  fi
+  # shellcheck disable=SC2154  # budget_names_out is assigned indirectly by az_run's printf -v
+  mapfile -t budget_names <<< "$budget_names_out"
+  for name in "${budget_names[@]:-}"; do
+    [ -z "$name" ] && continue
+    echo "  Deleting subscription budget ${name} (sub ${sub})"
+    if ! budget_del_out="$(az rest --method delete \
+        --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.Consumption/budgets/${name}?api-version=2023-05-01" \
+        --output none 2>&1)"; then
+      if is_auth_error "$budget_del_out"; then
+        echo "::error::budget delete for ${name} (sub ${sub}) failed with an auth/transport error: ${budget_del_out}"
+        exit 1
+      fi
+      echo "  ::warning::budget delete for ${name} failed or already gone (continuing - idempotent retry on next run): ${budget_del_out}"
+    fi
+  done
+
+  # Cost exports (Microsoft.CostManagement/exports, api-version 2025-03-01 - LOAD-BEARING, do
+  # NOT simplify to a default/older version: an older version reads these as absent, which is
+  # exactly the false-negative that happened on 2026-07-16, docs/teardown-redesign.md 12.3).
+  if ! az_run export_names_csv rest --method get \
+      --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/exports?api-version=2025-03-01" \
+      --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
+    echo "::error::cost export list (api-version 2025-03-01) failed for subscription ${sub} - a failed list is never read as 'no exports' (section 9.4): ${AZ_RUN_STDERR}"
+    exit 1
+  fi
+  # shellcheck disable=SC2154  # export_names_csv is assigned indirectly by az_run's printf -v
+  IFS=',' read -ra export_names <<< "$export_names_csv"
+  for name in "${export_names[@]:-}"; do
+    [ -z "$name" ] && continue
+    echo "  Deleting cost export ${name} (sub ${sub})"
+    if ! export_del_out="$(az rest --method delete \
+        --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/exports/${name}?api-version=2025-03-01" \
+        --output none 2>&1)"; then
+      if is_auth_error "$export_del_out"; then
+        echo "::error::cost export delete for ${name} (sub ${sub}) failed with an auth/transport error: ${export_del_out}"
+        exit 1
+      fi
+      echo "  ::warning::cost export delete for ${name} failed or already gone (continuing - idempotent retry on next run): ${export_del_out}"
+    fi
+  done
+
+  # Cost anomaly / scheduled actions (Microsoft.CostManagement/scheduledActions, api-version
+  # 2023-11-01, list/delete BY SCOPE). Only the management subscription carries one today (the
+  # InsightAlert cost anomaly alert), but the loop runs across all five so a future wave that
+  # adds another is covered without a code change.
+  if ! az_run scheduled_action_names_csv rest --method get \
+      --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/scheduledActions?api-version=2023-11-01" \
+      --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
+    echo "::error::cost anomaly scheduled action list failed for subscription ${sub} - a failed list is never read as 'no scheduled actions' (section 9.4): ${AZ_RUN_STDERR}"
+    exit 1
+  fi
+  # shellcheck disable=SC2154  # scheduled_action_names_csv is assigned indirectly by az_run's printf -v
+  IFS=',' read -ra scheduled_action_names <<< "$scheduled_action_names_csv"
+  for name in "${scheduled_action_names[@]:-}"; do
+    [ -z "$name" ] && continue
+    echo "  Deleting cost anomaly scheduled action ${name} (sub ${sub})"
+    if ! sa_del_out="$(az rest --method delete \
+        --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/scheduledActions/${name}?api-version=2023-11-01" \
+        --output none 2>&1)"; then
+      if is_auth_error "$sa_del_out"; then
+        echo "::error::cost anomaly scheduled action delete for ${name} (sub ${sub}) failed with an auth/transport error: ${sa_del_out}"
+        exit 1
+      fi
+      echo "  ::warning::scheduled action delete for ${name} failed or already gone (continuing - idempotent retry on next run): ${sa_del_out}"
+    fi
+  done
+
+  # Subscription diagnostic settings. The ONE class where the standard globaris-substring
+  # filter does not apply on its own - the estate name is diag-activity-to-security-law (NOT
+  # org-prefixed) - so this lists ALL names unfiltered and applies the ownership test
+  # (globaris substring OR the exact estate name) per row below, before deleting anything.
+  if ! az_run diag_names_out monitor diagnostic-settings subscription list --subscription "$sub" \
+      --query "value[].name" -o tsv; then
+    echo "::error::subscription diagnostic-settings list failed for subscription ${sub} - a failed list is never read as 'no diagnostic settings' (section 9.4): ${AZ_RUN_STDERR}"
+    exit 1
+  fi
+  # shellcheck disable=SC2154  # diag_names_out is assigned indirectly by az_run's printf -v
+  mapfile -t diag_names <<< "$diag_names_out"
+  for name in "${diag_names[@]:-}"; do
+    [ -z "$name" ] && continue
+    case "$name" in
+      *globaris*|diag-activity-to-security-law) ;;
+      *)
+        echo "  Skipping subscription diagnostic setting ${name} (sub ${sub}) - not estate-owned (no 'globaris' substring, not diag-activity-to-security-law)."
+        continue
+        ;;
+    esac
+    echo "  Deleting subscription diagnostic setting ${name} (sub ${sub})"
+    if ! diag_del_out="$(az monitor diagnostic-settings subscription delete --name "$name" --subscription "$sub" --yes --output none 2>&1)"; then
+      if is_auth_error "$diag_del_out"; then
+        echo "::error::diagnostic setting delete for ${name} (sub ${sub}) failed with an auth/transport error: ${diag_del_out}"
+        exit 1
+      fi
+      echo "  ::warning::diagnostic setting delete for ${name} failed or already gone (continuing - idempotent retry on next run): ${diag_del_out}"
+    fi
+  done
+done
+
+# --- 6b. Defender for Cloud pricing reset to Free (security subscription only). A WRITE, not
+#     a delete - the one genuinely dangerous operation in this whole step. Iterates the FIXED
+#     DEFENDER_PLANS_TO_FREE allow-list ONLY (teardown-common.sh) - NEVER the live pricing
+#     list: a live-list loop would eventually reset a plan this estate does not own, and
+#     setting a plan to Free can be permanently irreversible (Microsoft blocks NEW enablement
+#     of deprecated plans - LESSON 41, OQ-050). Never attempts Standard; teardown only ever
+#     moves toward Free. Idempotent: resetting an already-Free plan is a successful no-op. ---
+echo "-- 6b: Defender for Cloud pricing reset to Free (security subscription, fixed allow-list only) --"
+if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
+  echo "::error::SECURITY_SUBSCRIPTION_ID is empty - cannot reset Defender pricing. This is already a VERIFY 0 failure class; failing loud here too rather than silently skipping."
+  exit 1
+fi
+for plan in "${DEFENDER_PLANS_TO_FREE[@]}"; do
+  echo "  Setting Defender plan ${plan} to Free (sub ${SECURITY_SUBSCRIPTION_ID})"
+  if ! pricing_out="$(az security pricing create --name "$plan" --tier Free \
+      --subscription "$SECURITY_SUBSCRIPTION_ID" --output none 2>&1)"; then
+    if is_auth_error "$pricing_out"; then
+      echo "::error::Defender pricing reset for ${plan} failed with an auth/transport error: ${pricing_out}"
+      exit 1
+    fi
+    echo "  ::warning::Defender pricing reset for ${plan} failed (continuing - idempotent retry on next run; VERIFY 7 will report if it is still not Free): ${pricing_out}"
+  fi
+done
+
+# --- 6c. Resource-provider unregistration (management subscription only). Runs strictly
+#     AFTER 6a - unregistering a provider that still has resources fails. Idempotent:
+#     unregistering an already-unregistered provider is a no-op. Does NOT poll to
+#     Unregistered in-session - that is exactly the pattern the token-durability model
+#     (section 4 / 9.2) exists to forbid. Submit only; Phase 3 VERIFY 8 and the QA pass
+#     confirm the terminal state. ---
+echo "-- 6c: resource-provider unregistration (management subscription) --"
+if [ -z "${MANAGEMENT_SUBSCRIPTION_ID:-}" ]; then
+  echo "::error::MANAGEMENT_SUBSCRIPTION_ID is empty - cannot unregister resource providers. This is already a VERIFY 0 failure class; failing loud here too rather than silently skipping."
+  exit 1
+fi
+for ns in "${RP_NAMESPACES_TO_UNREGISTER[@]}"; do
+  echo "  Unregistering resource provider ${ns} (sub ${MANAGEMENT_SUBSCRIPTION_ID})"
+  if ! provider_out="$(az provider unregister --namespace "$ns" \
+      --subscription "$MANAGEMENT_SUBSCRIPTION_ID" --output none 2>&1)"; then
+    if is_auth_error "$provider_out"; then
+      echo "::error::provider unregister for ${ns} failed with an auth/transport error: ${provider_out}"
+      exit 1
+    fi
+    echo "  ::warning::provider unregister for ${ns} failed or already unregistered (continuing - idempotent retry on next run): ${provider_out}"
+  fi
+done
+
+# --- 7. Reconciliation: ONE bounded wait for everything submitted in steps 1-2 (section 9.3).
 #     The wait lives here, never in Phase 3 VERIFY, which stays an instant unwaited truth-gate.
 #     wait_for_rgs_gone calls az_relogin at the START of every iteration (section 9.2c), so this
 #     can never outlive the token that started it, however long it runs (up to the 30-min
 #     ceiling). Any RG still present at the ceiling is reported by Phase 3 VERIFY as a remnant -
-#     re-dispatch (idempotent) is the safety net, never an in-workflow auto-retry. ---
-echo "== Phase 2 step 5: reconciliation (bounded wait for submitted RGs, incl. Databricks managed) =="
+#     re-dispatch (idempotent) is the safety net, never an in-workflow auto-retry. Step 6's
+#     writes are synchronous sub-second control-plane calls, not RGs - intentionally NOT part
+#     of this wait; VERIFY 6-8 and the QA pass are their completion gate instead. ---
+echo "== Phase 2 step 7: reconciliation (bounded wait for submitted RGs, incl. Databricks managed) =="
 declare -a reconcile_pairs=()
 for i in "${!deleted_rgs[@]}"; do
   reconcile_pairs+=("${deleted_subs[$i]}" "${deleted_rgs[$i]}")

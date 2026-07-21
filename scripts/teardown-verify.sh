@@ -25,6 +25,14 @@
 # call - a merged capture could make a genuinely clean scope's length/count compare fail
 # falsely (a false VERIFY BLOCK on a legitimately complete teardown). `az_run` keeps stdout
 # (the data channel) and stderr (only inspected on the non-zero-exit path) fully separate.
+#
+# AMENDED a third time 2026-07-21 (ADR-057, docs/teardown-redesign.md section 12.3): added
+# VERIFY 6-8 - the four subscription-scoped object classes, the Defender for Cloud pricing
+# reset to Free, and the resource-provider unregistration. These check exactly the surface
+# Phase 2 step 6 (teardown-az-sweep.sh) now sweeps; see that step's header comment for the
+# full root-cause account of why this surface was missing. Same subscription-scoped
+# fail-loud boundary as VERIFY 2/3/5 above (a subscription can never legitimately be gone, so
+# ANY non-zero list is a hard failure, never read as "clean").
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -199,6 +207,147 @@ for sub in "${SUBS[@]}"; do
     echo "  sub ${sub}: ${row} (name, purgeProtectionEnabled - true means the redeploy must recover it, LESSON 56)"
   done
 done
+
+# --- 6. Subscription-scoped object classes (ADR-057, docs/teardown-redesign.md section
+#     12.3, added 2026-07-21) - the 2026-07-20 blind spot: consumption budgets, cost exports
+#     (api-version 2025-03-01 - LOAD-BEARING, do NOT simplify to a default/older version, an
+#     older version reads these as absent), cost anomaly scheduled actions, and subscription
+#     diagnostic settings. Same list calls and API versions as Phase 2 step 6a. A
+#     SUBSCRIPTION-scoped list can never legitimately be gone (design section 6 boundary), so
+#     ANY non-zero here is FAIL LOUD, matching VERIFY 2/3/5 above - never read a failed list
+#     as "no objects". ---
+echo "== VERIFY 6: subscription-scoped object classes (budgets, cost exports, cost anomaly, diagnostic settings) =="
+ARM_BASE="https://management.azure.com"
+v6_clean=1
+for sub in "${SUBS[@]}"; do
+  if ! az_run budget_names_out consumption budget list --subscription "$sub" \
+      --query "[?contains(name,'globaris')].name" -o tsv; then
+    note_fail "consumption budget list failed for subscription ${sub} - a failed list is never read as 'no budgets' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
+    v6_clean=0
+  else
+    # shellcheck disable=SC2154  # budget_names_out is assigned indirectly by az_run's printf -v
+    mapfile -t budget_names <<< "$budget_names_out"
+    for name in "${budget_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      note_fail "Subscription budget ${name} still present in subscription ${sub}."
+      v6_clean=0
+    done
+  fi
+
+  if ! az_run export_names_csv rest --method get \
+      --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/exports?api-version=2025-03-01" \
+      --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
+    note_fail "cost export list (api-version 2025-03-01) failed for subscription ${sub} - a failed list is never read as 'no exports' (a dead token would otherwise falsely certify this subscription clean; an older API version would also falsely read these as absent, which is exactly the 2026-07-16 false negative - 2025-03-01 is mandatory here): ${AZ_RUN_STDERR}"
+    v6_clean=0
+  else
+    # shellcheck disable=SC2154  # export_names_csv is assigned indirectly by az_run's printf -v
+    IFS=',' read -ra export_names <<< "$export_names_csv"
+    for name in "${export_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      note_fail "Cost export ${name} still present in subscription ${sub}."
+      v6_clean=0
+    done
+  fi
+
+  if ! az_run scheduled_action_names_csv rest --method get \
+      --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/scheduledActions?api-version=2023-11-01" \
+      --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
+    note_fail "cost anomaly scheduled action list failed for subscription ${sub} - a failed list is never read as 'no scheduled actions' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
+    v6_clean=0
+  else
+    # shellcheck disable=SC2154  # scheduled_action_names_csv is assigned indirectly by az_run's printf -v
+    IFS=',' read -ra scheduled_action_names <<< "$scheduled_action_names_csv"
+    for name in "${scheduled_action_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      note_fail "Cost anomaly scheduled action ${name} still present in subscription ${sub}."
+      v6_clean=0
+    done
+  fi
+
+  if ! az_run diag_names_out monitor diagnostic-settings subscription list --subscription "$sub" \
+      --query "value[].name" -o tsv; then
+    note_fail "subscription diagnostic-settings list failed for subscription ${sub} - a failed list is never read as 'no diagnostic settings' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
+    v6_clean=0
+  else
+    # shellcheck disable=SC2154  # diag_names_out is assigned indirectly by az_run's printf -v
+    mapfile -t diag_names <<< "$diag_names_out"
+    for name in "${diag_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      # Same ownership test as Phase 2 step 6a: the estate name (diag-activity-to-security-law)
+      # is not org-prefixed, so a plain globaris-substring test alone would miss it.
+      case "$name" in
+        *globaris*|diag-activity-to-security-law)
+          note_fail "Subscription diagnostic setting ${name} still present in subscription ${sub}."
+          v6_clean=0
+          ;;
+        *) ;; # not estate-owned - not a remnant
+      esac
+    done
+  fi
+done
+[ "$v6_clean" -eq 1 ] && echo "  clean (no estate-owned budgets, cost exports, cost anomaly scheduled actions, or subscription diagnostic settings found in any of the ${#SUBS[@]} subscription(s) checked)."
+
+# --- 7. Defender for Cloud pricing reset to Free (security subscription only). Every plan in
+#     DEFENDER_PLANS_TO_FREE (teardown-common.sh, mirrors platform/security exactly) must read
+#     pricingTier == Free. Plans the estate does not configure are not asserted on and must
+#     not have been changed (Phase 2 step 6b never touches them either). ---
+echo "== VERIFY 7: Defender for Cloud pricing plans reset to Free (security subscription) =="
+if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
+  note_fail "SECURITY_SUBSCRIPTION_ID is empty - cannot certify Defender pricing (already counted by VERIFY 0)."
+elif az_run pricing_rows_out rest --method get \
+    --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/pricings?api-version=2024-01-01" \
+    --query "value[].[name, properties.pricingTier]" -o tsv; then
+  # shellcheck disable=SC2154  # pricing_rows_out is assigned indirectly by az_run's printf -v
+  mapfile -t pricing_rows <<< "$pricing_rows_out"
+  for plan in "${DEFENDER_PLANS_TO_FREE[@]}"; do
+    tier=""
+    for row in "${pricing_rows[@]:-}"; do
+      [ -z "$row" ] && continue
+      row_name="$(printf '%s' "$row" | cut -f1)"
+      if [ "$row_name" = "$plan" ]; then
+        tier="$(printf '%s' "$row" | cut -f2)"
+        break
+      fi
+    done
+    if [ "$tier" = "Free" ]; then
+      echo "  ${plan}: clean (Free)."
+    elif [ -z "$tier" ]; then
+      note_fail "Defender plan ${plan} not found in the pricing list for the security subscription - cannot certify Free."
+    else
+      note_fail "Defender plan ${plan} still reads '${tier}' (expected Free) in the security subscription."
+    fi
+  done
+else
+  # Subscription-scoped list - per design section 6 boundary, ANY non-zero is FAIL LOUD.
+  note_fail "Defender pricing list failed for the security subscription - a failed list is never read as 'all Free' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
+fi
+
+# --- 8. Resource-provider unregistration (management subscription only). Every namespace in
+#     RP_NAMESPACES_TO_UNREGISTER must read a registration state that is not Registered.
+#     Unregistering is async - Unregistering is accepted as a pass with a notice rather than a
+#     failure, since the submission is async and VERIFY never waits (design section 3 Phase 3
+#     contract - patience belongs to the ACTOR, instant judgment to the AUDITOR). ---
+echo "== VERIFY 8: resource-provider unregistration (management subscription) =="
+if [ -z "${MANAGEMENT_SUBSCRIPTION_ID:-}" ]; then
+  note_fail "MANAGEMENT_SUBSCRIPTION_ID is empty - cannot certify provider registration state (already counted by VERIFY 0)."
+else
+  for ns in "${RP_NAMESPACES_TO_UNREGISTER[@]}"; do
+    if az_run reg_state_out provider show --namespace "$ns" --subscription "$MANAGEMENT_SUBSCRIPTION_ID" \
+        --query registrationState -o tsv; then
+      # shellcheck disable=SC2154  # reg_state_out is assigned indirectly by az_run's printf -v
+      if [ "$reg_state_out" = "Registered" ]; then
+        note_fail "Resource provider ${ns} still reads 'Registered' in the management subscription."
+      elif [ "$reg_state_out" = "Unregistering" ]; then
+        echo "  ::notice::${ns}: 'Unregistering' (async transition in progress, not yet certified - a later VERIFY run or the QA pass should confirm it reaches a terminal not-Registered state)."
+      else
+        echo "  ${ns}: clean (${reg_state_out})."
+      fi
+    else
+      # Subscription-scoped read - per design section 6 boundary, ANY non-zero is FAIL LOUD.
+      note_fail "provider show for ${ns} failed in the management subscription - a failed read is never read as 'not registered' (a dead token would otherwise falsely certify this clean): ${AZ_RUN_STDERR}"
+    fi
+  done
+fi
 
 echo "----------------------------------------------------------------"
 if [ "$fail" -ne 0 ]; then

@@ -17,6 +17,14 @@
 # show <name>` existence probe everywhere in the teardown scripts. See `mg_snapshot_load`'s own
 # comment for why: `show` is principal-dependent and returns a 403 (not a 404) for the scoped
 # teardown SP on a deleted MG.
+#
+# AMENDED a fourth time 2026-07-21 (ADR-057, docs/teardown-redesign.md section 12.3): added
+# `DEFENDER_PLANS_TO_FREE` and `RP_NAMESPACES_TO_UNREGISTER` - fixed allow-lists consumed by
+# the new Phase 2 step 6 (teardown-az-sweep.sh) and by VERIFY 6-8 (teardown-verify.sh). This
+# closes the subscription-scope gap: the az sweep finds things by RESOURCE GROUP naming
+# pattern and structurally cannot see a subscription-scoped extension resource, a Defender
+# pricing plan, or a provider registration - see each array's own comment below for the exact
+# coupling it must be kept in lock-step with.
 
 # The full globaris MG tree: root + all descendants (docs/teardown-redesign.md section 3):
 # globaris -> platform -> {connectivity, security, identity, management};
@@ -41,6 +49,33 @@ MG_DELETE_ORDER=(connectivity security identity management online corp decommiss
 # platform/management-groups and platform/management, not suffixed with org_prefix), so it
 # is matched separately by substring rather than relying on the org_prefix suffix.
 RG_SWEEP_QUERY="[?contains(name,'globaris') || contains(name,'amba-monitoring')].name"
+
+# Defender for Cloud pricing allow-list for the Phase 2 step 6b reset-to-Free WRITE
+# (docs/teardown-redesign.md section 12.3 / ADR-057 decisions 3-5). MUST be kept in
+# lock-step with what platform/security actually configures - the same coupling note
+# RG_SWEEP_QUERY above carries. Mirrors platform/security exactly: local.defender_basic_plans
+# (StorageAccounts, main.tf), the "servers" resource (VirtualMachines, main.tf), and
+# local.defender_extended_plans (the remaining six, defender.tf).
+#
+# Never iterate the LIVE pricing list instead of this allow-list: a live-list loop would
+# eventually reset a plan this estate does not own, and setting a plan to Free can be
+# permanently irreversible - Microsoft blocks NEW enablement of deprecated plans (LESSON 41).
+# That residual risk is tracked as OQ-050, not solved here - do not widen this list without
+# updating that item. Never write "Standard" from teardown code; only ever move toward Free.
+#
+# Explicit never-touch list (must stay OUT of this array): KeyVaults, Arm, Dns,
+# KubernetesService, ContainerRegistry, CosmosDbs, Api, AI, Discovery, FoundationalCspm.
+DEFENDER_PLANS_TO_FREE=(VirtualMachines StorageAccounts AppServices SqlServers \
+                        SqlServerVirtualMachines Containers OpenSourceRelationalDatabases CloudPosture)
+
+# Resource-provider namespaces the teardown must return to a not-Registered state (Phase 2
+# step 6c, docs/teardown-redesign.md section 12.3 / ADR-057 decision 6). Only
+# Microsoft.CostManagementExports today: platform/management registers it (main.tf) because
+# the ADR-027 cost exports need it, and until now the only thing that ever unregistered it
+# was a `terraform destroy` of that same resource. One line to extend for a future wave; one
+# line to empty if OQ-049 lands (moving registration out of the root removes this need
+# entirely, per LESSON 54).
+RP_NAMESPACES_TO_UNREGISTER=(Microsoft.CostManagementExports)
 
 # The 5 workload/platform subscriptions the estate spans (bootstrap identity.tf /
 # _tf-root.yml TF_VAR_*_subscription_id secrets). All landing-zones/* roots share the single
