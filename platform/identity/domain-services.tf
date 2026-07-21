@@ -2,7 +2,8 @@
 #          Services + a Recovery Services Vault for future DC/management VMs.
 #          (Section 8 - G1 / Gap-Closure Wave 3 / ADR-010)
 # Section: 8 - Standard Platform Components (Identity subscription)
-# Last updated: 2026-07-20 (ADR-055 Part 1: reinstate ADR-029 greenfield import)
+# Last updated: 2026-07-21 (ADR-059: import ID built from variables, not from a
+#               managed resource attribute)
 #
 # DEVIATION: there is NO AVM module for Entra Domain Services (the registry returns
 # 404 for avm-res-aad-domainservice, confirmed 2026-06-25). This uses the native
@@ -168,14 +169,34 @@ resource "azurerm_active_directory_domain_service" "this" {
 # (CI-only-apply rule). Re-apply, still with enable_conditional_access = false, to
 # finish Pass 1.
 #
-# COMPOSITE import ID (verified against the azurerm v4.71 provider import docs): the
-# ID for azurerm_active_directory_domain_service is
+# COMPOSITE import ID: the ID for azurerm_active_directory_domain_service is
 #   <domain resource ID>/initialReplicaSetId/<initial replica set GUID>
-# NOT the plain resource ID. Construction rules (ADR-029):
-#   - The domain resource ID is built from the RG resource's .id (so the
-#     subscription GUID comes from in-config state, never a committed literal) plus
-#     the same name expression the resource uses. Keep this name in lockstep with
-#     azurerm_active_directory_domain_service.this.name above.
+# NOT the plain resource ID. Re-verified 2026-07-21 against the pinned provider at
+# tag v4.71.0 (internal/services/domainservices/parse/domain_service.go,
+# DomainServiceId.ID() formats
+# "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.AAD/domainServices/%s/initialReplicaSetId/%s")
+# and against that version's resource import doc, which shows the same shape.
+#
+# Construction rules (ADR-059, correcting the MECHANISM ADR-029 prescribed):
+#   - The id is built from VARIABLES and LITERALS ONLY. It must never reference an
+#     attribute of a Terraform-managed resource. An import exists to adopt something
+#     that is NOT in state, so it can be evaluated in a plan where the surrounding
+#     resources do not exist either; a managed attribute is then "known after apply"
+#     and the whole plan dies with "Invalid import id argument" (run 29851615122,
+#     greenfield). validate cannot see this; only a plan can.
+#   - ADR-029 is NOT casually overridden. Its rule said to build the prefix from
+#     azurerm_resource_group.identity_aadds[0].id "so the subscription GUID comes
+#     from in-config state, never a committed literal". That INTENT is preserved
+#     exactly: var.identity_subscription_id carries the GUID (fed by
+#     TF_VAR_identity_subscription_id in CI, same value that anchors the
+#     azurerm.identity provider), so no GUID literal enters committed HCL. Only the
+#     carrier changed, from a resource attribute to a variable.
+#   - LOCKSTEP (the cost of rule 1, accepted in ADR-059): two name expressions are
+#     now duplicated into this id and must be kept in sync BY HAND -
+#       "rg-identity-aadds-${var.org_prefix}-${var.environment}"
+#         == azurerm_resource_group.identity_aadds.name (identity-network.tf)
+#       "aadds-${var.org_prefix}-${var.environment}"
+#         == azurerm_active_directory_domain_service.this.name (above)
 #   - The replica set GUID is supplied at apply time via
 #     var.aadds_import_replica_set_id (TF_VAR_aadds_import_replica_set_id in CI) -
 #     never baked into committed HCL.
@@ -188,14 +209,17 @@ resource "azurerm_active_directory_domain_service" "this" {
 # ONE-SHOT (LESSON 52): interpolate the id from variables (done - no literal GUID)
 # and REMOVE this block in a cleanup commit as soon as the recovery apply lands; a
 # stale import block broke a later plan and blocked teardown (ADR-029, commit
-# d5f775e).
+# d5f775e). The same one-shot discipline applies to the INPUT that arms it: clear
+# the AADDS_IMPORT_REPLICA_SET_ID Secret value immediately after the recovery apply,
+# as a runbook step, not an intention (ADR-059 decision 5). A stale standing value
+# is what made this block active on a greenfield run in the first place.
 # NOTE: validate cannot confirm the import ID resolves against real state - the CI
 # plan is the real gate (it must show "import", not "create", for the domain).
 import {
   for_each = var.aadds_import_replica_set_id != "" ? toset([var.aadds_import_replica_set_id]) : []
 
   to = azurerm_active_directory_domain_service.this[0]
-  id = "${azurerm_resource_group.identity_aadds[0].id}/providers/Microsoft.AAD/domainServices/aadds-${var.org_prefix}-${var.environment}/initialReplicaSetId/${each.value}"
+  id = "/subscriptions/${var.identity_subscription_id}/resourceGroups/rg-identity-aadds-${var.org_prefix}-${var.environment}/providers/Microsoft.AAD/domainServices/aadds-${var.org_prefix}-${var.environment}/initialReplicaSetId/${each.value}"
 }
 
 # ---------------------------------------------------------------------------
