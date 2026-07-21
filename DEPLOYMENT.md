@@ -80,7 +80,9 @@ root consumes which). The core set:
 | `TERRAFORM_SP_OBJECT_ID` | policy remediation / role assignments |
 | `BUDGET_ALERT_EMAIL`, `SECURITY_CONTACT_EMAIL` | management, security |
 | `PRIMARY_HUB_VNET_ID` / `_NAME` / `PRIMARY_HUB_RG_NAME` / `PRIMARY_FIREWALL_PRIVATE_IP` and the `SECONDARY_*` set | identity + spokes (from connectivity outputs - see §3.4) |
-| `PLATFORM_LAW_WORKSPACE_ID`, `PLATFORM_ACTION_GROUP_ID`, `PLATFORM_LAW_CUSTOMER_ID` | spokes + security (from management outputs) |
+| `PLATFORM_LAW_WORKSPACE_ID` (from management outputs) | connectivity (firewall diagnostics) + all five spokes |
+| `PLATFORM_ACTION_GROUP_ID` (from management outputs) | required by corp-a1, corp-a2, online-p1 (declared, not read on any create path yet) |
+| `PLATFORM_LAW_CUSTOMER_ID` (from management outputs, workspace GUID) | corp-a1, online-p1, bank-app-p1, bank-data-p1 (not corp-a2 - Traffic Analytics is omitted on the DR flow log, LESSON 43; not `platform/security`, which uses its own workspace) |
 | `SQL_AAD_ADMIN_OBJECT_ID`, `SQL_AAD_ADMIN_LOGIN` | corp spokes (only if `enable_sql = true`) |
 | `BREAK_GLASS_GROUP_OBJECT_ID`, `PIM_PRIVILEGED_GROUP_OBJECT_ID`, `PIM_APPROVER_GROUP_OBJECT_ID` | identity (PIM + CA) |
 | `SENTINEL_OWNER_GROUP_OBJECT_ID`, `HONEYPOT_USER_PRINCIPAL_NAME` | security / synthetic |
@@ -178,7 +180,8 @@ subjects (incl. both `environment:*`); the state SA is `default_action = Deny` w
 - **Depends on:** 1. **Secrets:** subscription IDs, `BUDGET_ALERT_EMAIL`.
 - **Run:** `plan` then `apply`.
 - **Carry forward:** `terraform output` -> set `PLATFORM_LAW_WORKSPACE_ID`, `PLATFORM_ACTION_GROUP_ID`, and the
-  workspace GUID `PLATFORM_LAW_CUSTOMER_ID` as Secrets (consumed by security + spokes).
+  workspace GUID `PLATFORM_LAW_CUSTOMER_ID` as Secrets. Consumed by connectivity and the spokes, per-Secret
+  detail in §1.3 - **not** by `platform/security`, which creates and uses its own Log Analytics workspace.
 
 ### Step 3 - `platform/connectivity`
 
@@ -241,15 +244,20 @@ subjects (incl. both `environment:*`); the state SA is `default_action = Deny` w
   `enable_aad_diagnostics`, `enable_ueba`, `enable_aad_connector`, `enable_ti_connector`, `enable_mde_connector`,
   `enable_firewall_ti_rule` (ADR-033 / ADR-034). Result: the sub-scoped MDC connector + 10 of 11 analytics rules
   land; the tenant-scoped connectors are one flag-flip away once the directory role is granted.
-- **Depends on:** 2 (needs the platform LAW customer ID / workspace ID Secrets from step 2). **Secrets:**
-  security sub ID, `SECURITY_CONTACT_EMAIL`, `SENTINEL_OWNER_GROUP_OBJECT_ID`, `PLATFORM_LAW_CUSTOMER_ID`.
+- **Depends on:** 2 (the `deploy.yml` `needs:` graph sequences it after management). It does **not** consume
+  the platform LAW workspace or customer ID Secrets - it creates and reads only its own Log Analytics
+  workspace (see Creates, above). **Secrets:** security sub ID, `SECURITY_CONTACT_EMAIL`,
+  `SENTINEL_OWNER_GROUP_OBJECT_ID`.
 - **Run:** `plan` then `apply`. **Validate:** Defender plans Standard; Sentinel onboarded; compliance assignments
   at root MG.
 
 ### Step 6-8 - landing-zone spokes (parallel after 3 + 5)
 
-Each spoke: `plan` then `apply`. All three consume the hub Secrets from step 3 and the platform LAW / action
-group Secrets from step 2.
+Each spoke: `plan` then `apply`. All three consume the hub Secrets from step 3 and
+`PLATFORM_LAW_WORKSPACE_ID` from step 2. `PLATFORM_LAW_CUSTOMER_ID` is read by corp-a1 and online-p1 only,
+not corp-a2 (Traffic Analytics is deliberately omitted from the DR flow log, LESSON 43).
+`PLATFORM_ACTION_GROUP_ID` is a required Secret on all three (an unset value fails `plan`) but is not
+actually read by any of them on their current create path.
 
 | Root | Creates | Notes |
 |------|---------|-------|
