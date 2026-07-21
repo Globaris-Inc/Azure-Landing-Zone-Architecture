@@ -37,6 +37,134 @@
 
 <!-- Newest at the top. -->
 
+### ADR-059: A config-driven `import` block's `id` must be constructible from variables and literals ONLY, never from a managed resource's attributes - and recovery-only inputs must be armed per-run, not left standing (corrects the ADR-029 construction rule, unblocks the ADR-055 Pass 1)
+
+- **Date:** 2026-07-21
+- **Section:** 5 (Zero Trust / identity) / 10 (Pipeline & Tooling); CORRECTS a construction rule
+  written into ADR-029 and reinstated by ADR-055 Part 1. Does not supersede either; both stand.
+- **Status:** Accepted (architect ruling; found by an exploratory greenfield plan the user asked for,
+  run 29851615122, not by a gate)
+- **Decision makers:** claude (architect); implementation splits cloud-engineer (the `.tf` change) and
+  user (the Secret value)
+
+**Context:**
+A greenfield `platform/identity` plan failed at plan time:
+
+```
+Error: Invalid import id argument
+  The import block "id" argument depends on resource attributes that cannot be
+  determined until apply, so Terraform cannot plan to import this resource.
+```
+
+Two compounding causes, both established from the run log rather than inferred.
+
+**Cause 1 - the block was ACTIVE, not inert.** `TF_VAR_aadds_import_replica_set_id` rendered as `***`
+in the job environment. GitHub masks a NON-EMPTY secret and renders an empty one as nothing, so the
+`***` is positive evidence that the repo Secret `AADDS_IMPORT_REPLICA_SET_ID` still carries a stale
+replica-set ID from the July recovery era. The `for_each` guard demonstrably passed, since evaluation
+reached the `id` line at all. The history is its own lesson: the 2026-07-12 pre-clearance called the
+Secret orphaned and said delete it; ADR-055 Part 1 correctly reinstated the WIRING; the 2026-07-21
+refresh recorded the delete instruction as superseded. Nobody ever cleared the VALUE. Three documents
+touched this Secret and none of them owned what was inside it.
+
+**Cause 2 - the ID is structurally unplannable on greenfield.** The `id` interpolated
+`azurerm_resource_group.identity_aadds[0].id`. On a clean tenant that resource group does not exist,
+so `.id` is "known after apply", and Terraform cannot plan an import whose ID depends on an unknown.
+This is not a stale-value artifact. It would fail identically tomorrow, because ADR-055 Pass 1 is
+greenfield BY DEFINITION.
+
+The second cause is the serious one, and it inverts the usual risk calculus: **the recovery path is
+most likely to be needed on exactly the run where it is currently broken.** ADR-029 exists because the
+AADDS create is a 1 to 3 hour operation that can time out with the domain built but unstated. If that
+happens tomorrow, the recovery plan would fail too, under precisely the time pressure the mechanism
+exists to relieve.
+
+ADR-029's stated construction rule was: "The domain resource ID is built from the RG resource's `.id`
+(so the subscription GUID comes from in-config state, never a committed literal)." The INTENT was
+sound - keep GUIDs out of committed HCL. The MECHANISM chosen to achieve it was wrong, because a
+resource attribute is unknown before that resource exists.
+
+**Decision:**
+
+1. **General rule (this is the part that generalises beyond AADDS):** a config-driven `import` block's
+   `id` argument MUST be constructible from input variables, locals over variables, and string
+   literals ONLY. It may NEVER reference an attribute of a resource Terraform manages. An import
+   exists to adopt something that is NOT yet in state, so by definition it may run in a plan where the
+   surrounding resources also do not exist. Any import ID that depends on a managed attribute is
+   unplannable on greenfield and is a latent failure that `validate` cannot see.
+
+2. **Fix the ID (option B), and it is urgent, not deferrable.** Replace the resource-attribute
+   reference with a constructed prefix:
+   `/subscriptions/${var.identity_subscription_id}/resourceGroups/rg-identity-aadds-${var.org_prefix}-${var.environment}`
+   followed by the unchanged
+   `/providers/Microsoft.AAD/domainServices/aadds-${var.org_prefix}-${var.environment}/initialReplicaSetId/${each.value}`.
+   Both components are deterministic and already in config: the resource group name is a pure
+   expression over `var.org_prefix` and `var.environment` (`identity-network.tf`), and
+   `var.identity_subscription_id` is an existing declared variable fed from a repo Secret.
+   **ADR-029's intent is fully preserved: still no GUID literal in committed HCL**, because the
+   subscription arrives as a variable. Only the mechanism changes, from a resource attribute to a
+   variable.
+   The composite format is verified against the azurerm v4.71.0 import documentation for
+   `azurerm_active_directory_domain_service` at the pinned tag:
+   `/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.AAD/domainServices/<name>/initialReplicaSetId/<replica set GUID>`.
+   Keep the name expression in lockstep with the resource, as the existing comment already requires.
+
+3. **Clear the Secret's VALUE (option A), as well as fixing the ID.** The combined ruling is option C.
+   The two fixes address different failures and neither substitutes for the other: clearing the value
+   makes tomorrow's Pass 1 plan inert and correct; fixing the ID makes the block work on the day it is
+   actually needed. Doing only A would leave a recovery path that fails when used. Doing only B would
+   leave a greenfield run attempting to import a replica set that no longer exists.
+
+4. **Recovery-only inputs are armed PER-RUN, not left standing (directional ruling, implemented as a
+   follow-up).** A standing repo Secret is the wrong carrier for a one-shot recovery input: it is
+   write-only and cannot be read back to diagnose (LESSON 32), it is masked so an operator cannot tell
+   armed from unarmed by looking, it survives every teardown, branch and cycle, and it arms a code
+   path with no dispatch-time signal whatsoever. The correct carrier is a `workflow_dispatch` input on
+   the ADR-055 `enable_conditional_access_override` pattern: blank by default, visible in the run's own
+   UI, typed deliberately by a human for one specific run, incapable of surviving to the next run, and
+   fail-closed on a malformed value. **This is NOT implemented tonight**, deliberately: it changes
+   `deploy.yml` and `_tf-root.yml`, which are the very workflows whose two-pass behaviour tomorrow's
+   run exists to PROVE, and changing the subject of a proof on the eve of that proof is bad practice.
+   Raised as OQ-054 for implementation after the identity root is green.
+
+5. **Interim obligation while the Secret mechanism remains.** If recovery IS needed tomorrow, the
+   Secret is set during the incident and **CLEARED immediately after the recovery apply lands**, as an
+   explicit runbook step rather than an intention. This is the same one-shot discipline LESSON 52
+   already imposes on the import block itself, extended to the input that arms it.
+
+6. **How to verify a write-only Secret is empty, since PC-4G asserted it without a way to check.**
+   Observe how it renders in a job log: GitHub prints `***` for a non-empty secret and nothing at all
+   for an empty one. That artifact is the only available oracle, and it is what diagnosed this failure.
+   Any future gate condition asserting a Secret is unset must cite this check rather than assuming.
+
+**Consequences:**
+- Positive: tomorrow's Pass 1 plans. The ADR-055 / OQ-022 token-durability proof run is unblocked with
+  a one-line `.tf` change and one Secret edit, neither on the multi-hour path.
+- Positive: the recovery path is repaired BEFORE the run most likely to need it, rather than
+  discovered broken mid-incident.
+- Positive: rule 1 is mechanical and greppable. Any future import block can be checked against it by
+  reading one line, with no Azure knowledge required.
+- Positive: rule 6 turns an unverifiable gate assertion into a checkable one.
+- Negative / trade-offs: rule 2 duplicates the resource group NAME expression in a second place (the
+  import ID), so the existing lockstep comment now covers two expressions rather than one. Accepted:
+  the alternative is unplannable. A local for the RG name would collapse the duplication and is a
+  reasonable implementer choice.
+- Negative: rule 4 is stated but not yet implemented, so the standing-Secret hazard persists until
+  OQ-054 lands. Bounded by rules 3 and 5.
+- Follow-ups required: OQ-054 (dispatch input versus standing Secret for recovery-only inputs);
+  `docs/preclearance/platform-identity.md` PC-1G and PC-4G updated for the corrected reality; the
+  import block is still ONE-SHOT and must be removed once a recovery lands.
+- **LESSON 52 AMENDED (2026-07-21, code review fast-follow).** The catalog ALREADY carried this defect
+  class: LESSON 52's symptom text described a teardown destroy failing with "Invalid import id
+  argument" because the ID interpolated a just-destroyed resource group. Same defect, mirror-image
+  trigger (resource already gone versus resource not yet created), and ADR-029 reached for `.id`
+  anyway - because the lesson described a SYMPTOM rather than naming the RULE. Decision 1 above is now
+  folded into LESSON 52 as an explicit guardrail (a), so the next config-driven import in this repo or
+  in any reused copy of the kit is checked against a one-line greppable rule instead of a war story.
+  The "a plan tally is not evidence of success" trap is recorded there too.
+
+---
+
 ### ADR-058: Teardown completion is certified by an INDEPENDENT qa-engineer pass, not by the workflow's own Phase 3 VERIFY - two gates, two actors, two identities, and neither may be collapsed into the other
 
 - **Date:** 2026-07-21

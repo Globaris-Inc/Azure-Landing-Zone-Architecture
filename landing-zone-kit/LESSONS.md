@@ -497,13 +497,33 @@ the root creates, before the first apply (see lesson 58).
     empty-ID leases use `az storage blob lease break`; check for stale locks in every teardown
     pre-clearance.
 
-52. **One-shot `import` blocks must be removed immediately after they land.**
-    *Symptom:* two incidents from stale import blocks: a later plan broke on an import whose ID no longer
-    matched reality, and the teardown destroy failed with "Invalid import id argument" because the ID
-    interpolated a just-destroyed resource group. *Why missed:* the block is inert on the apply where it
-    succeeds, so nothing forces cleanup. *Guardrail:* every config-driven import ships with a follow-up
-    commit that deletes it as soon as `terraform state list` shows the resource adopted. Track the
-    cleanup as blocking, not cosmetic.
+52. **One-shot `import` blocks must be removed immediately after they land - and their `id` must never
+    reference a managed resource's attribute.**
+    *Symptom:* three incidents from config-driven imports. A later plan broke on an import whose ID no
+    longer matched reality. A teardown destroy failed with "Invalid import id argument" because the ID
+    interpolated a just-destroyed resource group. Then, **a third time and in the mirror-image
+    direction**, a greenfield plan failed with the SAME error because the ID interpolated a resource
+    group that did not exist YET (`.id` is "known after apply" before its resource is created). Same
+    defect class, opposite trigger: resource already gone versus resource not yet created. *Why
+    missed:* the block is inert on the apply where it succeeds, so nothing forces cleanup; and
+    `validate` cannot evaluate an import ID at all, so an unplannable ID sits latent until a plan runs
+    against a state where the referenced resource is absent. Writing this lesson did not prevent
+    recurrence, because the original text described the teardown trigger as the symptom rather than
+    naming the underlying rule. *Guardrails, both mandatory:*
+    (a) **An import block's `id` MUST be constructible from input variables, locals over variables, and
+    string literals ONLY - never from an attribute of a resource Terraform manages.** An import exists
+    to adopt something not yet in state, so it may run in a plan where the surrounding resources do not
+    exist either. Build the resource ID by string composition
+    (`/subscriptions/${var.sub_id}/resourceGroups/${local.rg_name}/providers/...`) rather than reaching
+    for `azurerm_resource_group.x.id`. This keeps GUIDs out of committed HCL just as well, so there is
+    no trade-off. It is a one-line, greppable check on any import block.
+    (b) Every config-driven import ships with a follow-up commit that deletes it as soon as
+    `terraform state list` shows the resource adopted. Track the cleanup as blocking, not cosmetic.
+    *Related trap, learned in the same incident:* **a `Plan: N to add ...` tally is NOT evidence that a
+    plan succeeded.** Terraform renders the hypothetical plan for context even when a resource has
+    already errored the run out - observed with the fatal `Error:` emitted 29 milliseconds BEFORE a
+    full tally and `Changes to Outputs:` block, all in one stream, ending in a non-zero exit. Judge a
+    plan by its EXIT STATUS and the absence of any `Error:` diagnostic, never by the summary line.
 
 53. **Targeted/partial bootstrap applies silently drop declared resources.**
     *Symptom:* first CI init 404 `ContainerNotFound` - the state container was declared in bootstrap but
