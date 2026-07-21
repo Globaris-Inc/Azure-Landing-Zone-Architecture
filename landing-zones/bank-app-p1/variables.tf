@@ -3,8 +3,9 @@
 #          B3 messaging platform + B4 API platform inputs).
 # Section: Banking waves B1-B4 (docs/banking-platform-design.md,
 #          docs/b2-aks-platform-design.md, docs/b3-messaging-platform-design.md,
-#          docs/b4-apim-platform-design.md)
-# Last updated: 2026-07-18
+#          docs/b4-apim-platform-design.md) plus the PC-2S greenfield gate
+#          (docs/preclearance/2026-07-22-full-estate-rebuild.md)
+# Last updated: 2026-07-21
 
 # ---------------------------------------------------------------------------
 # Subscription targeting
@@ -123,6 +124,20 @@ variable "enable_kubernetes_platform" {
 variable "aks_admin_group_object_ids" {
   description = "Entra ID group object IDs granted the cluster admin role via the AKS aad_profile (Azure RBAC enabled, local accounts disabled - ADR-043). REQUIRED when enable_kubernetes_platform is true; no default on purpose. The value arrives via TF_VAR_aks_admin_group_object_ids from the repo secret in CI (poc.secret.tfvars locally) - never commit the GUIDs."
   type        = list(string)
+}
+
+# DO NOT flip this default to true. It is false BY DESIGN, not by oversight.
+# The AcrPull principal id is read from data.azurerm_kubernetes_cluster.aks_lookup
+# in acr.tf, which looks up a cluster THIS SAME ROOT creates. That data source has
+# static arguments, so Terraform resolves it during the PLAN phase; on a greenfield
+# estate the read 404s and the plan exits non-zero before anything can be created.
+# A default of true would therefore make this root unplannable on an empty tenant,
+# which is exactly the PC-2S defect this flag exists to fix. The value is supplied
+# for Pass 2 only, from envs/poc.tfvars, in its own reviewed one-line commit.
+variable "enable_acr_kubelet_binding" {
+  description = "Create the registry-scoped AcrPull role assignment binding the AKS cluster's kubelet identity to the Premium ACR. Default false because the principal id comes from a same-root data source lookup of the AKS cluster (acr.tf), which Terraform must resolve at plan time and which cannot resolve until the cluster exists (PC-2S, docs/preclearance/2026-07-22-full-estate-rebuild.md). Two-pass sequence: Pass 1 applies with false and creates the cluster and the registry; Pass 2 sets true in envs/poc.tfvars and plans as exactly 1 to add, 0 to change, 0 to destroy. LESSON 42 flag pattern with the ADR-055 two-pass precedent. Inert while enable_kubernetes_platform is false, since the registry itself is not deployed."
+  type        = bool
+  default     = false
 }
 
 # ---------------------------------------------------------------------------

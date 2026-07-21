@@ -5,8 +5,10 @@
 #          Gated behind var.enable_kubernetes_platform with aks.tf.
 # Section: Banking wave B2 (docs/b2-aks-platform-design.md section 4; ADR-043).
 #          Wave B4 ride-along: kubelet RA durable fix (B3 PC-3M disposition,
-#          docs/b4-apim-platform-design.md section 8)
-# Last updated: 2026-07-18
+#          docs/b4-apim-platform-design.md section 8).
+#          PC-2S: greenfield-plannability gate on the kubelet lookup and binding
+#          (docs/preclearance/2026-07-22-full-estate-rebuild.md)
+# Last updated: 2026-07-21
 #
 # Module: Azure/avm-res-containerregistry-registry/azurerm 0.5.1 (pin verified on the
 # Terraform Registry 2026-07-18, schema read from the v0.5.1 tag source).
@@ -26,12 +28,22 @@
 # NOT any module output, NO depends_on; any of those would re-defer the read), so
 # the data source resolves at refresh time and module-internal churn can no longer
 # cascade. kubelet_identity[0].object_id verified in the azurerm v4.71.0 data-source
-# schema. Gated on the same flag so flag-off plans do not query a missing cluster.
-# The interim one-accepted-replace plan bar is RETIRED with this fix.
+# schema. The interim one-accepted-replace plan bar is RETIRED with this fix.
+#
+# PC-2S GREENFIELD GATE (docs/preclearance/2026-07-22-full-estate-rebuild.md).
+# Those static arguments are precisely why this read happens in the PLAN phase, and
+# the cluster it reads is created by module.aks in THIS root. On an empty tenant the
+# read 404s and the plan fails outright, so the lookup is now gated on
+# var.enable_acr_kubelet_binding (default false) as well as the platform flag. Pass 1
+# runs with the flag false: no lookup, no AcrPull assignment, cluster and registry get
+# created. Pass 2 sets the flag true in envs/poc.tfvars, the cluster is live, the
+# lookup resolves and the binding lands as a single add. Adding depends_on here
+# instead is REJECTED: it defers the read to apply time and reintroduces the exact
+# ForceNew role-assignment churn the wave B4 fix removed.
 # ---------------------------------------------------------------------------
 
 data "azurerm_kubernetes_cluster" "aks_lookup" {
-  for_each = var.enable_kubernetes_platform ? { main = "main" } : {}
+  for_each = var.enable_kubernetes_platform && var.enable_acr_kubelet_binding ? { main = "main" } : {}
 
   name                = "aks-bank-app-p1-${var.org_prefix}-${var.environment}"
   resource_group_name = "rg-bank-app-p1-workload-${var.org_prefix}-${var.environment}"
@@ -73,14 +85,20 @@ module "acr" {
   # AcrPull for the cluster kubelet identity at registry scope. B4 durable fix
   # (design doc section 8): principal_id now comes from the static-argument data
   # source above (plan-time-known), not the AKS module's computed output. Expected
-  # plan impact at this address: ZERO changes (identical value, now known at plan).
-  role_assignments = {
+  # plan impact at this address once bound: ZERO changes (identical value, known at
+  # plan). Gated with the lookup on the PC-2S two-pass flag; the map KEY stays static
+  # so the address identity never moves between passes (LESSON 5a). The false branch
+  # yields an empty map, which the module accepts: role_assignments is
+  # map(object(...)) with default {} and nullable = false, consumed as
+  # for_each = var.role_assignments on azurerm_role_assignment.this (schema read from
+  # the pinned 0.5.1 source), so no key is ever required to exist.
+  role_assignments = var.enable_acr_kubelet_binding ? {
     kubelet_acr_pull = {
       role_definition_id_or_name = "AcrPull"
       principal_id               = data.azurerm_kubernetes_cluster.aks_lookup["main"].kubelet_identity[0].object_id
       principal_type             = "ServicePrincipal"
     }
-  }
+  } : {}
 
   diagnostic_settings = {
     platform_law = {
