@@ -31,6 +31,99 @@
 
 <!-- Newest at the top. -->
 
+### OQ-057: `deploy.yml target=all` is documented as the full-environment shortcut but is structurally non-functional for apply - remove it, restrict it to plan, or fund a runner-egress solution?
+
+- **Raised:** 2026-07-21 (2026-07-22 rebuild pre-clearance, PC-1X / ADR-060)
+- **Section:** 10 (Pipeline & Tooling); relates to ADR-025, LESSON 30, LESSON 31, OQ-018
+- **Blocking:** No. ADR-060 rules sequential single-target for the rebuild, so nothing waits on this.
+- **Priority:** Medium (a documented path that cannot work is a trap for the next operator)
+
+**Question:**
+`DEPLOYMENT.md` section 4 presents `target = all` as the way to deploy the whole environment in one
+dispatch. It cannot work today: the state storage account is `default_action = Deny` with a single
+operator IP rule, and `deploy.yml` disables the JIT firewall flip precisely when `target = all`, so every
+root would 403 at `terraform init`. Even with a manual firewall window it removes the per-root plan-scan
+gate, runs five spokes that write concurrently to the same private DNS zone and the same regional Network
+Watcher, cannot express the ADR-055 identity two-pass, and cascade-skips the graph on one failure. What
+should happen to it?
+
+**Options being considered:**
+- **A (recommended): restrict `target=all` to `action=plan`** and add a guard job that rejects
+  `target=all` with `action=apply`, mirroring the existing `guard-untaint-target` /
+  `guard-force-unlock-target` pattern. Cheap, honest, keeps the aggregate dry-run which is genuinely
+  useful, and removes the trap.
+- **B: delete the `all` option entirely.** Cleanest, but loses the aggregate plan.
+- **C: make `target=all` work** by moving the state account behind a private endpoint with a self-hosted
+  or VNet-integrated runner (the OQ-018 Option B work). Correct long-term production answer, materially
+  more work, and it still would not restore the per-root plan-scan gate.
+- **D: leave as is and rely on documentation.** Rejected on principle: a mechanism that fails only at
+  init, only in CI, and only on one input value is exactly the class this repo keeps getting burned by.
+
+### OQ-056: The five landing-zone spokes cannot be dry-planned against a torn-down estate - should spoke data sources be made plan-safe so a greenfield estate is fully dry-plannable end to end?
+
+- **Raised:** 2026-07-21 (2026-07-22 rebuild pre-clearance, PC-2S and section 5a)
+- **Section:** 4 (Private Endpoints + Private DNS) / 9 (Landing Zone Spokes); relates to LESSON 5,
+  LESSON 43, LESSON 52
+- **Blocking:** Partially. The `bank-app-p1` instance of it (`aks_lookup`) IS blocking and has a fix spec
+  in PC-2S. The cross-root instance (private DNS zone lookups) is not blocking, it just removes the
+  ability to pre-verify.
+- **Priority:** High for the same-root case, Medium for the cross-root case
+
+**Question:**
+Three classes of data source stop a spoke plan from running on an empty estate. (1) `aks_lookup` in
+`bank-app-p1` reads a cluster the SAME root creates, so it can never resolve on a greenfield plan; that is
+a defect, and PC-2S specifies the flag-gated fix. (2) `azurerm_private_dns_zone` in every spoke reads
+zones created by `platform/connectivity`, so no spoke can be dry-planned before connectivity applies; that
+is a legitimate cross-root dependency, but it means five of ten roots go into an apply with no pre-verified
+plan. (3) `azurerm_network_watcher` turned out to be fine (both regional objects survive teardown), but
+only by luck of Azure auto-creating them. Should the estate adopt a rule that makes greenfield fully
+dry-plannable?
+
+**Options being considered:**
+- **A (recommended): a standing rule plus targeted refactors.** Rule: a data source may never read a
+  resource created by its own root; a data source that reads another root's output should, where the value
+  is a deterministic id, be replaced by a constructed string from variables (the ADR-059 import-id rule
+  generalised). Applied to the private DNS zones this would replace eleven lookups with constructed zone
+  ids, and every spoke would become dry-plannable on an empty tenant.
+- **B: accept it and rely on the shape-based plan-scan bar** applied at each spoke's own plan, as this
+  rebuild does. Zero work, but it permanently gives up pre-dispatch verification for half the estate.
+- **C: fix only the same-root case (PC-2S) and leave the cross-root lookups alone.** The minimum that
+  unblocks Wednesday. Recommended as the immediate step regardless of which option wins.
+- **D: introduce a "connectivity contract" module** that both connectivity and the spokes consume, so zone
+  ids come from shared locals rather than lookups. Cleanest conceptually, largest diff.
+
+### OQ-055: Cross-root output Secrets are a manual, unverifiable coupling that has in fact been stable across three rebuilds - keep the determinism contract, or remove the coupling?
+
+- **Raised:** 2026-07-21 (2026-07-22 rebuild pre-clearance, PC-2X / ADR-061)
+- **Section:** 10 (Pipeline & Tooling); relates to LESSON 32, ADR-061
+- **Blocking:** No. ADR-061 makes the rebuild safe.
+- **Priority:** Medium
+
+**Question:**
+Eleven repo Secrets carry values produced by `platform/connectivity` and `platform/management` into
+`platform/connectivity` itself (the platform LAW id, for firewall diagnostics), `platform/identity` and
+the five spokes. Nothing automates the refresh; the instruction is a prose bullet
+in `DEPLOYMENT.md`. Repo Secrets are write-only, so a consumer can never check what it was handed, and a
+wrong value surfaces days later. ADR-061 resolves the immediate risk by classifying ten of the eleven as
+derived-from-names (therefore never refreshed) and mandating one unconditional re-set. But the underlying
+coupling remains: a single change to `org_prefix`, `environment`, the hub address spaces or the firewall
+subnet carve would silently invalidate ten Secrets at once. Should the coupling exist at all?
+
+**Options being considered:**
+- **A: keep ADR-061 as is.** Zero further work. The determinism contract is documented and the one risky
+  value is re-set every rebuild. Accepts the naming-change fragility.
+- **B (recommended for the production restoration wave): replace the derived Secrets with constructed
+  values.** The spokes already receive `landingzones_subscription_id` and `connectivity_subscription_id`
+  plus `org_prefix` and `environment`, so `primary_hub_vnet_id` and friends can be built as locals from
+  variables and literals. That deletes eight Secrets, removes the manual step, and makes a naming change a
+  code change rather than a silent breakage.
+- **C: `terraform_remote_state` data sources against the state account.** Authoritative values with no
+  manual step, but it gives every consuming root read access to producing roots' full state, widens the
+  backend access model, and reintroduces a plan-time cross-root dependency for values that are currently
+  static inputs.
+- **D: automate `gh secret set` inside `_tf-root.yml`.** Rejected in ADR-061: it would give every apply
+  job write access to repo Secrets for a value that changes approximately never.
+
 ### OQ-054: Should a recovery-only input ever live as a standing repo Secret? Second incident of a stale standing Secret silently changing a run's behaviour
 
 - **Raised:** 2026-07-21 (greenfield `platform/identity` plan failure, run 29851615122; ADR-059

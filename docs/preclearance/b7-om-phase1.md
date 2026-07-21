@@ -251,3 +251,40 @@ notification targets (email/armRole/webhook/eventHub) are all ARRAYS.
 - Convergence: if PC-1F wired, the AMBA action group email == the operator target (one stream);
   if deferred, record the receiver as unset (functional gap, not a failure of the wave's infra).
 - No regression on existing policy objects or the MG topology.
+
+---
+
+# ADDENDUM 2026-07-21: re-land conditions for the 2026-07-22 rebuild
+
+The wave B7 content above LANDED on 2026-07-19 and was then torn down with the rest of the estate. For the
+2026-07-22 greenfield rebuild `enable_om_phase1` is held **false** (PC-4R option A, see
+`b0a-redeploy.md` section 8): on an empty tenant the two roots are circular, because
+`platform/management-groups` would select the `globaris-amba` architecture whose Deploy-AMBA-* DINE
+assignments reference `id-amba-prod-001` by constructed resource id, while that identity is created by
+`platform/management`, which cannot apply before the MG tree exists.
+
+B7 is therefore re-landed as a **second pass over two already-green platform roots at the END of the
+rebuild day**. Conditions **PC-1H..PC-4H** in
+**[`docs/preclearance/2026-07-22-full-estate-rebuild.md`](2026-07-22-full-estate-rebuild.md)**.
+
+Summary of what changed versus the gate above:
+
+- **PC-1H:** the flip back to `enable_om_phase1 = true` in `envs/poc.tfvars` (line 315) is a
+  cloud-engineer change needing reviewer approval and a merge to `banking` before dispatch. It must NOT be
+  merged before the main run, or step 1 of the rebuild reintroduces the circularity. Confirm the run's
+  `headSha` is the flipped commit before it writes (LESSON 33).
+- **PC-2H** restates PC-3F unchanged: apply `platform/management` FIRST, verify `id-amba-prod-001` is live
+  with `az identity show -g rg-amba-monitoring-001 -n id-amba-prod-001`, THEN apply
+  `platform/management-groups`.
+- **PC-3H replaces the estimates above with the LANDED numbers.** `platform/management` = **3 adds**
+  (run `29703260837`), not the 4-6 guessed here. `platform/management-groups` = **approximately 223 adds**
+  with a permitted band of roughly 200-260, where the ONLY tolerated non-adds are module-internal
+  `time_sleep` / `modtm_telemetry` / `random_uuid` helpers (the 07-19 plan showed exactly 1 change and 2
+  destroys of that class). Every zero-tolerance STOP item in section 2 above still stands. Roughly 70
+  `PolicyRoleAssignmentError` warnings are expected, non-AMBA, non-fatal.
+- **The `InvalidPolicyParameterType` failure of run `29703492492` cannot recur**: the array-wrap plus
+  empty-guard fix for `ALZMonitorActionGroupEmail` is live at HEAD (`main.tf` line 66), verified in code
+  2026-07-21.
+- **PC-1F is closed:** `OM_OPERATOR_NOTIFICATION_EMAIL` exists as a repo Secret (set 2026-07-19) and is
+  wired as `TF_VAR_om_operator_notification_email` in `_tf-root.yml`, so the AMBA notification action
+  group gets a real receiver.

@@ -197,3 +197,37 @@ must narrow the failure class.
   Deny assignments at the landingzones MG re-enter scope at B2.
 - The firewall-enable wave must re-run its own pre-clearance (re-arms the B0b #4196 PIP
   tripwire and re-audits appliance lifecycle) and only then does the 10.0.0.4 contract go live.
+
+---
+
+# ADDENDUM 2026-07-21: SUPERSEDED for the 2026-07-22 full-estate rebuild
+
+Everything above is HISTORY from the wave B1 network-only applies. Its live evidence predates waves
+B2..B7 and the two teardowns since (2026-07-19 and 2026-07-20). Do not use it as a gate.
+
+The current gate for `landing-zones/bank-app-p1` and `landing-zones/bank-data-p1` is
+**[`docs/preclearance/2026-07-22-full-estate-rebuild.md`](2026-07-22-full-estate-rebuild.md)**,
+conditions **PC-1S..PC-9S** (plus the whole-run conditions PC-1X..PC-8X).
+
+Headline deltas versus this document:
+
+- **`bank-app-p1` is NO-GO as the code stands.** `data.azurerm_kubernetes_cluster.aks_lookup` in `acr.tf`
+  reads a cluster that the SAME root creates, with fully static arguments and no `depends_on`, so
+  Terraform resolves it during the plan phase and it 404s on a greenfield estate. The path has never been
+  exercised: the data source arrived at wave B4 against an already-live cluster and the root has not been
+  applied since. Fix spec is **PC-2S** (gate the data source and the ACR `role_assignments` behind a new
+  default-false `enable_acr_kubelet_binding`, then land the binding as a one-add second pass).
+- **`bank-data-p1` is blocked until PC-1S clears.** The subscription-scoped Waiver
+  `exempt-dbx-managed-storage-bank-data-p1` **survived both teardowns and the PC-1R survivor sweep** and is
+  live in the landingzones subscription today. `azurerm_subscription_policy_exemption` returns
+  `tf.ImportAsExistsError` on create when the object exists (source-verified against azurerm v4.71.0), so
+  the apply fails there. Disposition: delete, do not import.
+- **A soft-deleted `apim-bank-app-p1-globaris-poc` is in the APIM 48-hour window**, auto-purge scheduled
+  2026-07-21 22:53 UTC. PC-4S requires a pre-dispatch check and a manual purge if it has not fired, so the
+  create runs on the proven create path rather than the never-exercised `recover_soft_deleted` path.
+- **OQ-043 quota re-verified LIVE, not inherited** (2026-07-21, landingzones sub, eastus2): Total Regional
+  vCPUs 0/24, Standard DSv4 Family 0/10 against a 6-vCPU AKS system pool. PASS with headroom.
+- **The B6 model pin re-verified live**: `gpt-5.4-nano` 2026-03-17 for kind `AIServices` is
+  GenerallyAvailable in eastus2 with `DataZoneStandard` offered and inference deprecation 2027-03-18.
+- Neither root can be dry-planned before `platform/connectivity` is green (private DNS zone lookups), so
+  the bar is shape-based, not count-based.

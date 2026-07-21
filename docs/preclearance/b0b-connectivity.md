@@ -288,3 +288,33 @@ spot-check that the 89 zones (including B1's 3 lookup zones) and 178 links lande
 outputs, IP secrets verified against carve math, null resolver output expected); (4) first
 post-apply plan will show OQ-032 CreatedDate drift on new resources - accepted noise, not a
 defect.
+
+---
+
+# ADDENDUM 2026-07-21: SUPERSEDED for the 2026-07-22 full-estate rebuild
+
+Everything above is HISTORY. Its live evidence predates the 2026-07-16 build and the two teardowns since
+(2026-07-19 and 2026-07-20), so it must not be used as a gate for any new apply of this root.
+
+The current gate for `platform/connectivity` is
+**[`docs/preclearance/2026-07-22-full-estate-rebuild.md`](2026-07-22-full-estate-rebuild.md)**,
+conditions **PC-1C..PC-7C** (plus the whole-run conditions PC-1X..PC-8X).
+
+Headline deltas versus this document:
+
+- **Verdict: GO** (no open blocker for this root). Dry-planned CLEAN on 2026-07-21, run `29851422904`:
+  `696 to add, 0 to change, 0 to destroy`, exit 0, zero `Error:` diagnostics, at headSha `341134a`. The
+  only `.tf` change between that SHA and current HEAD `d3b9e8c` is in `platform/identity`, so the plan is
+  authoritative.
+- **The lean-hub posture of the 07-17 addendum no longer applies.** `enable_firewall = true` is live in
+  `envs/poc.tfvars`, so BOTH Azure Firewall Premium instances, both policies and their public IPs are in
+  scope by user decision. Lifecycle re-audited 2026-07-21: Premium is CURRENT, no retirement, no
+  new-enablement block. `enable_vpn_gateway`, `enable_dns_resolver`, `enable_bastion` and
+  `enable_ddos_standard` all remain false.
+- **Teardown survivors in the connectivity subscription: NONE** (re-enumerated 2026-07-21 across budgets,
+  cost exports at api-version 2025-03-01, scheduled actions, subscription diagnostic settings, policy
+  assignments/exemptions/definitions, locks and soft-deleted Key Vaults).
+- **The live policy matrix could not be read** because the MG tree is empty until `platform/management-groups`
+  applies. The new gate states that explicitly and converts it into a post-apply verification step (PC-3C:
+  `Enable-DDoS-VNET` must read `DoNotEnforce` at BOTH the connectivity and landingzones MG scopes before
+  connectivity is dispatched).

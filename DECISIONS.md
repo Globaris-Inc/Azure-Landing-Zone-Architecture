@@ -37,6 +37,120 @@
 
 <!-- Newest at the top. -->
 
+### ADR-061: Cross-root output Secrets are governed by a determinism contract, not by a manual "carry forward the outputs" step - name-derived values are never refreshed, non-derivable values are re-set unconditionally after their producing root applies
+
+- **Date:** 2026-07-21
+- **Section:** 10 (Pipeline & Tooling); relates to LESSON 32, DEPLOYMENT.md sections 3.2 / 3.4
+- **Status:** Accepted (architect ruling, 2026-07-22 rebuild pre-clearance PC-2X / PC-3X)
+- **Decision makers:** claude (architect)
+
+**Context:**
+`_tf-root.yml` feeds `platform/connectivity`, `platform/identity` and all five spokes from repo Secrets
+that earlier roots produce: `PRIMARY_HUB_VNET_ID` / `_NAME` / `PRIMARY_HUB_RG_NAME`,
+`PRIMARY_FIREWALL_PRIVATE_IP`, the `SECONDARY_*` set, `PLATFORM_LAW_WORKSPACE_ID`,
+`PLATFORM_LAW_CUSTOMER_ID`, `PLATFORM_ACTION_GROUP_ID`. The consumer set was re-derived per root by
+matching `variable "<name>"` against `var.<name>`, separating DECLARED from USED, rather than inferred
+from the architecture: `platform/security` consumes NONE of them (it uses its own workspace throughout),
+`platform/connectivity` consumes `PLATFORM_LAW_WORKSPACE_ID` for firewall diagnostics, and
+`PLATFORM_ACTION_GROUP_ID` is declared by three spokes and read by none.
+Refreshing them is entirely manual: no workflow, script or hook calls `gh secret set`, and the only
+instruction is a prose "Carry forward" bullet in `DEPLOYMENT.md`. Repo Secrets are write-only, so a
+consumer cannot verify what it was handed, and a stale value surfaces days later as an ARM-id parse
+error or a silently dead analytics pipeline. Going into the 2026-07-22 rebuild this looked like the
+highest-risk item in the run.
+
+Live verification changed the picture. Every producing resource is deterministically named from
+`org_prefix` plus `environment` (`rg-connectivity-primary-...`, `vnet-hub-primary-...`,
+`rg-management-...`, `law-platform-...`, `ag-platform-...`), and the firewall private IPs are fixed by
+the subnet carve (`cidrsubnet(hub_*_address_space, 10, 0)` first usable address). `gh secret list`
+confirms the hub and platform Secrets were last written on 2026-07-07 and 2026-07-08, then survived the
+07-11 teardown, the 07-16 rebuild, the whole banking wave B1 to B7, and two further teardowns, unchanged,
+producing green applies throughout. The single exception is `PLATFORM_LAW_CUSTOMER_ID`, a workspace GUID
+that is not derivable from any name; it has been stable only because the platform Log Analytics workspace
+is recovered from soft delete rather than recreated at each rebuild.
+
+**Decision:**
+Classify every cross-root output Secret as DERIVED or NON-DERIVABLE. A DERIVED Secret (an ARM id or name
+that is a pure function of `org_prefix`, `environment` and a fixed carve) is never refreshed as routine
+work; it is only re-set if the naming inputs or the address plan change, and its correctness is proven by
+a post-apply spot check rather than by a blind re-set. A NON-DERIVABLE Secret is re-set
+**unconditionally** from the live resource immediately after its producing root applies, with no attempt
+to verify the stored value first. For the current estate that means exactly one mandatory refresh command
+per rebuild (`PLATFORM_LAW_CUSTOMER_ID`) plus one verification (the two firewall private IPs must read
+`10.0.0.4` and `10.1.0.4`).
+
+**Alternatives considered:**
+- Re-set all eleven Secrets after every rebuild, rejected because ten of the eleven cannot change, the
+  step is manual and forgettable, and doing unnecessary write-only writes trains the operator to treat
+  the whole set as untrustworthy without improving anything.
+- Verify each Secret before use, rejected because repo Secrets are write-only; there is no read path, so
+  "verify" can only ever mean "re-set" (LESSON 32).
+- Replace the Secrets with `terraform_remote_state` data sources against the state account, rejected for
+  now, not on merit but on scope: it changes the backend access model for six roots on the eve of a
+  rebuild. Parked as OQ-055.
+- Automate the refresh with a `gh secret set` step inside `_tf-root.yml`, rejected because it would give
+  every apply job write access to repo Secrets, a materially worse blast radius than a manual step for a
+  value that changes approximately never.
+
+**Consequences:**
+- Positive: the per-rebuild Secret work drops from eleven blind re-sets to one command plus one check, and
+  the one command is on the value that can actually go wrong.
+- Positive: the classification is written down, so the next operator does not have to re-derive which
+  Secrets are safe to leave alone.
+- Negative: the DERIVED classification is only as good as the naming scheme. If `org_prefix`,
+  `environment`, the hub address spaces or the firewall subnet carve ever change, every DERIVED Secret
+  goes stale at once and silently. That coupling is now explicit and must be honoured by any future
+  naming change.
+- Follow-ups: OQ-055 (should this coupling exist at all); update `DEPLOYMENT.md` sections 3.2 and 3.4 to
+  state the contract instead of "carry forward the outputs".
+
+### ADR-060: Full-estate rebuilds execute as SEQUENTIAL single-target dispatches with a per-root plan-scan gate; `deploy.yml target=all` is not an apply path
+
+- **Date:** 2026-07-21
+- **Section:** 10 (Pipeline & Tooling); extends ADR-025 (JIT state-SA firewall) and LESSON 30/31
+- **Status:** Accepted (architect ruling, 2026-07-22 rebuild pre-clearance PC-1X)
+- **Decision makers:** claude (architect)
+
+**Context:**
+`deploy.yml` offers `target = all`, whose `needs:` graph applies every root in dependency order and runs
+the five landing-zone spokes concurrently. `DEPLOYMENT.md` section 4 presents it as the full-environment
+shortcut. Live state contradicts that. The Terraform state storage account is `default_action = Deny`
+with exactly ONE IP rule (an operator address; hosted-runner egress is a dynamic SNAT pool), and
+`deploy.yml` sets `manage_runner_ip: ${{ inputs.target != 'all' }}`, so on `target=all` no job opens the
+firewall and every root would 403 at `terraform init`. Beyond that, `target=all` applies ten roots with
+no intervening plan-scan, runs five spokes that write concurrently to the SAME private DNS zone and the
+same regional Network Watcher, cannot express the ADR-055 identity two-pass cleanly, and cascade-skips
+the remaining graph on any single failure.
+
+**Decision:**
+A full-estate rebuild is executed as sequential single-target dispatches, one run in flight at a time,
+`action=plan` then `action=apply` per root, with an architect-defined plan-scan bar applied between the
+two. `target=all` is retained only for `action=plan` exploration and is documented as NOT an apply path.
+The serial order pushes the long poles to the end so nothing waits behind them: management-groups,
+management, security, connectivity, the four short spokes, bank-app-p1, then identity Pass 1 and Pass 2.
+
+**Alternatives considered:**
+- `target=all` with a manual state-SA firewall window (the teardown PD-1 pattern), rejected: it fixes only
+  the init 403 and leaves the missing plan-scan gate, the concurrent-write hazard on shared private DNS
+  zones, the identity two-pass mismatch and the cascade-skip recovery problem. For a run whose purpose is
+  process validation, removing the process to save wall clock is the wrong trade.
+- Add hosted-runner IP ranges to bootstrap `ip_allow_list`, rejected: GitHub hosted-runner egress is a
+  large, changing set drawn from a SNAT pool, which is exactly the racy design ADR-025 replaced.
+- Keep `manage_runner_ip` on for `target=all`, rejected: parallel jobs would flip the same account's
+  `default_action` against each other and one job's restore-Deny would cut another mid-init (LESSON 31).
+
+**Consequences:**
+- Positive: every root gets a real plan-scan before its apply, which is the only gate that has ever caught
+  a forced replacement or an unexpected destroy in this build (LESSON 26).
+- Positive: a failure stops one root, not the graph, and the retry is a single dispatch.
+- Negative: wall clock. A full rebuild is 6 to 9 hours of serialized runs, dominated by the APIM create in
+  bank-app-p1 and the Entra Domain Services create in identity. The operator must plan the day around it.
+- Negative: the dependency graph in `deploy.yml` stops being the thing that enforces order; a written
+  runbook does. That runbook is now a required artefact of every rebuild.
+- Follow-ups: OQ-057 (remove `target=all`, restrict it to plan, or fund a runner-egress solution);
+  `deploy.yml` also declares `identity: needs: [management-groups]` while identity genuinely needs
+  connectivity for its hub peering, a graph gap that serial ordering masks.
+
 ### ADR-059: A config-driven `import` block's `id` must be constructible from variables and literals ONLY, never from a managed resource's attributes - and recovery-only inputs must be armed per-run, not left standing (corrects the ADR-029 construction rule, unblocks the ADR-055 Pass 1)
 
 - **Date:** 2026-07-21
