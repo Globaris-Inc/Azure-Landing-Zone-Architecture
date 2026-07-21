@@ -245,3 +245,36 @@ NSG**):
 
 Also parks the topology mismatch (an "online" archetype workload under the `corp` MG) for a later decision;
 does not block deploy.
+
+---
+
+# ADDENDUM 2026-07-21: SUPERSEDED for the 2026-07-22 full-estate rebuild
+
+Everything above is HISTORY from 2026-07-10. Its live evidence predates the 2026-07-16 build and the two
+teardowns since, and it contains identifiers that current house rules keep out of committed docs. Do not
+use it as a gate.
+
+The current gate for `landing-zones/corp-a1`, `landing-zones/corp-a2` and `landing-zones/online-p1` is
+**[`docs/preclearance/2026-07-22-full-estate-rebuild.md`](2026-07-22-full-estate-rebuild.md)**,
+conditions **PC-1S..PC-9S** (plus the whole-run conditions PC-1X..PC-8X).
+
+Headline deltas versus this document:
+
+- **Verdict: GO-CONDITIONAL for all three.** No blocker specific to these roots, but they **cannot be
+  dry-planned** while the estate is torn down: `data.azurerm_private_dns_zone` resolves against
+  `rg-dns-globaris-poc`, which does not exist until `platform/connectivity` applies. The new gate states
+  per root which conditions are verifiable pre-apply and which are not, and replaces the count-based bar
+  with a shape-based one (exit status 0, zero `Error:` diagnostics, pure adds, zero change/destroy/replace).
+- **The `azurerm_network_watcher` data source is NOT a blocker.** Re-verified live 2026-07-21:
+  `NetworkWatcher_eastus2` and `NetworkWatcher_centralus` both exist in `NetworkWatcherRG` in the
+  landingzones subscription.
+- **The four hard blockers of section 2 are all closed in code**: `Enable-DDoS-VNET` is set DoNotEnforce
+  at the landingzones MG as well as connectivity; the flow-log storage collision carries the RG-scoped
+  Waiver plus a 300s sleep; `snet-integration` now carries the spoke NSG; the App Service collision is
+  moot because `enable_app_service` is false (ADR-032). `enable_sql` is likewise false (ADR-031), so the
+  once-missing SQL admin Secrets are not on a create path (they exist anyway, set 2026-07-10).
+- **Cross-root Secret finding:** every Secret in section 3 except `PLATFORM_LAW_CUSTOMER_ID` is derived
+  from names that have not changed since 2026-07-07, and all of them have now survived two full rebuild
+  cycles unchanged. Only `PLATFORM_LAW_CUSTOMER_ID` gets an unconditional re-set (PC-2X).
+- **Standing caveat:** these three roots have not been applied since 2026-07-10, the longest gap of any
+  root in the rebuild. Treat their plan-scan as a first-ever plan.
