@@ -31,6 +31,69 @@
 
 <!-- Newest at the top. -->
 
+### OQ-053: Two Terraform state blobs were deleted from the firewalled state account and nobody can say when, how, or by whom - the data survived, the forensics did not
+
+- **Raised:** 2026-07-21 (teardown QA pass finding 1, run 29847433748; architect ruling PC-7R)
+- **Section:** 10 (Pipeline & Tooling) / state backend; relates to ADR-004, ADR-024, LESSON 3,
+  LESSON 51
+- **Blocking:** No. B0a is cleared to proceed (PC-7R ruling 1, `docs/preclearance/b0a-redeploy.md`
+  section 11) because the affected roots are a greenfield rebuild and live Azure is independently
+  confirmed empty. This is about the NEXT time, when it may not be.
+- **Priority:** Medium
+
+**Question:**
+The `platform/management` and `platform/security` state blobs are ABSENT from the `tfstate` container
+(genuine `BlobNotFound`, not a permissions error). Blob versioning preserved the history, so the last
+good state of each root is intact and promotable. The deletion was not caused by the teardown (the
+three teardown scripts contain zero references to the tfstate container, and Phase 1 was skipped for
+every root in every run since 2026-07-20) and predates it. The cause cannot be established, because
+blob deletes are DATA-PLANE operations that never appear in the subscription Activity Log, and no
+diagnostic pipeline was wired to capture them. What is the proportionate durable fix?
+
+**Two live facts that reframe this (verified 2026-07-21 against the account's blob service
+properties):**
+1. **The data protection is already correct and it worked.** Blob soft-delete is enabled (14 days,
+   `allowPermanentDelete: false`), container soft-delete is enabled (14 days), and versioning is
+   enabled. With versioning on, a plain DELETE leaves the base blob with no current version rather
+   than destroying anything, which is exactly the observed signature. Nothing was permanently lost and
+   nothing could have been. **So the gap is NOT data protection, and proposals to add more of it are
+   solving a problem that does not exist.**
+2. **The forensic surface is completely absent.** No diagnostic settings on the storage account or its
+   blob service, and change feed is OFF. That is the entire reason "by whom and when" is unanswerable.
+
+**Do NOT propose immutability or WORM on the state container.** ADR-024 already removed exactly that
+(a container-level time-based policy) because it intercepts the azurerm backend's lease and lock path
+and hard-fails state writes with `BlobImmutableDueToPolicy`. LESSON 3 records the same thing as a
+general rule: never put an immutability policy on a Terraform state container, use versioning for
+recovery. Re-proposing it would recreate a resolved incident.
+
+**Options being considered:**
+- A (RECOMMENDED, and it is two small pieces): (i) enable **change feed** on the state account - a
+  per-account setting, pennies, that records an ordered durable log of every blob write and delete
+  with timestamps, and critically it SURVIVES teardown because the state account is out of teardown
+  scope; (ii) wire the **PC-7R pre-plan state-provenance probe** into the CI plan path so an absent
+  blob is DETECTED and surfaced rather than silently read as greenfield. Together these answer "when
+  and what" and, more importantly, make the condition visible the moment it matters. Change feed does
+  NOT record caller identity, which is the honest limit of this option.
+- B: A, plus storage **diagnostic logging** (blob `StorageDelete` / `StorageWrite`) to a Log Analytics
+  workspace, which is what actually answers "by whom". **Design constraint that must not be missed:**
+  the platform LAW is destroyed at every teardown, so the destination CANNOT be it, or the forensic
+  trail dies exactly when it is needed. It must be a bootstrap-scoped destination that outlives
+  teardown - a small dedicated workspace or a storage destination in the bootstrap resource group.
+  That is a real (if modest) piece of new bootstrap infrastructure and its own cost line.
+- C: accept the gap, rely on versioning plus soft-delete for recovery, and add nothing. Defensible
+  purely on data-safety grounds (fact 1), and it is honestly where the risk actually sits. Rejected as
+  the recommendation only because "a state blob vanished and we will never know why" is not a sentence
+  that should be repeatable.
+- D (REJECTED, recorded so it is not re-proposed): container or version-level immutability. See
+  ADR-024 and LESSON 3 above.
+
+**Recommended default:** A now (cheap, no new infrastructure, closes the detection half immediately),
+with B considered if it recurs or before the estate carries anything more valuable than a rebuildable
+POC state. The PC-7R probe in A(ii) is the part that carries real weight: it converts a silent,
+plan-invisible condition into a loud one, which is the same failure class as the 2026-07-20 teardown
+blind spot and deserves the same treatment.
+
 ### OQ-052: The Defender `AI` plan is armed at Standard in the security subscription, is owned by nobody, and its free trial converts to billed on approximately 2026-08-15
 
 - **Raised:** 2026-07-21 (code review of the ADR-057 batch, Finding 3; live-verified by architect)

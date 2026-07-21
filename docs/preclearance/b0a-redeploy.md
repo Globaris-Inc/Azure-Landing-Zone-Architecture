@@ -280,6 +280,7 @@ property. Conditions PC-1R, PC-2R and PC-3R remove all 21.
 | **PC-4R** | **Resolve the `enable_om_phase1` greenfield ordering circularity.** `envs/poc.tfvars` now sets `enable_om_phase1 = true` (wave B7, landed 2026-07-19). On a greenfield that is circular: `platform/management-groups` needs the AMBA managed identity that `platform/management` creates, and `platform/management` needs the MG tree that `platform/management-groups` creates. **Recommended: set `enable_om_phase1 = false` for the B0a pass** and re-land wave B7 in its natural position after the estate is back, exactly as it was built and proven on 2026-07-19. Alternative: a per-run dispatch override mirroring ADR-055. | **cloud-engineer** (then reviewer), or **devsecops** if the override route is chosen | management-groups, management |
 | **PC-5R** | **Dispatch every B0a run from `banking`, not `main`, and plan-first with a pure-adds plan-scan per root.** The 07-12 instruction to "dispatch from main" is STALE and wrong under ADR-056. Post-PC-1R/2R/3R the states are empty AND the estate is genuinely greenfield, so every plan must be pure adds: any `-/+ replace`, any destroy, any import is a STOP. The first plan per root also doubles as the state-backend and stale-lease probe. | **devsecops** dispatch, **architect** scan | all 3 |
 | **PC-6R** | **Non-blocking follow-ups to record before the estate is rebuilt on top of the gaps.** (a) The teardown has no subscription-scope sweep: raise it as an open question and fix `teardown.yml` before the next teardown, otherwise this same 21-failure set returns every cycle. (b) LESSON 54 durable fix: stop managing `Microsoft.CostManagementExports` registration inside `platform/management`. (c) The ADR-041 temporary tenant-root grants are still attached and still un-revoked. | **architect** | nothing today |
+| **PC-7R** | **State-provenance: the PC-5R bar is blind to an ABSENT state blob (added 2026-07-21 after the teardown QA pass).** PC-5R stops on "the plan is reading a non-empty state". It cannot see the opposite condition: a plan reading a state blob that does not exist, which is indistinguishable from a legitimate greenfield plan at the plan-output layer. **Ruling for B0a: ACCEPT and proceed, recorded.** **Ruling going forward: for any root whose live Azure footprint is NOT independently confirmed empty, a pre-plan state-provenance check is mandatory before the plan output is trusted.** Full disposition in section 11 below. | **architect** ruling; **devsecops** for the durable check | nothing today |
 
 **RBAC needs NO condition this cycle.** The 07-12 PC-2 and PC-3 (the ADR-041 time-boxed tenant-root
 grants) are both still live on the CI deploy SP and were never revoked. See check 1.
@@ -711,6 +712,77 @@ Premium Azure Firewalls, the VPN gateway, Entra Domain Services and the Applicat
 recorded sprint posture for B0a plus B0b plus the first banking waves was roughly **$112 to $125 per
 day**. B0b alone is the dominant share of that. Plan the rebuild so the estate is not left idling
 armed; the ADR-042 `enable_firewall` lever and the wave flags exist precisely for that.
+
+---
+
+## 11. PC-7R disposition: the absent state blobs (ruled 2026-07-21, after the teardown QA pass)
+
+### What was found
+
+The teardown QA pass (run 29847433748, verdict PASS-WITH-NOTES) found that the `platform/management`
+and `platform/security` state blobs are **absent**, not empty: `az storage blob show` on the exact keys
+returns a genuine `BlobNotFound` 404, and a full container inventory holds only 4 blobs (the two corp
+spokes, online-p1, and platform/identity), each a normal 181-byte post-destroy empty state. Blob
+versioning preserved the history: management's last version (2026-07-19, 138,062 bytes) lists 37
+managed resources, security's (2026-07-16) lists 28, and no version is flagged `isCurrentVersion`.
+Not caused by the teardown: the three teardown scripts contain zero references to the tfstate
+container, and Phase 1 was skipped for every root in every run since 2026-07-20. Cause is
+unverifiable, because blob deletes are data-plane operations that do not appear in the subscription
+Activity Log and no storage diagnostic pipeline was wired.
+
+### Two live facts that decide the ruling
+
+I queried the state storage account's blob service properties directly (control plane, so the firewall
+is not in the way):
+
+1. **Blob soft-delete is ENABLED (14 days, `allowPermanentDelete: false`), container soft-delete is
+   ENABLED (14 days), and versioning is ENABLED.** So nothing has been permanently lost. With
+   versioning on, a plain blob DELETE does not destroy the versions; it leaves the base blob with no
+   current version, which is EXACTLY the observed signature (versions present, none
+   `isCurrentVersion`, base blob 404). The last good state of both roots is fully recoverable by
+   promoting the newest version back to the base blob, and `allowPermanentDelete: false` means even a
+   deliberate version purge is blocked. **This is an unexplained deletion with full recoverability, not
+   a data-loss incident.**
+2. **No diagnostic settings exist on the storage account or its blob service, and change feed is
+   OFF.** That is the whole reason the cause is unverifiable, and it is the actual gap.
+
+### Ruling 1 - B0a today: ACCEPT and proceed
+
+Recorded as a conscious decision rather than something the plan output would have hidden. The
+justification is specific and does not generalise:
+
+- B0a is a greenfield rebuild. All three roots are EXPECTED to plan against no prior state. For this
+  dispatch, an absent blob and an empty blob produce an identical and CORRECT plan.
+- Live Azure is independently confirmed empty for both affected subscriptions, three separate ways:
+  my own live sweep on 2026-07-21, the 17-item QA pass against live Azure rather than workflow logs,
+  and the teardown run's own VERIFY 6/7/8.
+- Nothing is unrecoverable (fact 1 above). If a plan ever looked wrong, the prior state is one version
+  promotion away.
+- The plan-scan bar still applies unchanged and still has teeth: expected magnitudes are roughly
+  537 / 36 / 48 pure adds. A plan reading a stale or foreign state would blow those numbers or show
+  changes and destroys, and would STOP on the existing PC-5R criteria.
+
+### Ruling 2 - going forward: the bar is amended, because it is blind to this class
+
+**For any root whose live Azure footprint is NOT independently confirmed empty, a pre-plan
+state-provenance check is mandatory before the plan output is trusted.** The check is a blob-level
+existence probe of the root's state key, which must run inside the CI JIT firewall window (the
+operator workstation cannot reach the firewalled account by design), and its result is one of:
+
+- **Blob present** - normal, proceed on the existing PC-5R criteria.
+- **Blob absent AND live Azure independently confirmed empty for that root's scope** - proceed, and
+  LOG the decision. This is the B0a case.
+- **Blob absent AND live resources exist** - **STOP.** This is the dangerous case the bar was blind
+  to. A fresh-state plan against a live footprint proposes recreating everything that already exists,
+  which lands as mass "already exists" failures at best and duplicate or conflicting creates at worse.
+  Recover the state from a blob version before planning; do not plan your way through it.
+
+The distinction that makes this necessary: `terraform state list` cannot separate the cases, because an
+absent blob and an empty state both list zero resources. Only a blob-level probe can, which is exactly
+why an out-of-band inventory caught it and no plan ever would have.
+
+Durable mechanism and the forensic gap are raised as **OQ-053**; that is a devsecops implementation
+item, not a B0a blocker.
 
 ---
 
