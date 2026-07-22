@@ -767,8 +767,14 @@ Record the result of each in the worklog. Any FAIL is a verdict of FAIL for the 
     - **Trigger:** the next teardown that runs against an MG hierarchy which actually carries live MG-scope budgets, i.e. a teardown of a fully-deployed estate rather than a re-run against an already-empty one.
     - **What to do, IN THIS ORDER:** BEFORE dispatching, record the 3 budgets via `az rest --method get --url "https://management.azure.com/providers/Microsoft.Management/managementGroups/<mg>/providers/Microsoft.Consumption/budgets?api-version=2023-05-01" --query "value[].name"` at each of the globaris, platform and landingzones scopes. AFTER the run, re-query the same three scopes.
     - **PASS:** the budgets are gone, and the MG itself is gone. Record the result so this item can be closed permanently and the exclusion becomes evidence-backed.
-    - **FAIL:** any budget still resolvable after its MG is deleted, OR an MG delete that fails citing a child extension resource. Either outcome means the exclusion is wrong and MG-scope budgets must be added to step 6 as sub-step 6d, ordered BEFORE the step 4 MG removal (not after, because the scope disappears with the MG). Route to the architect as a contract gap per section 13.4.
+    - **FAIL:** any budget still resolvable after its MG is deleted, OR an MG delete that fails citing a child extension resource. Either outcome means the exclusion is wrong and MG-scope budgets must be added to step 6 as a new sub-step ordered BEFORE the step 4 MG removal (not after, because the scope disappears with the MG). Note: this item originally reserved the letter `6d`, which ADR-062 has since assigned to subscription-scoped policy exemptions; use the next free letter. Route to the architect as a contract gap per section 13.4.
     - Until this item is exercised once with a PASS, the exclusion stays flagged as inference, not fact. Do not let it be quietly inherited as settled.
+
+**G. Subscription-scoped policy exemptions and the discovery gate (ADR-062)**
+
+Items 18 to 26 live in **section 14.5** and are part of this checklist. They cover the exemption class
+added as sub-step 6d, the ownership predicate that must not be a naive `globaris` substring test, and
+the VERIFY 9 discovery scan. Run them with the rest of this checklist.
 
 ### 13.4 Ordering and failure semantics
 
@@ -789,6 +795,251 @@ Record the result of each in the worklog. Any FAIL is a verdict of FAIL for the 
 The 2026-07-21 teardown re-run is the FIRST teardown held to this gate, and **its QA pass is the
 artifact that clears the B0a rebuild to start.** A green workflow run is not the clearance. The
 qa-engineer PASS against section 13.3 is.
+
+---
+
+## 14. VERIFY must be broader than the sweep (ADR-062) - the exemption class, the discovery scan, and the DevSecOps contract
+
+**Read this section together with section 12.** Section 12 is the ADR-057 contract for step 6. This
+section AMENDS it: it adds sub-step 6d, and it corrects the completeness mechanism that section 12
+relied on. ADR-062 decision 3 is the governing rule.
+
+**The trigger.** The subscription-scoped exemption `exempt-dbx-managed-storage-bank-data-p1`
+(`landing-zones/bank-data-p1/policy_exemptions.tf`, `azurerm_subscription_policy_exemption.dbx_managed_storage`)
+survived both teardowns AND the ADR-057 step 6 sweep, and blocks the `bank-data-p1` apply with
+azurerm 4.71.0's `ImportAsExistsError`. Its RG-scoped sibling twenty lines above it in the same file
+died correctly, because Microsoft's documented behaviour is that an exemption is a child object of its
+parent scope and is removed when that parent is removed. A subscription is never removed (section 5),
+so a subscription-scoped exemption never cascades. Its `expires_on` does not help either: Microsoft's
+exemption-structure reference states the object is preserved for record-keeping after expiry.
+
+### 14.1 RBAC feasibility - VERIFIED GO, no grant change, no bootstrap re-apply
+
+Checked live against role definitions and the SP's per-scope assignments on 2026-07-21. Not from
+memory, and not with `az role assignment list --assignee --all`, which under-reports and has produced
+wrong conclusions in this repo twice.
+
+| Check | Method | Result |
+|---|---|---|
+| Does the delete operation exist? | `az provider operation show --namespace Microsoft.Authorization` | `Microsoft.Authorization/policyExemptions/delete` exists (alongside `/read` and `/write`). |
+| Does Contributor cover it? | `az role definition list --name Contributor` | **NO.** Live `notActions` include `Microsoft.Authorization/*/Delete` and `Microsoft.Authorization/*/Write`. Contributor alone cannot delete an exemption. Premise confirmed. |
+| Does User Access Administrator cover it? | `az role definition list --name "User Access Administrator"` | **YES.** Live `actions` are `*/read`, `Microsoft.Authorization/*`, `Microsoft.Support/*`, and `notActions` is **EMPTY**. `Microsoft.Authorization/*` matches `policyExemptions/delete`. |
+| Does the SP hold UAA at each subscription? | Per-scope `GET .../subscriptions/<sub>/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=assignedTo('<sp-object-id>')`, run for all 5 | **YES on all 5**, as a DIRECT assignment at `/subscriptions/<sub>` (not inherited). This matches `bootstrap/identity.tf` row 6. A second UAA assignment is also present at the tenant root MG scope. |
+| Any ABAC condition narrowing it? | Same query, projecting `condition`, `conditionVersion`, `delegatedManagedIdentityResourceId` | **NO.** All three null on every one of the 5 UAA assignments. Unconditional. |
+| Does delete also need `policyAssignments/exempt/action`? | Microsoft policy exemption structure reference, "Required permissions" | **NO.** That verb is required of "the creator of an exemption", on the WRITE path only. Delete needs `policyExemptions/delete` at the exemption's own scope. |
+
+**Verdict: GO.** Two consequences DevSecOps must not lose:
+
+1. Contributor's `notActions` do NOT veto UAA. Azure RBAC evaluates each assignment independently and
+   unions the allows; a `notAction` subtracts only from the role that declares it. Holding both roles
+   means the effective permission set includes `Microsoft.Authorization/*`.
+2. Because the SP's UAA is DIRECT at subscription scope, the delete is independent of the management
+   group hierarchy. It works before or after step 4 removes the MGs, and it works even though the
+   exemption's target assignment scope (the `corp` MG) is already gone. That last point is not
+   inference: it is the live state right now.
+
+### 14.2 Sub-step 6d - subscription-scoped policy exemptions (Phase 2, `teardown-az-sweep.sh`)
+
+**Placement:** inside step 6, immediately AFTER sub-step 6a and BEFORE 6b. It is an object-class delete
+like 6a and must precede the settings-writes in 6b and 6c. Per 14.1 point 2, ordering relative to step
+4 is immaterial, so no existing step moves.
+
+**Scope:** exact subscription scope only, all 5 subscriptions from `teardown_subscriptions()`.
+RG-scoped and resource-scoped exemptions are OUT (they cascade with their parent; proven this cycle).
+MG-scoped exemptions are OUT (the estate declares none; verified by grep of every root).
+
+**API version pin: `2022-07-01-preview`, for both list and delete.** This resource type has **no GA
+api-version at all** (verified live: the only versions the provider offers are `2020-07-01-preview`,
+`2022-07-01-preview`, `2024-12-01-preview`, `2025-12-01-preview`, `2026-01-01-preview`). Both
+`2022-07-01-preview` and `2026-01-01-preview` were confirmed to return the live object with every
+property the estate sets. Treat this pin exactly like the `2025-03-01` cost-export pin: LOAD-BEARING,
+and re-verified at every pre-clearance per LESSON 40 and 41.
+
+**LIST (per subscription):**
+
+```
+az rest --method get --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.Authorization/policyExemptions?api-version=2022-07-01-preview&\$filter=atExactScope()"
+```
+
+`atExactScope()` is REQUIRED and is not cosmetic. Microsoft's documented list semantics: with no
+`$filter`, the subscription-scope list returns everything associated with the subscription including
+exemptions inherited from ancestor management groups AND exemptions on objects contained within it
+(resource groups, resources). Deleting off an unfiltered list would attempt deletes on inherited
+MG-scoped objects. `atScope()` is also wrong (it still includes ancestors). Only `atExactScope()`
+returns objects whose own scope is the subscription. Verified live against all three filter forms.
+
+Use `az_run` for the list (its stdout is consumed as data, Trap 1). A subscription-scope list can never
+legitimately be gone, so ANY non-zero exit is FAIL LOUD, matching 6a.
+
+**Ownership predicate (ADR-062 decision 2). Apply per row, in the script, NOT as a server-side JMESPath
+name filter.** Project `name` and `properties.policyAssignmentId` together, then test:
+
+```
+OWNED := policyAssignmentId contains "/managementGroups/<mg>/" for any <mg> in MG_SCOPES
+      OR name begins with "exempt-"
+      OR name contains "globaris"
+```
+
+- Limb 1 must match with BOTH slashes present, so `/managementGroups/management/` cannot be matched by
+  a longer MG name. `MG_SCOPES` already exists in `teardown-common.sh`; do not duplicate it.
+- **Do NOT reuse `contains(name,'globaris')` alone.** The real object is
+  `exempt-dbx-managed-storage-bank-data-p1`, which contains no `globaris` substring. A naive reuse
+  ships a fix that silently does nothing. Step 6a already carries a hand-written special case
+  (`diag-activity-to-security-law`) for the same reason; this is that trap firing a second time.
+- Verified catch: limbs 1 and 2 BOTH match the live survivor. Limb 1 because its stored
+  `policyAssignmentId` contains `/managementGroups/corp/` and `corp` is in `MG_SCOPES` (and that string
+  survives the MG's deletion, confirmed against the live object with the `corp` MG already gone). Limb
+  2 because all 8 exemption resources declared anywhere in this repo are named `exempt-*`.
+- A row matching NO limb is SKIPPED with an explicit log line naming it, exactly as 6a skips a
+  non-estate diagnostic setting. It is never deleted. VERIFY (14.3) is what shouts about it.
+
+**DELETE (per owned row):**
+
+```
+az rest --method delete --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.Authorization/policyExemptions/${name}?api-version=2022-07-01-preview" --output none
+```
+
+Synchronous, sub-second control-plane call. No `--no-wait`, and deliberately NOT added to
+`wait_for_rgs_gone` in step 7 (that wait is RG-shaped). Failure handling identical to 6a: classify with
+`is_auth_error`; auth-shaped means exit 1, anything else warns and continues, because absent is
+success. A genuine 404 returns `PolicyExemptionNotFound` / `Not Found`, which was confirmed live NOT to
+match `is_auth_error`, so an already-deleted object cannot be misread as a dead token.
+
+### 14.3 VERIFY 9 - the discovery scan (Phase 3, `teardown-verify.sh`)
+
+This is the ADR-062 decision 3 control. It is NOT a per-class check and must not be written as one.
+
+**Add a deterministic exemption assertion first (VERIFY 6d, direct ARM, no ARG):** for each of the 5
+subscriptions, the `atExactScope()` list above returns ZERO rows matching the ownership predicate. This
+is the mirror of sub-step 6d and is the fast, dependency-free check.
+
+**Then VERIFY 9, the discovery scan.** ONE POST for all 5 subscriptions:
+
+```
+POST https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01
+Content-Type: application/json
+{
+  "subscriptions": ["<sub1>", ... "<sub5>"],
+  "query": "policyresources | where id matches regex @'^/subscriptions/[^/]+/providers/' | where type !startswith 'microsoft.policyinsights/' | project id, name, type, assignmentId = tostring(properties.policyAssignmentId)"
+}
+```
+
+- Reachable with plain `az rest --method post ... --headers "Content-Type=application/json" --body @<file>`.
+  **No `resource-graph` CLI extension is needed** and none should be installed; verified live.
+- The SP is entitled to this: ARG needs only read on the subscriptions, and the SP holds Contributor
+  (`*`) plus UAA (`*/read`) directly on all 5.
+- The regex is the exact-subscription-scope test and is preferred over a `!contains '/resourceGroups/'`
+  string test, which is casing-fragile. Subscription-scoped extension resources are
+  `/subscriptions/{id}/providers/{ns}/{type}/{name}`; anything RG-scoped carries a `/resourceGroups/`
+  segment and fails the regex, and anything MG-scoped starts `/providers/Microsoft.Management/` and
+  fails it too. MG-scoped exclusion matters because `remove_mg_hierarchy` defaults false.
+- The `policyinsights` exclusion removes compliance-evaluation telemetry (`policystates`), which is
+  high-volume and is not an object anyone created.
+- **Live baseline, measured 2026-07-21 across all 5 subscriptions: 5 rows total.** Four
+  `microsoft.authorization/policyassignments` (three `SecurityCenterBuiltIn`, one
+  `SqlVmAndArcSqlServersProtection`) and one `microsoft.authorization/policyexemptions` (the survivor).
+  The scan returned the survivor on the first attempt. That is the proof this design catches the real
+  object.
+
+**Truncation guard.** ARG returns `count`, `totalRecords`, `resultTruncated` and may return a
+`$skipToken`. If `totalRecords` exceeds the number of rows read, or `resultTruncated` is `true`, or a
+`$skipToken` is present and unhandled, VERIFY FAILS LOUD with "could not read the full result set". A
+partially-read discovery scan must never report clean. Same rule as section 9.4.
+
+**Classification, per row, in this order:**
+
+1. **OWNED** (the 14.2 predicate, applied to policy exemptions; for any other type, the same name limbs
+   plus the `assignmentId` limb) -> FAIL LOUD as a sweep remnant. Message names the object id and says
+   which sweep sub-step should have removed it.
+2. **KNOWN-BENIGN** -> pass with a log line. Membership is an EXACT `type` plus `name` pair in a new
+   `SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST` in `teardown-common.sh`. Never a substring, never a wildcard.
+   Seed it with exactly two entries, both Microsoft auto-provisioned and both verified live:
+   - `microsoft.authorization/policyassignments` + `SecurityCenterBuiltIn`
+   - `microsoft.authorization/policyassignments` + `SqlVmAndArcSqlServersProtection`
+3. **UNCLASSIFIED** -> FAIL LOUD, under a distinct label `TEARDOWN-VERIFY-UNCLASSIFIED`, with the id,
+   the type, and both resolution paths spelled out in the error text: (a) if it is estate-owned, this
+   is a CONTRACT GAP; route to the architect per section 13.4 and add a sweep sub-step; (b) if it is
+   genuinely pre-existing tenant furniture, add the exact `type` plus `name` pair to the allow-list via
+   a reviewed PR with a one-line dated justification comment.
+
+**ARG staleness: ARG proposes, ARM disposes.** Resource Graph is an indexed cache and lags ARM, so a
+row can describe an object the sweep already deleted. Before failing on ANY row in class 1 or 3, do a
+direct ARM GET on that row's `id`. A 404 means the row was stale: log it and pass. Only an ARM-confirmed
+object fails the run. This removes the false-positive class entirely, which is what keeps the gate from
+becoming noise. Api-version for the confirm GET, by type (all verified live 2026-07-21):
+
+| ARG `type` | Confirm-GET api-version |
+|---|---|
+| `microsoft.authorization/policyexemptions` | `2022-07-01-preview` (no GA version exists) |
+| `microsoft.authorization/policyassignments` | `2025-11-01` |
+| `microsoft.authorization/policydefinitions` | `2025-11-01` |
+| `microsoft.authorization/policysetdefinitions` | `2025-11-01` |
+| anything else | No mapping. Do NOT guess an api-version. FAIL LOUD as UNCLASSIFIED without a confirm GET, and say in the message that the type is unknown to the map. An unrecognised type at subscription scope is precisely the signal this check exists to raise. |
+
+**The deterministic checks never depend on ARG.** VERIFY 0 through 8 and the new VERIFY 6d are direct
+ARM. VERIFY 9 is purely additive discovery, so an ARG outage or schema change cannot regress the
+existing gate. If the ARG POST itself fails non-zero, classify with `is_auth_error` and FAIL LOUD
+either way, with a message that distinguishes "discovery unavailable" from "discovery found
+something" so the two are never confused in triage.
+
+### 14.4 What this does NOT cover (read before claiming completeness)
+
+There is no ARM operation that enumerates every object at a subscription scope. Subscription-scoped
+objects are per-provider extension resources, and ARM has no cross-provider "list everything at this
+scope". `az resource list` and ARG's `resources` table are TRACKED-resource-only, and every tracked
+resource lives in a resource group, which is exactly why all three missed classes were invisible to
+them.
+
+- **Now covered by discovery:** the policy plane (assignments, exemptions, definitions, set definitions).
+- **NOT covered, no mechanism exists:** Consumption budgets, CostManagement exports, CostManagement
+  scheduled actions, subscription diagnostic settings. ARG has no table for any of them. They stay
+  ENUMERATED under VERIFY 6.
+- **Deliberately excluded:** ARG `securityresources` (measured live at subscription scope: 3268
+  regulatory-compliance assessments, 79 assessments, 90 pricings, plus secure scores - telemetry, and
+  its one actionable type `microsoft.security/pricings` already has VERIFY 7). ARG
+  `authorizationresources` (subscription-scope role assignments, which include the teardown
+  principal's OWN grants; bootstrap-owned, and LESSON 54 and 57 require revocation strictly AFTER a
+  verified destroy, never during).
+
+State this honestly in any status report. Coverage moves from "N enumerated classes" to "N enumerated
+classes plus open-ended discovery across one ARM plane". It is a real improvement and it is partial.
+
+### 14.5 Acceptance criteria (qa-engineer; extends the section 13.3 checklist)
+
+Add as section 13.3 group **G**. Every line is a concrete check.
+
+18. **Predicate correctness, before any dispatch (the most important one).** Confirm the shipped
+    predicate matches `exempt-dbx-managed-storage-bank-data-p1`. A predicate of
+    `contains(name,'globaris')` alone is an automatic FAIL: the name has no `globaris` substring, so
+    the fix would be a silent no-op. Confirm limb 1 (`policyAssignmentId` contains
+    `/managementGroups/corp/`) and limb 2 (name begins `exempt-`) are BOTH implemented, not one.
+19. **The survivor is gone.** `az rest --method get --url ".../subscriptions/<landingzones-sub>/providers/Microsoft.Authorization/policyExemptions?api-version=2022-07-01-preview&$filter=atExactScope()" --query "value[].name"`
+    returns EMPTY. Repeat for the other 4 subscriptions; all EMPTY.
+20. **The api-version is the pinned one.** The check above must use `2022-07-01-preview`. This type has
+    no GA version; do not substitute one and do not let a default be used. Same class of error as the
+    2026-07-16 cost-export false negative.
+21. **RG-scoped exemptions were not touched by 6d.** 6d must only ever have issued deletes against ids
+    of the form `/subscriptions/<sub>/providers/Microsoft.Authorization/policyExemptions/<name>`. Any
+    delete against an id containing `/resourceGroups/` is a FAIL (scope leak).
+22. **Discovery scan runs and is bounded.** VERIFY 9 executed, read the full result set (no truncation
+    and no unhandled `$skipToken`), and reported a row count. Against the current estate the expected
+    count is small; the two Microsoft assignments below are the only expected PASS rows.
+23. **Allow-list is exact-match and minimal.** `SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST` contains exactly
+    the two seeded `type` plus `name` pairs (`SecurityCenterBuiltIn`, `SqlVmAndArcSqlServersProtection`),
+    matched exactly. Any substring or wildcard match, or any entry added without a dated justification
+    comment, is a FAIL.
+24. **Non-estate objects did NOT fail the run.** `NetworkWatcherRG`, the cloud-shell storage account,
+    `adf-enterprise-rg`, the Microsoft system policy assignments and the Defender `AI`, `Discovery` and
+    `FoundationalCspm` plans are all still present and none of them caused a VERIFY failure. A gate
+    that reds on tenant furniture is a FAIL, not a success.
+25. **Negative test for the discovery gate (do this once).** Confirm by reading the code that an
+    ARM-confirmed row which is neither OWNED nor allow-listed produces a non-zero exit under the
+    `TEARDOWN-VERIFY-UNCLASSIFIED` label, and that a row whose confirm GET returns 404 is logged as
+    stale and PASSES. If the stale path fails the run, the gate will cry wolf and must be fixed before
+    it ships.
+26. **RBAC unchanged.** No new role assignment was created for the teardown SP, and section 13.3 item
+    13 still passes. If anyone proposes a grant to make 6d work, that is a FAIL: section 14.1 proves
+    none is needed.
 
 ---
 

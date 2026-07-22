@@ -31,6 +31,60 @@
 
 <!-- Newest at the top. -->
 
+### OQ-058: Post-rebuild follow-ons parked out of the ADR-062 exemption ruling
+
+- **Raised:** 2026-07-21 (ADR-062, subscription-scoped exemption survivor)
+- **Section:** 10 (Pipeline & Tooling) / teardown; relates to ADR-048, ADR-057, ADR-062
+- **Blocking:** No. All four items are deliberately parked until AFTER the 2026-07-22 rebuild. Tonight's
+  change is scoped to the exemption class plus the VERIFY predicate; nothing here is needed for it.
+- **Priority:** Medium for (a) and (b), Low for (c) and (d)
+
+**Question:**
+ADR-062 closed the policy-plane discovery gap and added subscription-scoped exemptions to the sweep.
+Four adjacent items were identified while ruling on it and were deliberately NOT taken, to keep the
+change small the night before a long rebuild day. They should be decided once the estate is back up.
+
+**(a) Should every policy exemption carry an estate `metadata` stamp, so the ownership predicate
+becomes purely structural?** `Microsoft.Authorization/policyExemptions` supports an arbitrary
+`metadata` object, and azurerm exposes it. If every exemption the estate declares carried something
+like an `estate` key, the predicate would stop needing the `exempt-` name limb entirely, and a
+future exemption named anything at all would still be recognised. This CANNOT help the current
+survivor, which already exists without metadata, and the predicate must therefore never depend on it.
+It also touches `.tf` in roots that are about to apply, which is why it is parked rather than bundled.
+- Recommended default: **do it, after the rebuild is green**, as a small cross-root change covering all
+  8 exemption resources, with the name limb retained as a fallback rather than removed.
+
+**(b) Is there a discovery mechanism for the cost and monitor planes?** ADR-062 decision 5 states
+plainly that ARG has no table for Consumption budgets, CostManagement exports, CostManagement
+scheduled actions, or subscription diagnostic settings, so those four classes remain enumerated with no
+backstop. That is the honest residual gap in the new gate.
+- Options: A - accept the gap and rely on the enumerated checks plus the ADR-058 QA pass. B - build an
+  Activity-Log-based discovery pass (see (c)). C - re-check periodically whether Microsoft has onboarded
+  these types to Resource Graph.
+- Recommended default: **A now, C as a standing pre-clearance re-check**, revisit if a fourth class is
+  ever lost in those planes.
+
+**(c) Activity-Log-based discovery as a general backstop.** Rejected for ADR-062 and worth a proper
+look later. Terraform's azurerm provider calls resource-provider APIs directly and creates no ARM
+deployments, so deployment history is empty and the subscription Activity Log is the only general trace
+of what the estate created at subscription scope. Retention is 90 days, the API is throttled, and the
+signal-to-noise is poor for a hard gate.
+- Recommended default: **investigate as an informational QA aid, not as a build-breaking gate.**
+
+**(d) Should `expires_on` be dropped from the ADR-048 dbstorage exemption?** ADR-062 established from
+Microsoft's exemption-structure reference that an exemption is NOT deleted when `expiresOn` is reached:
+the object is preserved for record-keeping and only stops being honoured. So the 2026-08-01 expiry gives
+none of the lifecycle cleanup its design comment implies, while adding a date that will silently stop
+admitting the Databricks storage create if a rebuild happens after it passes. That is a live footgun for
+any rebuild after 2026-08-01.
+- Options: A - keep it and push the date out at each rebuild. B - drop `expires_on` and rely on teardown
+  sub-step 6d for removal, which now exists. C - keep it but add a pre-clearance check that the date is
+  still in the future.
+- Recommended default: **B, with C as the interim**, since removal is now a teardown obligation rather
+  than a hoped-for self-expiry. Needs a decision before any rebuild dated after 2026-08-01.
+
+---
+
 ### OQ-057: `deploy.yml target=all` is documented as the full-environment shortcut but is structurally non-functional for apply - remove it, restrict it to plan, or fund a runner-egress solution?
 
 - **Raised:** 2026-07-21 (2026-07-22 rebuild pre-clearance, PC-1X / ADR-060)
