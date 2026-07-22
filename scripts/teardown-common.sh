@@ -25,6 +25,19 @@
 # pattern and structurally cannot see a subscription-scoped extension resource, a Defender
 # pricing plan, or a provider registration - see each array's own comment below for the exact
 # coupling it must be kept in lock-step with.
+#
+# AMENDED a fifth time 2026-07-21 (ADR-062, docs/teardown-redesign.md section 14): added
+# `is_owned_policy_object` and `SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST` / `is_subscription_scope_benign`
+# - the ownership predicate and the discovery-scan allow-list for subscription-scoped policy
+# exemptions (Phase 2 sub-step 6d, teardown-az-sweep.sh) and the Resource Graph discovery scan
+# (VERIFY 6d and VERIFY 9, teardown-verify.sh). Root cause: `exempt-dbx-managed-storage-bank-data-p1`
+# (a subscription-scoped policy exemption) survived both teardowns and the ADR-057 step 6 sweep
+# because its parent scope is a subscription, which is never deleted, so it never cascades away
+# on its own - and the existing RG_SWEEP_QUERY filter (`contains(name,'globaris')`) does not
+# match it. `is_owned_policy_object` is the ONE shared implementation of the three-limb OWNED
+# predicate so the delete side (6d) and the verify side (VERIFY 6d/9) can never drift apart - see
+# the function's own comment for the exact limbs and why a naive `contains(name,'globaris')`
+# reuse would have shipped as a silent no-op.
 
 # The full globaris MG tree: root + all descendants (docs/teardown-redesign.md section 3):
 # globaris -> platform -> {connectivity, security, identity, management};
@@ -77,6 +90,84 @@ DEFENDER_PLANS_TO_FREE=(VirtualMachines StorageAccounts AppServices SqlServers \
 # entirely, per LESSON 54).
 RP_NAMESPACES_TO_UNREGISTER=(Microsoft.CostManagementExports)
 
+# is_owned_policy_object "<name>" "<policyAssignmentId>" - the ADR-062 decision 2 ownership
+# predicate (docs/teardown-redesign.md section 14.2), shared by Phase 2 sub-step 6d (what gets
+# deleted, teardown-az-sweep.sh) and Phase 3 VERIFY 6d / VERIFY 9 (what VERIFY expects to be
+# gone, and how VERIFY 9's discovery scan classifies a row as OWNED, teardown-verify.sh). ONE
+# implementation so the delete side and the verify side can never drift apart - that exact drift
+# (an enumerated class list VERIFY checks against a DIFFERENT filter than what the sweep
+# deletes) is the failure mode ADR-062 exists to close.
+#
+# OWNED if ANY of three limbs holds (deliberately redundant on the known survivor - see ADR-062
+# decision 2 - a single limb being wrong about some future object must not silently drop it):
+#   Limb 1 (structural, primary): policyAssignmentId contains "/managementGroups/<mg>/" for any
+#     <mg> in MG_SCOPES, matched with BOTH slashes present as a literal substring test (not a
+#     prefix/suffix test), so a longer MG name cannot match - "/managementGroups/corp/" must
+#     appear verbatim, so "corporate" cannot satisfy "corp". Durable across the MG's own
+#     deletion: the exemption's stored policyAssignmentId string does not change when the MG it
+#     names is later deleted.
+#   Limb 2 (naming): name begins with "exempt-".
+#   Limb 3 (org, inherited convention): name contains "globaris".
+#
+# Do NOT collapse this to `contains(name,'globaris')` alone - that is the existing RG/KV sweep
+# filter (RG_SWEEP_QUERY above) and it does NOT match the live survivor
+# (exempt-dbx-managed-storage-bank-data-p1, which has no globaris substring). A naive reuse
+# would ship as a silent no-op; this is the second time that exact trap has fired on this
+# codebase (the first was the diag-activity-to-security-law special case in step 6a). Limbs 1
+# and 2 both match the live survivor, redundantly, by design.
+#
+# The second positional arg may be empty - VERIFY 9's discovery scan applies this SAME predicate
+# to policy-plane row types other than exemptions (a policy ASSIGNMENT row carries no
+# policyAssignmentId of its own), per docs/teardown-redesign.md section 14.3 point 1 ("for any
+# other type, the same name limbs plus the assignmentId limb"). An empty assignment_id simply
+# never matches limb 1 and the test falls through to limbs 2/3 on name alone, which is correct.
+is_owned_policy_object() {
+  local name="${1:-}" assignment_id="${2:-}"
+  local mg
+  for mg in "${MG_SCOPES[@]}"; do
+    case "$assignment_id" in
+      */managementGroups/"${mg}"/*) return 0 ;;
+    esac
+  done
+  case "$name" in
+    exempt-*) return 0 ;;
+    *globaris*) return 0 ;;
+  esac
+  return 1
+}
+
+# SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST - the ADR-062 decision 6 allow-list
+# (docs/teardown-redesign.md section 14.3) consumed by VERIFY 9's discovery scan
+# (teardown-verify.sh) only - sub-step 6d and VERIFY 6d never consult it (they only ever handle
+# policy exemptions, all of which are estate-owned-or-skipped by is_owned_policy_object). A row
+# VERIFY 9 finds that is NOT estate-owned (does not match is_owned_policy_object) but IS a known,
+# benign, Microsoft-auto-provisioned object is a PASS only if its exact "type|name" pair is a key
+# here. Matching is EXACT type plus EXACT name - NEVER a substring, NEVER a wildcard - so the
+# list can only grow deliberately, via a reviewed PR with a dated justification comment. Anything
+# else at subscription scope that is neither OWNED nor on this list is UNCLASSIFIED and fails the
+# run loud under the TEARDOWN-VERIFY-UNCLASSIFIED label - see is_subscription_scope_benign below.
+#
+# Seeded 2026-07-21 (ADR-062 decision 6) with the two rows found in the live baseline scan across
+# all 5 subscriptions (docs/teardown-redesign.md section 14.3): both are Microsoft
+# system-created policy assignments, and neither is declared anywhere in this repo.
+declare -gA SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST=(
+  ["microsoft.authorization/policyassignments|SecurityCenterBuiltIn"]=1
+  ["microsoft.authorization/policyassignments|SqlVmAndArcSqlServersProtection"]=1
+)
+
+# is_subscription_scope_benign "<type>" "<name>" - exact-match test against
+# SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST. `type` is lowercased before the lookup (Resource Graph's
+# own `type` column is always lowercase, confirmed against the live VERIFY 9 baseline) so a
+# caller does not have to get casing exactly right; `name` is matched byte-for-byte, never
+# case-folded (allow-list membership must stay exact per decision 6). Returns 0 (true, benign) on
+# an exact pair match, 1 (false) otherwise.
+is_subscription_scope_benign() {
+  local type_lc name
+  type_lc="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  name="${2:-}"
+  [ -n "${SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST["${type_lc}|${name}"]+x}" ]
+}
+
 # The 5 workload/platform subscriptions the estate spans (bootstrap identity.tf /
 # _tf-root.yml TF_VAR_*_subscription_id secrets). All landing-zones/* roots share the single
 # landingzones subscription (see any landing-zones/*/providers.tf). Populated from env vars
@@ -104,6 +195,33 @@ teardown_subscriptions() {
 is_auth_error() {
   local text="${1:-}"
   printf '%s' "$text" | grep -qiE 'AADSTS|valid time range|not within|AuthenticationFailed|ExpiredAuthenticationToken|token|credential|401|403|az login'
+}
+
+# is_not_found_error "<text>" - classify captured az/curl stderr (or any error text) as a
+# CONFIRMED-ABSENT (404/NotFound-shaped) signal, case-insensitive (docs/teardown-redesign.md
+# section 14.3, ADR-062 code-review finding 2026-07-21). Grounded in shapes already recorded in
+# this codebase as confirmed live, not invented: sub-step 6d's own comment
+# (teardown-az-sweep.sh) states "A genuine 404 returns `PolicyExemptionNotFound` / `Not Found`,
+# which was confirmed live NOT to match is_auth_error" - `NotFound` (no space) matches
+# PolicyExemptionNotFound and the equivalent `<Type>NotFound` codes ARM returns for the other
+# VERIFY 9 confirm-GET types (policyAssignments/policyDefinitions/policySetDefinitions all
+# follow the same `<Type>NotFound` error-code convention); `Not Found` (with the space) matches
+# the literal HTTP reason phrase; `404` is the bare status code, included for the same reason
+# is_auth_error above includes bare `401`/`403`. Returns 0 (true - IS a confirmed-absent signal)
+# on a match, 1 (false) otherwise.
+#
+# This exists because "stale, pass" must be reserved for a CONFIRMED-ABSENT signal, never for
+# "not auth-shaped, so assume gone". A confirm-GET that fails with a 429 throttle, a 500, or a
+# transient network error is NOT auth-shaped and is NOT confirmed-absent either - it is
+# INDETERMINATE, and a caller must fail loud on it rather than read it as evidence the row is
+# gone. Falling through a bare `else` after only checking is_auth_error reopens exactly the
+# false-negative class ADR-062 exists to close, arriving through a transport error instead of a
+# wrong name filter. Checked AFTER is_auth_error at every call site (never before) so a message
+# that happens to match both stays classified as the auth failure, which is the already-locked,
+# more severe classification.
+is_not_found_error() {
+  local text="${1:-}"
+  printf '%s' "$text" | grep -qiE 'NotFound|Not Found|404'
 }
 
 # az_run <out_var> <az subcommand args...> - run `az <args>`, capturing STDOUT ONLY into the

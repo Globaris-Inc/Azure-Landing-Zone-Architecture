@@ -37,6 +37,246 @@
 
 <!-- Newest at the top. -->
 
+### ADR-062: Phase 3 VERIFY must be strictly BROADER than the Phase 2 sweep - completeness is gated by DISCOVERY over an ARM plane, not by an enumerated class list; subscription-scoped policy exemptions added as sub-step 6d and as the proof case
+
+- **Date:** 2026-07-21
+- **Section:** 10 (Pipeline & Tooling) / teardown; AMENDS ADR-057 (adds a class to step 6 AND corrects
+  ADR-057's own completeness mechanism). Does not supersede ADR-054 or ADR-058: the four-phase shape,
+  token-durability model, auth-fail-loud rule, MG list-snapshot oracle and the independent QA gate all
+  stand unchanged.
+- **Status:** Accepted (architect ruling; user directed the CI path over any manual step, consistent
+  with the standing zero-manual-teardown bar)
+- **Decision makers:** claude (architect); user (ruled fix-in-CI, and specifically asked that VERIFY be
+  made broader than the sweep rather than another class be bolted onto the list)
+
+**Context:**
+
+The subscription-scoped policy exemption `exempt-dbx-managed-storage-bank-data-p1`, declared in
+`landing-zones/bank-data-p1/policy_exemptions.tf` as `azurerm_subscription_policy_exemption.dbx_managed_storage`,
+survived BOTH teardowns and this morning's ADR-057 step 6 sweep. It blocks tomorrow's `bank-data-p1`
+apply: azurerm 4.71.0 carries a create-time requires-import guard on this resource and returns
+`ImportAsExistsError`. Its RG-scoped sibling in the SAME FILE, one resource block above it
+(`azurerm_resource_group_policy_exemption.corp_paas`), died correctly.
+
+*Why the asymmetry, at mechanism level.* This is documented Azure behaviour, not a bug. Microsoft's
+policy exemption structure reference (updated 2026-06-22) states: "A policy exemption is created as a
+child object on the resource hierarchy or the individual resource granted the exemption... If the
+parent resource to which the exemption applies is removed, then the exemption is removed as well." The
+RG-scoped exemption cascaded because Phase 2 deleted its parent resource group. The subscription-scoped
+one did not, because a subscription is NEVER deleted: design section 5 rules that subscriptions are
+only ever re-parented. Its parent is immortal, so nothing upstream can ever cascade it. Two further
+facts, both verified live 2026-07-21:
+
+- The exemption is still present at exact subscription scope in the landing-zones subscription, and its
+  `policyAssignmentId` still names the `corp` MG assignment even though the `corp` MG itself has been
+  deleted. It is dangling by construction and self-heals never.
+- The ADR-048 `expires_on` of 2026-08-01 does NOT clean it up. Same Microsoft reference: "The policy
+  exemption isn't deleted when the `expiresOn` date is reached. The object is preserved for
+  record-keeping, but the exemption is no longer honored." Expiry stops the waiver being honoured; it
+  does not remove the object, and therefore does not clear the requires-import collision. Any design
+  that treats `expires_on` as a lifecycle mechanism is wrong about deletion.
+
+No teardown script mentions exemptions at all. Phase 0 DISARM removes policy ASSIGNMENTS at MG scope,
+which is a different object type at a different scope and never touches this.
+
+**The part that matters more than the missing class, stated plainly as a critique of my own ADR from
+twelve hours ago:**
+
+ADR-057 shipped this morning with an ENUMERATED class list, and its decision 2 wrote the maintenance
+burden down as a standing obligation: "Any wave that introduces a non-RG-scoped object class must
+extend the Phase 2 step 6 class list and the section 13.3 QA checklist in the same change that
+introduces it." Its own Consequences called that "the honest price of the rule."
+
+That was the wrong mechanism and the wrong ruling, and it took twelve hours to disprove. An enumerated
+list plus a written promise to maintain it is not a control. It is a checklist whose correctness
+depends on whoever adds a resource remembering an unrelated file in an unrelated directory. The class
+it missed was not exotic or newly invented: it was declared in the SAME FILE as a class the sweep did
+handle, twenty lines below it, six weeks before ADR-057 was written. If the enumeration can miss that,
+it can miss anything, and "maintain the list harder" is not a fix.
+
+The structural defect underneath is that **Phase 3 VERIFY checks exactly the classes Phase 2 deletes.**
+VERIFY 6, 7 and 8 were written against step 6a, 6b and 6c respectively. A gate built that way is marking
+its own homework: it can confirm the sweep did what it was told, and it can never discover what nobody
+told it. The evidence is that three subscription-scope classes have now been found, and every one of
+them was found by a DEPLOY failing days later, never by a teardown going red. Teardown has been green
+for every one of those discoveries. That is the failure mode being fixed, and adding a fourth entry to
+the list without fixing it would guarantee a fourth instance.
+
+**Decision:**
+
+**1. The exemption class is IN, as Phase 2 step 6 sub-step 6d.** Subscription-scoped policy exemptions
+at EXACT subscription scope, across all 5 subscriptions, deleted when the ownership predicate in
+decision 2 holds. Placed immediately after 6a and before 6b: it is an object-class delete like 6a, and
+it must precede the settings-writes in 6b and 6c. RG-scoped and resource-scoped exemptions are
+deliberately excluded (they cascade with their parent, proven this cycle). MG-scoped exemptions are
+excluded (the estate declares none; verified by grep of every root).
+
+**2. The ownership predicate is STRUCTURAL first, naming second, and it was designed against the whole
+declared surface rather than against the one example.** The existing sweep predicate,
+`contains(name,'globaris')`, does NOT match `exempt-dbx-managed-storage-bank-data-p1`. A naive reuse
+would have shipped a fix that silently does nothing. This is the second time that predicate has failed
+on this surface: step 6a already carries a hand-written special case for
+`diag-activity-to-security-law` for the same reason. An exemption at exact subscription scope is
+estate-owned if ANY limb holds:
+
+   - **Limb 1 (structural, primary):** `properties.policyAssignmentId` contains
+     `/managementGroups/<mg>/` for any `<mg>` in the existing `MG_SCOPES` array
+     (`teardown-common.sh`), matched with BOTH delimiters so it cannot match a longer name.
+   - **Limb 2 (naming):** the exemption name begins with `exempt-`.
+   - **Limb 3 (org, inherited convention):** the name contains `globaris`.
+
+   Verification, and how I know it catches the real object: limbs 1 and 2 BOTH match the live survivor,
+   redundantly. Limb 1 matches because the live object's `policyAssignmentId` contains
+   `/managementGroups/corp/`, and `corp` is already in `MG_SCOPES`. Limb 1 is durable across MG
+   deletion, which I proved empirically rather than assumed: the `corp` MG is already gone right now,
+   and the exemption's stored `policyAssignmentId` string is unchanged. Limb 2 matches because every
+   one of the 8 policy-exemption resources declared anywhere in this repo is named `exempt-*`
+   (enumerated by grep across all roots: 6 RG-scoped spoke exemptions, the AADDS exemption in
+   `platform/identity`, and the synthetic one). Limb 3 catches nothing today and is retained only for
+   consistency with the surrounding steps. The predicate deliberately does NOT depend on `metadata`,
+   because the live survivor has none.
+
+**3. THE GOVERNING PRINCIPLE, and the reason this is a new ADR rather than a line added to ADR-057:**
+
+   > **Phase 3 VERIFY's surface must be strictly LARGER than Phase 2's sweep surface. VERIFY must
+   > contain at least one check that enumerates an ARM PLANE rather than a class list, and that fails
+   > loud on any object it cannot classify. A gate that only inspects what the sweep was told to delete
+   > cannot discover a class nobody thought of, and every class this estate has missed was missed
+   > exactly that way.**
+   >
+   > Corollary, which replaces ADR-057 decision 2 as the primary control: maintaining the class list is
+   > still required, but it is now the SECOND line of defence, not the first. The first line is that an
+   > unmaintained list produces a RED TEARDOWN at teardown time rather than a failed apply days later.
+
+**4. Mechanism: Azure Resource Graph over `policyresources`, at exact subscription scope.** Verified
+live 2026-07-21 as feasible and, critically, as low-noise: one POST to
+`Microsoft.ResourceGraph/resources` at `api-version=2022-10-01` (reachable via `az rest`, no CLI
+extension needed) returns exactly 5 rows across all 5 subscriptions, of which 4 are well-known
+Microsoft auto-provisioned policy assignments and 1 is the estate survivor. It returned
+`exempt-dbx-managed-storage-bank-data-p1` on the first attempt. This is genuinely broader than the
+sweep: the sweep handles one type (`policyexemptions`), the scan sees the whole policy plane
+(assignments, exemptions, definitions, set definitions) and will surface a NEW policy-plane class with
+no code change at all.
+
+**5. Honest statement of what this does NOT cover, because an aspirational gate is worse than a bounded
+one.** There is NO ARM operation that enumerates every object at a subscription scope. Subscription-scoped
+objects are per-provider extension resources and ARM offers no cross-provider "list everything at this
+scope". `az resource list` and ARG's `resources` table cover TRACKED resources only, all of which live
+inside a resource group, which is precisely why every class missed so far was invisible to them.
+Concretely:
+
+   - **Covered by discovery (new):** the policy plane, via `policyresources`.
+   - **NOT covered by discovery, and no mechanism exists:** Consumption budgets, CostManagement exports,
+     CostManagement scheduled actions, and subscription-scope diagnostic settings. ARG has no table for
+     any of them. These four remain ENUMERATED (VERIFY 6), and that limitation is stated here rather
+     than papered over.
+   - **Deliberately EXCLUDED from discovery, with reasons:** ARG's `securityresources` table is
+     telemetry-dominated at subscription scope (measured live: 3268 regulatory-compliance assessments,
+     79 assessments, 90 pricings, plus secure scores) and its one actionable type, `microsoft.security/pricings`,
+     already has a dedicated check in VERIFY 7. Scanning it would produce thousands of rows of noise
+     and would train people to ignore the gate, which is the outcome the user explicitly warned
+     against. ARG's `authorizationresources` table returns subscription-scope role assignments,
+     including the teardown principal's OWN Contributor and User Access Administrator grants, which are
+     bootstrap-owned and must NEVER be removed by teardown (LESSON 54 and 57: revocation strictly after
+     a verified destroy). Both exclusions are recorded so they are decisions, not oversights.
+
+   So the honest claim is: coverage moves from "N enumerated classes" to "N enumerated classes plus
+   open-ended discovery across one whole ARM plane". That is a real improvement and it is also a
+   partial one.
+
+**6. What VERIFY does with an object it cannot classify: it FAILS the teardown, once, with an
+auditable escape hatch.** Every row the scan returns is classified as OWNED (predicate in decision 2,
+fail loud as a sweep remnant), KNOWN-BENIGN (an exact `type` plus `name` pair on
+`SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST`, pass with a log line), or UNCLASSIFIED (fail loud under a
+distinct `TEARDOWN-VERIFY-UNCLASSIFIED` label). The allow-list is seeded from the live baseline with
+exactly two entries, both Microsoft auto-provisioned: `SecurityCenterBuiltIn` and
+`SqlVmAndArcSqlServersProtection`. Matching is exact `type` plus `name`, never a substring and never a
+wildcard, so the list can only grow deliberately. The anti-noise argument is that the surface is tiny
+(5 rows live), so an UNCLASSIFIED failure is loud ONCE and then permanently quiet after a reviewed
+one-line PR that adds the pair with a dated justification comment. That is the opposite of a gate that
+goes red every run. It also means a suppression is always visible in git history rather than being a
+silent skip.
+
+**7. ARG staleness is handled by ARM confirmation, not by trusting the index.** Resource Graph is an
+indexed cache and lags ARM. A VERIFY that failed straight off an ARG row would raise false positives on
+objects the sweep had just deleted, which is exactly the cry-wolf outcome to avoid. Therefore **ARG
+proposes, ARM disposes**: every non-benign row gets a direct ARM GET on its `id` at a pinned
+api-version before VERIFY fails. A 404 means the row was stale, log and pass. Only an ARM-confirmed
+object fails the run. The KNOWN classes never depend on ARG at all, so the discovery layer is purely
+additive and cannot regress the deterministic checks.
+
+**8. Immediate unblock for the 2026-07-22 rebuild, and it is a CI path, not a manual step.** PRIMARY:
+once sub-step 6d ships, dispatch the teardown workflow once (`target=all`, `mode=az-sweep`,
+`remove_mg_hierarchy=false`) against the already-empty estate. It removes the survivor AND proves 6d
+plus the new VERIFY live before the rebuild starts, which converts the blocker into the acceptance
+test. Section 12.5 already established the safety of an immediate re-run against a mostly-empty estate,
+so this needs no new safety argument. FALLBACK, only if that dispatch cannot be run in time: a
+`bank-data-p1` `import` block for the exemption, gated by a recovery-only variable armed per-run per
+ADR-059. The live object was byte-compared against the Terraform config on 2026-07-21 (name, scope,
+`policyAssignmentId`, both `policyDefinitionReferenceIds` in order, `Waiver`, `expiresOn`, display name,
+description) and is identical, so the import yields a no-op plan. The import id is constructible from a
+variable and literals only, which satisfies the ADR-059 construction rule.
+
+**9. `Microsoft.Authorization/policyExemptions` has NO GA api-version** (verified live: every offered
+version is a preview). The pin is `2022-07-01-preview` for both the list and the delete. This carries a
+standing LESSON 40 and 41 obligation: re-verify at every pre-clearance that the pinned version is still
+offered and still returns the object, exactly as the `2025-03-01` cost-export pin is treated.
+
+**10. Everything not named here is unchanged.** ADR-057 decisions 1 and 3 through 7 stand. ADR-057
+decision 2 is amended by decision 3 above: the class list remains a wave obligation but is demoted from
+primary control to backstop. ADR-058's independent QA gate is untouched and remains the outer gate.
+Step 6d inherits every existing convention without exception: `az_run` for any call whose stdout is
+consumed as data, `is_auth_error` classification on every non-zero, auth-fail-loud, absent-is-success
+idempotency. The mode=terraform versus az-sweep ruling is NOT reopened.
+
+**Alternatives considered:**
+
+- **Add the exemption class to the step 6 list and stop there** - rejected. It fixes this object and
+  leaves the mechanism that lost it intact, guaranteeing a fourth instance. This is the alternative the
+  user specifically declined.
+- **Reuse `contains(name,'globaris')` for the new class** - rejected, and it is the design trap here: it
+  does not match the real object, so it would have shipped as a silent no-op.
+- **Make VERIFY exhaustive by iterating every registered resource provider's subscription-scoped types
+  and GETting each collection** - rejected as not real. It is thousands of calls per run, most types do
+  not support a collection GET at subscription scope, and the resulting 404 and 405 noise is
+  indistinguishable from a genuinely empty result. It promises completeness it cannot deliver.
+- **Reconstruct estate objects from the subscription Activity Log** - rejected for now. Terraform's
+  azurerm provider calls resource-provider APIs directly and does not create ARM deployments, so
+  deployment history is empty and the Activity Log is the only trace. Retention is 90 days, the API is
+  throttled, and the signal-to-noise is poor for a gate. Parked as OQ-058 rather than silently dropped.
+- **Scan ARG's `securityresources` and `authorizationresources` too** - rejected, per decision 5. Noise
+  and blast radius respectively.
+- **Grant the teardown SP a broader role to be safe** - rejected and unnecessary; see Consequences. No
+  grant change of any kind is required.
+
+**Consequences:**
+
+- Positive: the first time an unknown subscription-scoped policy-plane object survives, teardown goes
+  RED at teardown time instead of a deploy failing days later. That is the specific reversal this ADR
+  exists to produce.
+- Positive: no RBAC change, no bootstrap re-apply, no Owner grant. Verified live per-scope, see
+  section 14.1.
+- Positive: the blocker doubles as the acceptance test for the fix.
+- Positive: the two-limb predicate is redundant on the real object, so a single limb being wrong about
+  a future object does not silently drop it.
+- Negative / trade-offs: VERIFY now depends on a second service (Resource Graph) with its own
+  availability and freshness characteristics. Bounded by decision 7: ARG only ever proposes, and the
+  deterministic checks never touch it.
+- Negative: the benign allow-list is a new maintained artifact. Accepted deliberately, because it is
+  small (2 entries), exact-match only, and grows through reviewed PRs with dated justifications rather
+  than silently.
+- Negative: coverage is honestly partial. The cost and monitor planes have no discovery mechanism and
+  stay enumerated. Stated in decision 5 rather than hidden behind a claim of completeness.
+- Negative: this ADR contradicts an ADR written the same day. That is the correct outcome and the
+  record should show it plainly rather than dress it as a routine extension.
+- Follow-ups required: OQ-058 (parked scope: Activity-Log-based discovery, `metadata`-stamping every
+  exemption so the predicate becomes purely structural, discovery for the cost and monitor planes, and
+  whether `expires_on` should be dropped from the ADR-048 exemption now that it is known not to delete
+  anything). Implementation contract for DevSecOps: `docs/teardown-redesign.md` section 14. QA
+  acceptance criteria: section 14.5, which extends the section 13.3 checklist.
+
+---
+
 ### ADR-061: Cross-root output Secrets are governed by a determinism contract, not by a manual "carry forward the outputs" step - name-derived values are never refreshed, non-derivable values are re-set unconditionally after their producing root applies
 
 - **Date:** 2026-07-21

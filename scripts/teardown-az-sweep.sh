@@ -70,6 +70,21 @@
 # az-sweep exists for (the state-gone/F4 case) without depending on mode=terraform actually
 # having run. Full root-cause account: docs/teardown-redesign.md section 12.1.
 #
+# AMENDED a fifth time 2026-07-21 (ADR-062, docs/teardown-redesign.md section 14.2): added
+# sub-step 6d - subscription-scoped policy exemptions. Root cause: `terraform destroy` and the
+# original step 6 both remove a policy exemption only when its PARENT scope is removed (an
+# exemption is a child object that cascades with its parent); a subscription-scoped exemption's
+# parent is the subscription itself, which is never deleted (section 5), so it can never cascade
+# away on its own no matter which teardown mode ran. The live proof:
+# `exempt-dbx-managed-storage-bank-data-p1` (landing-zones/bank-data-p1/policy_exemptions.tf)
+# survived both teardowns AND this same step 6 this morning, and blocks a later apply with
+# azurerm 4.71.0's ImportAsExistsError. Its expires_on does not help either - Microsoft's
+# documented behaviour is that an exemption is preserved for record-keeping past expiry, not
+# deleted. Ownership is decided by `is_owned_policy_object` (teardown-common.sh) - a three-limb
+# predicate shared with VERIFY 6d/9 (teardown-verify.sh) so the delete side and the verify side
+# can never drift apart; see that function's own comment for the exact limbs and why a naive
+# `contains(name,'globaris')` reuse would have shipped as a silent no-op.
+#
 # Order matters:
 #   1. Databricks: submit the WORKSPACE delete --no-wait --force-deletion (never `az group
 #      delete` the managed RG directly - it still carries an RP deny-assignment, F2, even with
@@ -89,14 +104,17 @@
 #      Subscriptions are never deleted, only re-parented (docs/teardown-redesign.md
 #      section 5). MG ops are fast control-plane calls and stay synchronous (no --no-wait,
 #      no reconcile wait needed for MGs, per locked decision 9.3).
-#   6. Subscription scope (ADR-057, docs/teardown-redesign.md section 12.3): the four
+#   6. Subscription scope: 6a (ADR-057, docs/teardown-redesign.md section 12.3) the four
 #      subscription-scoped object classes (budgets, cost exports at api-version 2025-03-01,
-#      cost anomaly scheduled actions, subscription diagnostic settings) across all 5 subs;
-#      the Defender for Cloud pricing reset to Free from the DEFENDER_PLANS_TO_FREE allow-list
-#      (security subscription only, teardown-common.sh); and the RP_NAMESPACES_TO_UNREGISTER
-#      provider unregistration (management subscription only, strictly after the object-class
-#      deletes). Runs after step 4 and before step 7 so nothing here races a live MG-scope
-#      remediation and step 6's own submissions are covered by the existing reconcile + Phase 3.
+#      cost anomaly scheduled actions, subscription diagnostic settings) across all 5 subs; 6d
+#      (ADR-062, section 14.2, ordered immediately after 6a) subscription-scoped policy
+#      exemptions at exact scope, matched against the is_owned_policy_object predicate
+#      (teardown-common.sh); 6b the Defender for Cloud pricing reset to Free from the
+#      DEFENDER_PLANS_TO_FREE allow-list (security subscription only, teardown-common.sh); and
+#      6c the RP_NAMESPACES_TO_UNREGISTER provider unregistration (management subscription
+#      only, strictly after the object-class deletes). Runs after step 4 and before step 7 so
+#      nothing here races a live MG-scope remediation and step 6's own submissions are covered
+#      by the existing reconcile + Phase 3.
 #   7. Reconciliation: ONE bounded wait for every RG submitted in steps 1-2 to report gone.
 #      Step 6's writes are synchronous sub-second control-plane calls, not RGs - they are
 #      deliberately NOT added to this wait (wait_for_rgs_gone is RG-shaped); Phase 3 VERIFY
@@ -431,6 +449,78 @@ for sub in "${SUBS[@]}"; do
         exit 1
       fi
       echo "  ::warning::diagnostic setting delete for ${name} failed or already gone (continuing - idempotent retry on next run): ${diag_del_out}"
+    fi
+  done
+done
+
+# --- 6d. Subscription-scoped policy exemptions (ADR-062, docs/teardown-redesign.md section
+#     14.2, added 2026-07-21). Placed AFTER 6a and BEFORE 6b - an object-class delete like 6a,
+#     ordered before the settings-writes in 6b/6c. RG-scoped and resource-scoped exemptions are
+#     OUT (they cascade with their parent, proven this cycle); MG-scoped exemptions are OUT (the
+#     estate declares none, verified by grep of every root).
+#
+#     Root cause this closes: exempt-dbx-managed-storage-bank-data-p1
+#     (landing-zones/bank-data-p1/policy_exemptions.tf) survived both teardowns and this
+#     morning's original step 6, because its parent scope is a SUBSCRIPTION, which is never
+#     deleted (section 5) - an exemption is only ever removed by cascade from its parent, and a
+#     subscription-scoped exemption has no parent that can ever be removed. Its expires_on does
+#     NOT help either: Microsoft's documented behaviour is that an exemption is preserved for
+#     record-keeping past expiry, not deleted.
+#
+#     API version 2022-07-01-preview for BOTH list and delete - Microsoft.Authorization/
+#     policyExemptions has NO GA api-version at all (every offered version is a preview; this
+#     one and 2026-01-01-preview were confirmed live to return every property the estate sets).
+#     LOAD-BEARING pin, same class as the cost-export 2025-03-01 pin above - re-verify at every
+#     pre-clearance (LESSON 40/41).
+#
+#     $filter=atExactScope() is REQUIRED, not cosmetic: with no filter, a subscription-scope
+#     list also returns exemptions inherited from ancestor MGs and exemptions on objects
+#     CONTAINED WITHIN the subscription (RGs, resources) - deleting off that unfiltered list
+#     would attempt deletes on inherited MG-scoped objects this script must never touch.
+#     atScope() is also wrong (still includes ancestors); only atExactScope() returns objects
+#     whose own scope IS the subscription (verified live against all three filter forms).
+#
+#     Ownership predicate is applied PER ROW IN THIS SCRIPT via is_owned_policy_object
+#     (teardown-common.sh) - NOT as a server-side JMESPath name filter, because the predicate
+#     needs both name and policyAssignmentId together and must stay byte-identical to what
+#     VERIFY 6d/9 check for, so the delete side and the verify side can never drift apart. Do
+#     NOT reuse contains(name,'globaris') alone here - the real object has no globaris
+#     substring and a naive reuse would ship as a silent no-op (ADR-062).
+#
+#     List-call failure: a SUBSCRIPTION-scoped list can never legitimately be gone (section 9.4
+#     boundary), so ANY non-zero is FAIL LOUD, matching 6a. Delete-call failure: classify with
+#     is_auth_error - auth-shaped fails loud, anything else warns and continues (idempotent-
+#     absent is success; a genuine 404 PolicyExemptionNotFound was confirmed live NOT to match
+#     is_auth_error, so an already-deleted object is never misread as a dead token). Synchronous
+#     sub-second control-plane call - no --no-wait, deliberately not added to wait_for_rgs_gone
+#     in step 7 (that wait is RG-shaped); VERIFY 6d/9 are the completion gate instead.
+echo "-- 6d: subscription-scoped policy exemptions (exact scope only) --"
+for sub in "${SUBS[@]}"; do
+  if ! az_run exemption_rows_out rest --method get \
+      --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.Authorization/policyExemptions?api-version=2022-07-01-preview&\$filter=atExactScope()" \
+      --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
+    echo "::error::subscription-scoped policy exemption list failed for subscription ${sub} - a failed list is never read as 'no exemptions' (section 9.4): ${AZ_RUN_STDERR}"
+    exit 1
+  fi
+  # shellcheck disable=SC2154  # exemption_rows_out is assigned indirectly by az_run's printf -v
+  mapfile -t exemption_rows <<< "$exemption_rows_out"
+  for row in "${exemption_rows[@]:-}"; do
+    [ -z "$row" ] && continue
+    ex_name="$(printf '%s' "$row" | cut -f1)"
+    ex_assignment_id="$(printf '%s' "$row" | cut -f2)"
+    if ! is_owned_policy_object "$ex_name" "$ex_assignment_id"; then
+      echo "  Skipping subscription-scoped policy exemption ${ex_name} (sub ${sub}) - matches no OWNED limb (policyAssignmentId '${ex_assignment_id}'), not estate-owned."
+      continue
+    fi
+    echo "  Deleting subscription-scoped policy exemption ${ex_name} (sub ${sub})"
+    if ! exemption_del_out="$(az rest --method delete \
+        --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.Authorization/policyExemptions/${ex_name}?api-version=2022-07-01-preview" \
+        --output none 2>&1)"; then
+      if is_auth_error "$exemption_del_out"; then
+        echo "::error::policy exemption delete for ${ex_name} (sub ${sub}) failed with an auth/transport error: ${exemption_del_out}"
+        exit 1
+      fi
+      echo "  ::warning::policy exemption delete for ${ex_name} failed or already gone (continuing - idempotent retry on next run): ${exemption_del_out}"
     fi
   done
 done
