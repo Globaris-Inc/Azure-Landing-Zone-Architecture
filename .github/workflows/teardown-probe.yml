@@ -1,0 +1,143 @@
+# .github/workflows/teardown-probe.yml
+# Purpose: READ-ONLY orphan/state probe - Deliverable 1 of the teardown-completeness extension
+#          sweep (2026-07-23). Wires scripts/teardown-probe-state.sh (state-blob inventory,
+#          Part A) and scripts/teardown-probe-extensions.sh (per-scope extension-resource
+#          discovery, Part B). Deletes nothing, requires no `confirm: destroy` typed input
+#          (unlike teardown.yml) - this is meant to be run BEFORE deciding whether/how to
+#          dispatch teardown.yml or deploy.yml, to get the authoritative orphan map and
+#          lost-state-root list first.
+# Section: 10 - Pipeline & Tooling (ADR-019, ADR-054, ADR-062). See scripts/teardown-probe-
+#          state.sh and scripts/teardown-probe-extensions.sh for the full root-cause account.
+# Last updated: 2026-07-23
+#
+# Environment reuse (no bootstrap re-apply required): this job runs under the
+# `production-destroy` GitHub Environment - the SAME federated credential subject
+# (`repo:<org>/<repo>:environment:production-destroy`) teardown.yml's destructive jobs already
+# use (bootstrap/identity.tf). Reusing it here is safe because this workflow is read-only (no
+# `az ... delete`/`az ... create` anywhere in either probe script) - it only needs the OIDC
+# trust boundary and the required-reviewer gate that environment already provides, not a new
+# federated credential. No new GitHub Environment, no bootstrap re-apply.
+#
+# Firewalled state SA (ADR-025): scripts/teardown-probe-state.sh needs the runner to reach the
+# Entra-only, firewalled (default_action=Deny) Terraform state Storage Account via
+# `--auth-mode login`. This workflow opens the SA firewall for its own window (the SAME JIT
+# open/3-consecutive-probe-wait/restore-Deny pattern _tf-root.yml already uses for
+# manage_runner_ip, ADR-025 - re-implemented inline here rather than shared, since this
+# workflow has no Terraform "root" context to borrow _tf-root.yml's own step from) and restores
+# Deny on exit, `if: always()`, so the account is never left open past this run's window.
+#
+# LESSON (JIT state-SA firewall lifecycle, see CLAUDE.md/DevSecOps role notes): serialize runs
+# that touch the state SA - do not dispatch this workflow concurrently with a deploy.yml or
+# teardown.yml run that also flips the same SA's default_action, and do not dispatch it
+# concurrently with another instance of itself.
+name: Teardown orphan probe (read-only, manual)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  probe:
+    name: "Orphan probe (state-blob inventory + extension-resource discovery)"
+    runs-on: ubuntu-latest
+    environment: production-destroy
+    env:
+      MANAGEMENT_SUBSCRIPTION_ID: ${{ secrets.MANAGEMENT_SUBSCRIPTION_ID }}
+      CONNECTIVITY_SUBSCRIPTION_ID: ${{ secrets.CONNECTIVITY_SUBSCRIPTION_ID }}
+      IDENTITY_SUBSCRIPTION_ID: ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
+      SECURITY_SUBSCRIPTION_ID: ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
+      LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required repo Variables (LESSON 15 - vars, not secrets)
+        run: |
+          missing=""
+          [ -n "${{ vars.AZURE_CLIENT_ID }}" ]       || missing="$missing AZURE_CLIENT_ID"
+          [ -n "${{ vars.AZURE_TENANT_ID }}" ]       || missing="$missing AZURE_TENANT_ID"
+          [ -n "${{ vars.AZURE_SUBSCRIPTION_ID }}" ] || missing="$missing AZURE_SUBSCRIPTION_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required repository Variables:$missing (Settings -> Variables, NOT Secrets)"
+            exit 1
+          fi
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Same open/3-consecutive-probe-wait pattern as _tf-root.yml's "Open state SA firewall"
+      # step (ADR-025) - re-implemented inline (no Terraform root/backend_rel context to
+      # reuse that step's working-directory convention from). Reads the SA name/RG/container
+      # straight from envs/poc.backend.hcl at the repo root.
+      - name: Open state SA firewall for this probe (ADR-025)
+        env:
+          BACKEND_HCL: envs/poc.backend.hcl
+        run: |
+          set -euo pipefail
+          SA_NAME="$(grep -E '^\s*storage_account_name' "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          RG_NAME="$(grep -E '^\s*resource_group_name'  "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          CONTAINER="$(grep -E '^\s*container_name'     "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          echo "Flipping default_action=Allow on $SA_NAME (rg $RG_NAME) for this probe run"
+          az storage account update \
+            --name "$SA_NAME" --resource-group "$RG_NAME" \
+            --default-action Allow --output none
+          echo "STATE_SA_NAME=$SA_NAME" >> "$GITHUB_ENV"
+          echo "STATE_SA_RG=$RG_NAME"   >> "$GITHUB_ENV"
+          echo "SA_OPENED=1"            >> "$GITHUB_ENV"
+          # default_action=Allow is monotonic once propagated but NOT instant and NOT
+          # consistent across front-end nodes at the moment it flips (same caveat _tf-root.yml
+          # documents) - require 3 CONSECUTIVE successful blob-list probes, 8s apart, before
+          # declaring the firewall open.
+          echo "Waiting for the state-SA firewall to open (3 consecutive probe successes required)..."
+          ready=0
+          consecutive=0
+          for i in $(seq 1 32); do
+            if az storage blob list \
+                 --account-name "$SA_NAME" --container-name "$CONTAINER" \
+                 --auth-mode login --num-results 1 --only-show-errors -o none 2>/dev/null; then
+              consecutive=$((consecutive + 1))
+              echo "Probe success $consecutive/3 (~$(( (i-1) * 8 ))s elapsed)."
+              if [ "$consecutive" -ge 3 ]; then
+                echo "State SA firewall settled after ~$(( (i-1) * 8 ))s."
+                ready=1; break
+              fi
+            else
+              if [ "$consecutive" -gt 0 ]; then
+                echo "Probe FAILED after $consecutive success(es) - propagation not settled; counter reset."
+              fi
+              consecutive=0
+            fi
+            sleep 8
+          done
+          if [ "$ready" != "1" ]; then
+            echo "::error::State SA firewall did not settle (3 consecutive probe successes) within ~256s."
+            exit 1
+          fi
+
+      - name: State-blob inventory probe (Deliverable 1, Part A)
+        run: bash scripts/teardown-probe-state.sh
+
+      - name: Extension-resource discovery probe (Deliverable 1, Part B)
+        run: bash scripts/teardown-probe-extensions.sh
+
+      # Always restore default_action=Deny, even if a prior step failed, so the state SA never
+      # stays publicly reachable past this run.
+      - name: Restore state SA firewall to Deny (ADR-025)
+        if: ${{ always() && env.SA_OPENED == '1' }}
+        run: |
+          set -uo pipefail
+          echo "Restoring default_action=Deny on $STATE_SA_NAME"
+          az storage account update \
+            --name "$STATE_SA_NAME" --resource-group "$STATE_SA_RG" \
+            --default-action Deny --output none || \
+            echo "::warning::Failed to restore Deny on $STATE_SA_NAME - set default_action=Deny manually."
