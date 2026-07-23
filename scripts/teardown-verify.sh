@@ -47,6 +47,30 @@
 # of which stay direct ARM calls. Every non-benign VERIFY 9 row is confirmed with a direct ARM
 # GET before failing (ARG proposes, ARM disposes - ARG is an indexed cache and lags ARM, so a
 # stale row must never produce a false failure).
+#
+# AMENDED a fifth time 2026-07-23 (teardown-completeness extension sweep, code-review BLOCK-2
+# follow-up): added VERIFY 6 (RG scope) - budgets, VERIFY 6d (RG scope) - policy exemptions,
+# VERIFY 6e - Microsoft.Security singletons (mirrors sweep step 6e exactly, same label), and
+# VERIFY 6f - tenant Microsoft.AadIam/diagnosticSettings (mirrors sweep step 6f). These are the
+# deterministic mirrors of teardown-az-sweep.sh's FIX-2 (RG portion)/FIX-3 (RG portion)/FIX-4/
+# FIX-5, reusing the SAME centralized helpers (discover_live_rgs, is_globaris_owned,
+# is_owned_policy_object, the API-version constants) so the delete side and the verify side can
+# never drift apart - the same ADR-062 discipline VERIFY 6d/9 already established.
+#
+# DELIBERATELY NOT ADDED: a VERIFY step for MG-scope budgets/diagnostic-settings/policy
+# exemptions (FIX-1, and FIX-2's MG-scope budget re-sweep). MG-scoped extension objects are
+# ONLY queryable WHILE their MG exists - once the MG is deleted, an MG-scope `az rest` call
+# 403s for this scoped SP (its MG-scoped grants are deleted WITH the MG - the same reason
+# mg_snapshot_load's own comment gives, and the same reason BLOCK-1 fixed
+# scripts/teardown-probe-extensions.sh). A Phase 3 VERIFY step runs AFTER Step 4's MG deletions
+# have already happened for target=all - it structurally CANNOT see these objects for any MG
+# that got deleted this run. Verification for this class instead happens INLINE, immediately
+# after each delete, WHILE the MG still exists: teardown-az-sweep.sh's FIX-1 and FIX-2 (MG
+# portion) now call confirm_gone_or_fail_primary (teardown-common.sh) right after each delete,
+# treating a still-live or indeterminate post-delete read as a hard sweep failure - this is the
+# only completion check these classes will ever get, so it is held to VERIFY's own fail-loud
+# standard rather than the warn-and-continue "belt" treatment used where a real VERIFY mirror
+# exists (see confirm_gone_or_fail_primary vs confirm_gone_or_warn_belt, teardown-common.sh).
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -411,11 +435,14 @@ fi
 #
 #     What this does NOT cover (section 14.4, stated honestly rather than implied complete):
 #     Consumption budgets, CostManagement exports, CostManagement scheduled actions, and
-#     subscription diagnostic settings have no Resource Graph table at all and stay covered only
-#     by the enumerated VERIFY 6 above. ARG's securityresources (telemetry-dominated - 3268+ rows
-#     live at subscription scope) and authorizationresources (would include the teardown SP's
-#     OWN bootstrap-owned role assignments, which must NEVER be touched by teardown - LESSON
-#     54/57) are deliberately excluded from this scan.
+#     subscription/RG diagnostic settings have no Resource Graph table at all and stay covered
+#     only by the enumerated VERIFY 6 (subscription and RG scope) above - same reasoning now
+#     also applies to VERIFY 6e/6f's Microsoft.Security singletons and the tenant AAD diagnostic
+#     setting (2026-07-23 amendment, teardown-completeness extension sweep). ARG's
+#     securityresources (telemetry-dominated - 3268+ rows live at subscription scope) and
+#     authorizationresources (would include the teardown SP's OWN bootstrap-owned role
+#     assignments, which must NEVER be touched by teardown - LESSON 54/57) are deliberately
+#     excluded from this scan.
 echo "== VERIFY 9: Resource Graph discovery scan (policy plane, exact subscription scope) =="
 if ! command -v jq >/dev/null 2>&1; then
   note_fail "VERIFY 9: jq is required to parse the Resource Graph discovery response and is not available on this runner (ubuntu-latest ships it by default) - cannot run the discovery scan."
@@ -507,6 +534,198 @@ else
     fi
   fi
   rm -f "$arg_body_file"
+fi
+
+# --- VERIFY 6 (RG scope): consumption budgets on surviving RGs (teardown-completeness
+#     extension sweep, code-review BLOCK-2 fix, 2026-07-23) - the deterministic mirror of
+#     teardown-az-sweep.sh's FIX-2 RG-scope budget sweep. discover_live_rgs (teardown-common.sh)
+#     - the SAME RG_SWEEP_QUERY pattern VERIFY 2 already uses - never a hardcoded RG name.
+#     BUDGETS_API_VERSION (2024-08-01), is_globaris_owned ownership test. A SUBSCRIPTION-scoped
+#     RG list can never legitimately fail (section 9.4 boundary, same as VERIFY 2); a per-RG
+#     budget list failing on an RG just confirmed to exist is equally unexpected - both FAIL
+#     LOUD.
+echo "== VERIFY 6 (RG scope): consumption budgets on surviving RGs =="
+v6rg_clean=1
+for sub in "${SUBS[@]}"; do
+  if ! discover_live_rgs v_rg_names_budgets_out "$sub"; then
+    note_fail "RG list failed for subscription ${sub} while checking RG-scope budgets - a failed list is never read as 'no RGs' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
+    v6rg_clean=0
+    continue
+  fi
+  # shellcheck disable=SC2154  # v_rg_names_budgets_out is assigned indirectly by az_run's printf -v
+  mapfile -t v_rg_names_budgets <<< "$v_rg_names_budgets_out"
+  for rg in "${v_rg_names_budgets[@]:-}"; do
+    [ -z "$rg" ] && continue
+    if ! az_run v_rg_budget_names_out rest --method get \
+        --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
+        --query "value[?contains(name,'globaris')].name" -o tsv; then
+      note_fail "RG-scope budget list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'no budgets': ${AZ_RUN_STDERR}"
+      v6rg_clean=0
+      continue
+    fi
+    # shellcheck disable=SC2154  # v_rg_budget_names_out is assigned indirectly by az_run's printf -v
+    mapfile -t v_rg_budget_names <<< "$v_rg_budget_names_out"
+    for name in "${v_rg_budget_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      note_fail "RG-scope budget ${name} still present in RG ${rg} (sub ${sub})."
+      v6rg_clean=0
+    done
+  done
+done
+[ "$v6rg_clean" -eq 1 ] && echo "  clean (no estate-owned RG-scope budgets found on any surviving RG)."
+
+# --- VERIFY 6d (RG scope): policy exemptions on surviving RGs (teardown-completeness extension
+#     sweep, code-review BLOCK-2 fix, 2026-07-23) - the deterministic mirror of
+#     teardown-az-sweep.sh's FIX-3 RG-scope exemption sweep. Same discover_live_rgs, same
+#     POLICY_EXEMPTIONS_API_VERSION_NEW (2022-07-01-preview), same atExactScope filter, same
+#     is_owned_policy_object predicate as sub-step 6d's RG-scope portion and as VERIFY 6d
+#     (subscription scope) above - the delete side and the verify side can never drift apart.
+echo "== VERIFY 6d (RG scope): policy exemptions on surviving RGs (exact scope, OWNED predicate) =="
+v6drg_clean=1
+for sub in "${SUBS[@]}"; do
+  if ! discover_live_rgs v_rg_names_ex_out "$sub"; then
+    note_fail "RG list failed for subscription ${sub} while checking RG-scope policy exemptions - a failed list is never read as 'no RGs': ${AZ_RUN_STDERR}"
+    v6drg_clean=0
+    continue
+  fi
+  # shellcheck disable=SC2154  # v_rg_names_ex_out is assigned indirectly by az_run's printf -v
+  mapfile -t v_rg_names_ex <<< "$v_rg_names_ex_out"
+  for rg in "${v_rg_names_ex[@]:-}"; do
+    [ -z "$rg" ] && continue
+    if ! az_run v_rg_ex_rows_out rest --method get \
+        --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
+        --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
+      note_fail "RG-scope policy exemption list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'no exemptions': ${AZ_RUN_STDERR}"
+      v6drg_clean=0
+      continue
+    fi
+    # shellcheck disable=SC2154  # v_rg_ex_rows_out is assigned indirectly by az_run's printf -v
+    mapfile -t v_rg_ex_rows <<< "$v_rg_ex_rows_out"
+    for row in "${v_rg_ex_rows[@]:-}"; do
+      [ -z "$row" ] && continue
+      v_ex_name="$(printf '%s' "$row" | cut -f1)"
+      v_ex_assignment_id="$(printf '%s' "$row" | cut -f2)"
+      if is_owned_policy_object "$v_ex_name" "$v_ex_assignment_id"; then
+        note_fail "RG-scope policy exemption ${v_ex_name} still present in RG ${rg} (sub ${sub}, policyAssignmentId '${v_ex_assignment_id}')."
+        v6drg_clean=0
+      fi
+    done
+  done
+done
+[ "$v6drg_clean" -eq 1 ] && echo "  clean (no OWNED RG-scope policy exemptions found on any surviving RG)."
+
+# --- VERIFY 6e: Microsoft.Security singletons, security subscription only
+#     (teardown-completeness extension sweep, code-review BLOCK-2 fix, 2026-07-23) - the
+#     deterministic mirror of teardown-az-sweep.sh's FIX-4 step 6e (same label, intentionally,
+#     for easy cross-reference between the two files). securityContacts and automations use
+#     is_globaris_owned (same predicate the sweep uses); autoProvisioningSettings/
+#     workspaceSettings use NO predicate (same subscription-wide precedent as VERIFY 7's
+#     Defender pricing check and VERIFY 8's RP-registration check - see FIX-4(iv)'s own comment,
+#     teardown-az-sweep.sh, for why no ownership filter is the correct call there).
+echo "== VERIFY 6e: Microsoft.Security singletons (security subscription) =="
+if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
+  note_fail "SECURITY_SUBSCRIPTION_ID is empty - cannot certify Microsoft.Security singletons (already counted by VERIFY 0)."
+else
+  v6e_clean=1
+
+  if ! az_run v_contact_rows_out rest --method get \
+      --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/securityContacts?api-version=${SECURITY_CONTACTS_API_VERSION}" \
+      --query "value[].name" -o tsv; then
+    note_fail "securityContacts list failed for the security subscription: ${AZ_RUN_STDERR}"
+    v6e_clean=0
+  else
+    # shellcheck disable=SC2154  # v_contact_rows_out is assigned indirectly by az_run's printf -v
+    mapfile -t v_contact_names <<< "$v_contact_rows_out"
+    for name in "${v_contact_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      if is_globaris_owned "$name"; then
+        note_fail "Security contact ${name} still present in the security subscription."
+        v6e_clean=0
+      fi
+    done
+  fi
+
+  if ! az_run v_automation_rows_out rest --method get \
+      --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/automations?api-version=${SECURITY_AUTOMATIONS_API_VERSION}" \
+      --query "value[].name" -o tsv; then
+    note_fail "Microsoft.Security/automations list failed for the security subscription: ${AZ_RUN_STDERR}"
+    v6e_clean=0
+  else
+    # shellcheck disable=SC2154  # v_automation_rows_out is assigned indirectly by az_run's printf -v
+    mapfile -t v_automation_names <<< "$v_automation_rows_out"
+    for name in "${v_automation_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      if is_globaris_owned "$name"; then
+        note_fail "Microsoft.Security automation ${name} still present in the security subscription."
+        v6e_clean=0
+      fi
+    done
+  fi
+
+  if ! az_run v_autoprov_rows_out rest --method get \
+      --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/autoProvisioningSettings?api-version=${SECURITY_AUTOPROVISIONING_API_VERSION}" \
+      --query "value[?properties.autoProvision!='Off'].name" -o tsv; then
+    note_fail "autoProvisioningSettings list failed for the security subscription: ${AZ_RUN_STDERR}"
+    v6e_clean=0
+  else
+    # shellcheck disable=SC2154  # v_autoprov_rows_out is assigned indirectly by az_run's printf -v
+    mapfile -t v_autoprov_names <<< "$v_autoprov_rows_out"
+    for name in "${v_autoprov_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      note_fail "autoProvisioningSettings/${name} still reads other than Off in the security subscription."
+      v6e_clean=0
+    done
+  fi
+
+  if ! az_run v_workspace_rows_out rest --method get \
+      --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/workspaceSettings?api-version=${SECURITY_WORKSPACESETTINGS_API_VERSION}" \
+      --query "value[].name" -o tsv; then
+    note_fail "workspaceSettings list failed for the security subscription: ${AZ_RUN_STDERR}"
+    v6e_clean=0
+  else
+    # shellcheck disable=SC2154  # v_workspace_rows_out is assigned indirectly by az_run's printf -v
+    mapfile -t v_workspace_names <<< "$v_workspace_rows_out"
+    for name in "${v_workspace_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      note_fail "workspaceSettings/${name} still present in the security subscription (not Terraform-managed anywhere in this repo, so it should never survive teardown)."
+      v6e_clean=0
+    done
+  fi
+
+  [ "$v6e_clean" -eq 1 ] && echo "  clean (securityContacts/automations gone, autoProvisioningSettings all Off, no workspaceSettings) in the security subscription."
+fi
+
+# --- VERIFY 6f: tenant Microsoft.AadIam/diagnosticSettings (teardown-completeness extension
+#     sweep, code-review BLOCK-2 fix, 2026-07-23) - the deterministic mirror of
+#     teardown-az-sweep.sh's FIX-5 step 6f (same label). SECURITY-ADMIN-GATED, BY DESIGN, SAME
+#     AS THE SWEEP: unlike the read-only probe (scripts/teardown-probe-extensions.sh), which
+#     treats a 401/403 here as a named, non-fatal finding (its contract is "report the full map,
+#     including what could not be checked"), VERIFY is a hard completion GATE and holds this to
+#     the SAME fail-loud standard as every other class in this file (section 9.4 - "I don't know"
+#     is never read as "clean"). If the sweep itself already 401'd at step 6f, the whole az-sweep
+#     job already failed the run; VERIFY reaching the same auth wall here is expected,
+#     consistent, and still correctly reported as a failure, not silently downgraded.
+echo "== VERIFY 6f: tenant Microsoft.AadIam/diagnosticSettings =="
+if ! az_run v_tenant_diag_rows_out rest --method get \
+    --url "${ARM_BASE}/providers/Microsoft.AadIam/diagnosticSettings?api-version=${TENANT_AAD_DIAGNOSTIC_SETTINGS_API_VERSION}" \
+    --query "value[].name" -o tsv; then
+  if is_auth_error "$AZ_RUN_STDERR"; then
+    note_fail "tenant Microsoft.AadIam/diagnosticSettings list failed with an auth/transport error - the CI OIDC SP likely does not (or no longer) hold Security Administrator (or Global Administrator) at the tenant root (ADR-033/034 permission class). Not certified clean off a permission gap: ${AZ_RUN_STDERR}"
+  else
+    note_fail "tenant Microsoft.AadIam/diagnosticSettings list failed for an unexpected non-auth reason: ${AZ_RUN_STDERR}"
+  fi
+else
+  # shellcheck disable=SC2154  # v_tenant_diag_rows_out is assigned indirectly by az_run's printf -v
+  mapfile -t v_tenant_diag_names <<< "$v_tenant_diag_rows_out"
+  v6f_clean=1
+  for name in "${v_tenant_diag_names[@]:-}"; do
+    [ -z "$name" ] && continue
+    if [ "$name" = "$TENANT_AAD_DIAG_SETTING_NAME" ] || is_globaris_owned "$name"; then
+      note_fail "Tenant AAD diagnostic setting ${name} still present."
+      v6f_clean=0
+    fi
+  done
+  [ "$v6f_clean" -eq 1 ] && echo "  clean (no OWNED tenant AAD diagnostic setting found)."
 fi
 
 echo "----------------------------------------------------------------"

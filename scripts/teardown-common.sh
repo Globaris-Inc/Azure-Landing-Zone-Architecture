@@ -38,6 +38,46 @@
 # predicate so the delete side (6d) and the verify side (VERIFY 6d/9) can never drift apart - see
 # the function's own comment for the exact limbs and why a naive `contains(name,'globaris')`
 # reuse would have shipped as a silent no-op.
+#
+# AMENDED a sixth time 2026-07-23 (teardown-completeness extension sweep, root cause: the
+# 2026-07-23 rebuild failed at Step 2 because a JIT-firewalled state SA and an az-sweep pass
+# that skips Phase 1 terraform-destroy leaves scope-path-keyed EXTENSION resources orphaned -
+# budgets/diagnostic-settings/policy-exemptions at MG/RG scope are extension resources: their
+# ARM ID is formed by appending the provider's own path onto WHATEVER scope they were attached
+# to, and Azure Resource Manager does NOT cascade-delete an extension resource just because its
+# host scope is deleted. An orphaned MG-scoped exemption then COLLIDES the next time Step 1
+# recreates an MG with the same name). Added: the new API-version constants and small discovery
+# helpers below, shared by the new read-only probe (scripts/teardown-probe-state.sh,
+# scripts/teardown-probe-extensions.sh) and the new Phase 2 sweep sub-steps (FIX-1 through
+# FIX-5, teardown-az-sweep.sh) so the probe and the sweep can never drift apart on API version or
+# scope math - the same discipline `is_owned_policy_object` already established for the
+# exemption predicate. Every api-version constant below was re-verified live against Microsoft
+# Learn on 2026-07-23 (not copied from an assumption) - see each constant's own comment for what
+# was confirmed and what was corrected from the original brief.
+#
+# FIX-6 note (state-blob deletion ordering): NONE of the three teardown-phase scripts (disarm,
+# az-sweep, verify) contain any reference to the tfstate container or to deleting a Terraform
+# state blob - confirmed by a full-repo grep on 2026-07-23 and independently confirmed by
+# OPEN-QUESTIONS.md OQ-053 (a prior architect-ruled investigation into two state blobs that went
+# missing out-of-band: "the three teardown scripts contain zero references to the tfstate
+# container"). There is therefore no existing state-blob DELETE code path for FIX-6 to gate. The
+# durable fix implemented here is the one OQ-053 itself recommends (option A(ii) - a state-
+# provenance probe, not a gate on a deletion that does not exist):
+# scripts/teardown-probe-state.sh is the read-only DETECTION half - it inventories all 12
+# known state-blob keys (exists + contentLength) and reports every absent-or-tiny key as a
+# Class-A lost-state root. The INVARIANT this codebase must preserve is: if ANY future change
+# ever adds a state-blob-delete code path (here or elsewhere), it MUST run that delete strictly
+# after a verified destroy for that root - `terraform state list` empty (Phase 1 success) OR a
+# completed az-sweep with a confirm-GET 404 on every class at that root's scopes (Phase 2 +
+# Phase 3 VERIFY, mirroring VERIFY 9's own ARG-proposes/ARM-disposes confirm pattern) - and
+# strictly after Phase 3 VERIFY has passed for target=all. Do not add a blob-delete code path
+# without wiring that gate first.
+#
+# OQ-053's OTHER recommended piece, option A(i) - enabling blob change feed on the state
+# Storage Account - is bootstrap Terraform (bootstrap/main.tf), not teardown script logic, and
+# is intentionally OUT OF SCOPE for this fix (a different owner/lane and a different PR). Not
+# silently dropped: it remains open and tracked as its own item in OPEN-QUESTIONS.md (OQ-053,
+# "Recommended default: A now... with B considered if it recurs").
 
 # The full globaris MG tree: root + all descendants (docs/teardown-redesign.md section 3):
 # globaris -> platform -> {connectivity, security, identity, management};
@@ -166,6 +206,231 @@ is_subscription_scope_benign() {
   type_lc="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
   name="${2:-}"
   [ -n "${SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST["${type_lc}|${name}"]+x}" ]
+}
+
+# ---------------------------------------------------------------------------
+# Extension-resource sweep constants (teardown-completeness fix, 2026-07-23).
+# Shared by scripts/teardown-probe-extensions.sh (report-only) and the new
+# FIX-1..FIX-5 sub-steps in teardown-az-sweep.sh (report-and-delete), so the
+# probe and the sweep can never read a different API version for the same
+# class - the exact drift ADR-062 already closed once for policy exemptions.
+#
+# Each constant's provenance (re-verified live against Microsoft Learn on
+# 2026-07-23, not carried over from assumption):
+#   BUDGETS_API_VERSION - Microsoft.Consumption/budgets. 2024-08-01 confirmed
+#     current (learn.microsoft.com/en-us/rest/api/consumption/budgets/list).
+#     Uniform across MG/subscription/RG scope (Consumption budgets are scope-
+#     parametrised, not scope-specific API surfaces).
+#   POLICY_EXEMPTIONS_API_VERSION_NEW - Microsoft.Authorization/policyExemptions.
+#     Same pin as sub-step 6d's existing inline literal (2022-07-01-preview -
+#     this type has no GA version). Kept as its OWN constant rather than
+#     retrofitting 6d/VERIFY 6d's existing inline literals, to avoid touching
+#     tested code outside this fix's scope - the two must still be kept in
+#     lock-step by hand if either is ever re-verified.
+#   MG_DIAGNOSTIC_SETTINGS_API_VERSION - management-GROUP diagnostic settings
+#     are a DISTINCT operation group from resource/subscription diagnostic
+#     settings ("Management Group Diagnostic Settings", not the generic
+#     "Diagnostic Settings" op group), pinned at 2020-01-01-preview
+#     (learn.microsoft.com/en-us/rest/api/monitor/management-group-diagnostic-settings/list).
+#     CORRECTION from the original brief, which assumed the generic
+#     2021-05-01-preview applies uniformly to every scope - it does not; MG
+#     scope needs this older, distinct preview version. Verified live 2026-07-23.
+#   RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION - the generic per-resource
+#     "Diagnostic Settings - Get/List" op group, 2021-05-01-preview confirmed
+#     current (learn.microsoft.com/en-us/rest/api/monitor/diagnostic-settings/get).
+#     Used for resource-scoped diagnostic settings on resources inside a
+#     surviving RG. Subscription-scope (activity log) stays on the existing
+#     `az monitor diagnostic-settings subscription list/delete` CLI wrapper
+#     (already used by step 6a / VERIFY 6) rather than a raw api-version pin.
+#   TENANT_AAD_DIAGNOSTIC_SETTINGS_API_VERSION - Microsoft.AadIam/diagnosticSettings,
+#     tenant-scoped (no subscription/RG segment in the URL). 2017-04-01
+#     confirmed current and the only version documented
+#     (learn.microsoft.com/en-us/azure/templates/microsoft.aadiam/2017-04-01/diagnosticsettings).
+#   SECURITY_PRICINGS_API_VERSION - Microsoft.Security/pricings, 2024-01-01.
+#     Same pin already used and verified by VERIFY 7 (teardown-verify.sh) -
+#     reused here unchanged, not re-derived.
+#   SECURITY_CONTACTS_API_VERSION - Microsoft.Security/securityContacts.
+#     CORRECTION from the original brief's 2020-01-01-preview guess: the
+#     current live List/Create/Delete op group is 2023-12-01-preview
+#     (learn.microsoft.com/en-us/rest/api/defenderforcloud/security-contacts/list).
+#     2020-01-01-preview still exists only as an older ARM-template schema
+#     version, not the current REST surface. Verified live 2026-07-23.
+#   SECURITY_AUTOMATIONS_API_VERSION - Microsoft.Security/automations,
+#     2023-12-01-preview confirmed current
+#     (learn.microsoft.com/en-us/rest/api/defenderforcloud/automations).
+#     Matches the original brief.
+#   SECURITY_AUTOPROVISIONING_API_VERSION / SECURITY_WORKSPACESETTINGS_API_VERSION -
+#     Microsoft.Security/autoProvisioningSettings and Microsoft.Security/workspaceSettings,
+#     both 2017-08-01-preview confirmed current (only version documented for
+#     either op group - learn.microsoft.com/en-us/rest/api/defenderforcloud/auto-provisioning-settings/list
+#     and .../workspace-settings/update). Neither is Terraform-managed anywhere
+#     in this repo (grep-confirmed, platform/security) - "baseline" for FIX-4
+#     therefore means Azure's own unconfigured default, not a Terraform value.
+#   AADDS_DOMAINSERVICES_API_VERSION - Microsoft.AAD/domainServices, 2022-12-01
+#     confirmed current and the latest documented version
+#     (learn.microsoft.com/en-us/azure/templates/Microsoft.AAD/2022-12-01/domainservices).
+#     Matches the original brief. REPORT ONLY everywhere in this codebase - an
+#     existing AADDS domain is imported (platform/identity's existing
+#     TF_VAR_aadds_import_replica_set_id mechanism, ADR-029/ADR-055), never
+#     deleted or recreated by teardown tooling (FIX-7 note, below).
+BUDGETS_API_VERSION="2024-08-01"
+POLICY_EXEMPTIONS_API_VERSION_NEW="2022-07-01-preview"
+MG_DIAGNOSTIC_SETTINGS_API_VERSION="2020-01-01-preview"
+RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION="2021-05-01-preview"
+TENANT_AAD_DIAGNOSTIC_SETTINGS_API_VERSION="2017-04-01"
+SECURITY_PRICINGS_API_VERSION="2024-01-01"
+SECURITY_CONTACTS_API_VERSION="2023-12-01-preview"
+SECURITY_AUTOMATIONS_API_VERSION="2023-12-01-preview"
+SECURITY_AUTOPROVISIONING_API_VERSION="2017-08-01-preview"
+SECURITY_WORKSPACESETTINGS_API_VERSION="2017-08-01-preview"
+AADDS_DOMAINSERVICES_API_VERSION="2022-12-01"
+
+# The fixed tenant AAD diagnostic setting name (platform/security/diagnostics.tf,
+# azurerm_monitor_aad_diagnostic_setting.security_law) - NOT org-prefixed, same special-case
+# class as diag-activity-to-security-law in step 6a. Kept as its own constant (rather than an
+# inline literal repeated in the probe and in FIX-5) so the two can never drift.
+TENANT_AAD_DIAG_SETTING_NAME="diag-aad-to-security-law"
+
+# mg_scope_path "<mg>" - echoes the ARM scope path for a management group. Small helper so
+# FIX-1 (teardown-az-sweep.sh) and the probe (scripts/teardown-probe-extensions.sh) build the
+# identical scope string VERIFY 1 already uses inline (teardown-verify.sh) instead of each
+# re-deriving it.
+mg_scope_path() {
+  printf '/providers/Microsoft.Management/managementGroups/%s' "${1:-}"
+}
+
+# is_globaris_owned "<name>" - the simple single-limb ownership test already used inline by
+# step 6a (budgets/exports/scheduled actions) and reused here for the NEW classes this fix adds
+# (security contacts, security automations, tenant AAD diagnostic setting) whose Terraform-
+# defined names all carry a `globaris` substring (security-contact-globaris,
+# automation-mdc-export-globaris-<env>) - confirmed against platform/security/main.tf and
+# platform/security/defender.tf. NOT used for policy exemptions (those use the three-limb
+# is_owned_policy_object predicate above, which is deliberately broader) and not used for the
+# tenant AAD diagnostic setting (that one matches by exact name, TENANT_AAD_DIAG_SETTING_NAME,
+# the same special-case pattern step 6a already uses for diag-activity-to-security-law).
+is_globaris_owned() {
+  case "${1:-}" in
+    *globaris*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# discover_live_rgs <out_var> <sub> - list every currently-live RG in <sub> that matches the
+# SAME RG_SWEEP_QUERY naming-pattern filter step 2's RG sweep already uses, via az_run (stdout/
+# stderr kept separate, Finding #2 discipline). Shared discovery primitive for every NEW
+# RG-scope check this fix adds (FIX-2 budgets, FIX-3 exemptions, the probe's RG-scoped
+# budgets/exemptions/diagnostic-settings sections) - discovery BY LIST, never a hardcoded RG
+# name list, matching the lesson ADR-062 already drew ("enumerated class lists are the wrong
+# mechanism") and step 6a's own stated design ("Discovery is by LIST, never a hardcoded name
+# list, so a renamed or added object is still caught"). Returns az_run's own exit code - callers
+# MUST treat a non-zero return as FAIL LOUD (a live subscription's RG list can never legitimately
+# fail, same section 9.4 boundary as every other subscription-scoped list in this codebase), not
+# as "no RGs".
+discover_live_rgs() {
+  local __out_var="$1" __sub="$2"
+  az_run "$__out_var" group list --subscription "$__sub" --query "$RG_SWEEP_QUERY" -o tsv
+}
+
+# confirm_gone_by_get "<url>" - the confirm-GET pattern VERIFY 9 already established (ARG
+# proposes, ARM disposes: confirm liveness with a direct GET before trusting a list/discovery
+# result), promoted to a shared helper so the probe and FIX-1..FIX-5 do not each re-implement
+# the same four-way branch. Prints nothing itself - purely a classifier. Return codes:
+#   0 = CONFIRMED GONE (GET failed with a 404/NotFound-shaped error - is_not_found_error matched).
+#   1 = CONFIRMED LIVE (GET succeeded).
+#   2 = INDETERMINATE (GET failed, but neither auth-shaped nor 404-shaped - e.g. a 429/500/
+#       transport blip).
+#   3 = AUTH ERROR (is_auth_error matched).
+# On return 2 or 3 the caller-visible error text is left in CONFIRM_GONE_BY_GET_ERR (global,
+# like AZ_RUN_STDERR) so the caller can print it without re-running the GET.
+#
+# Caller obligation depends on WHAT this GET is the evidence FOR - there are two valid usage
+# patterns in this codebase and they classify return 2 differently. Use the matching wrapper
+# below (confirm_gone_or_fail_primary / confirm_gone_or_warn_belt) rather than hand-rolling the
+# case statement at each call site - promoted here 2026-07-23 (code-review BLOCK follow-up)
+# after the same four-way branch was independently duplicated at five call sites:
+#   (a) PRIMARY evidence (this GET is the ONLY signal deciding pass/fail - the MG-scope classes
+#       FIX-1 deletes, and FIX-2's MG-scope budget re-sweep, are this pattern: MG-scoped
+#       extension objects are 403-shadowed for this SP once their MG is deleted, so NO separate
+#       Phase 3 VERIFY step can ever check them after the fact - this inline confirm-GET, while
+#       the MG still exists, is the only completion check these classes will ever get) - use
+#       confirm_gone_or_fail_primary. Treats 2 the SAME as 3, FAIL LOUD. Never read an
+#       indeterminate result as "gone" - that is the exact false-negative class ADR-062 exists
+#       to close, arriving through a different failure shape than the one it originally closed.
+#   (b) SECONDARY/belt evidence (this GET runs AFTER a delete call that already returned
+#       success, AND a separate deterministic Phase 3 VERIFY step exists for this same scope/
+#       class and is the true completion gate - the RG-scope and subscription-scope/tenant/
+#       security-singleton FIX-2/3/4/5 deletes are this pattern) - use
+#       confirm_gone_or_warn_belt. 2 may be downgraded to a warn-and-continue, consistent with
+#       how every delete call's OWN failure handling in this script already treats a non-auth
+#       failure (is_auth_error fails loud, anything else warns and continues - the delete was
+#       already accepted; a lingering/ambiguous read immediately after is most likely
+#       propagation lag). Return 3 (auth) still MUST fail loud in BOTH patterns - a
+#       directory-role or token gap is never "probably fine".
+CONFIRM_GONE_BY_GET_ERR=""
+confirm_gone_by_get() {
+  local url="${1:-}" out
+  CONFIRM_GONE_BY_GET_ERR=""
+  if out="$(az rest --method get --url "$url" --output none 2>&1)"; then
+    return 1
+  fi
+  if is_auth_error "$out"; then
+    CONFIRM_GONE_BY_GET_ERR="$out"
+    return 3
+  fi
+  if is_not_found_error "$out"; then
+    return 0
+  fi
+  CONFIRM_GONE_BY_GET_ERR="$out"
+  return 2
+}
+
+# confirm_gone_or_fail_primary "<description>" "<url>" - pattern (a) wrapper. Prints its own
+# ::error:: and returns 1 on anything other than confirmed-gone; prints nothing and returns 0
+# on confirmed-gone. Callers MUST still `exit 1` themselves on a non-zero return (this function
+# never exits the script itself - these are flat top-level scripts, not `set -e`, and every
+# other fail-loud path in them follows the same `if ! fn; then exit 1; fi` shape).
+confirm_gone_or_fail_primary() {
+  local desc="$1" url="$2"
+  confirm_gone_by_get "$url"
+  case $? in
+    0) return 0 ;;
+    1)
+      echo "::error::${desc}: still confirmed LIVE immediately after a successful delete submission. This scope has no separate Phase 3 VERIFY step (MG-scoped extension objects are 403-shadowed for this SP once their MG is deleted), so this confirm-GET is the ONLY completion check this class will ever get - treating a still-live result as a hard remnant, not a warning."
+      return 1
+      ;;
+    2)
+      echo "::error::${desc}: confirm-GET after delete was indeterminate (neither confirmed gone nor confirmed live) - cannot certify this MG-scope object clean off an ambiguous result, and no separate VERIFY step exists to catch it later: ${CONFIRM_GONE_BY_GET_ERR}"
+      return 1
+      ;;
+    3)
+      echo "::error::${desc}: confirm-GET after delete failed with an auth/transport error: ${CONFIRM_GONE_BY_GET_ERR}"
+      return 1
+      ;;
+  esac
+}
+
+# confirm_gone_or_warn_belt "<description>" "<url>" - pattern (b) wrapper. Prints a
+# `::warning::` (not fatal) on still-live/indeterminate, `::error::` and returns 1 on an
+# auth-shaped failure, returns 0 (no output) on confirmed-gone. Same "callers must `exit 1`
+# themselves on non-zero" contract as confirm_gone_or_fail_primary.
+confirm_gone_or_warn_belt() {
+  local desc="$1" url="$2"
+  confirm_gone_by_get "$url"
+  case $? in
+    0) return 0 ;;
+    1)
+      echo "  ::warning::${desc}: still reads live immediately after a successful delete submission (likely propagation lag) - a separate Phase 3 VERIFY step covers this scope/class and is the authoritative completion gate; re-check on a later run."
+      return 0
+      ;;
+    2)
+      echo "  ::warning::${desc}: confirm-GET after delete was indeterminate - a separate Phase 3 VERIFY step covers this scope/class: ${CONFIRM_GONE_BY_GET_ERR}"
+      return 0
+      ;;
+    3)
+      echo "::error::${desc}: confirm-GET after delete failed with an auth/transport error: ${CONFIRM_GONE_BY_GET_ERR}"
+      return 1
+      ;;
+  esac
 }
 
 # The 5 workload/platform subscriptions the estate spans (bootstrap identity.tf /
