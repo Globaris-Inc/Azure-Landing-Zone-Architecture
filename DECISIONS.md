@@ -37,6 +37,570 @@
 
 <!-- Newest at the top. -->
 
+### ADR-063: An extension object is swept BEFORE its host scope is deleted, and it is claimed by CONTAINMENT rather than by name - the MG-scope sweep moves to Phase 0 DISARM, MG-scope delete failures become fatal, resource-scoped diagnostic settings get a pre-RG-delete pass, and the name-only ownership predicate is retired as the primary test
+
+- **Date:** 2026-07-23
+- **Section:** 10 (Pipeline & Tooling) / teardown; EXTENDS ADR-054 (four-phase shape, MG list-snapshot
+  oracle, auth-fail-loud), ADR-057 (step 6 class handling) and ADR-062 (discovery-over-enumeration,
+  three-limb predicate). Supersedes nothing. ADR-058's independent QA gate stands unchanged.
+- **Status:** Accepted (architect ruling; user voided the rerun and directed that every survivor class
+  be found before any re-attempt, with all cleanup through the CI teardown workflow and no manual
+  deletes)
+- **Decision makers:** claude (architect); user (voided the 2026-07-23 rerun at Step 2, set the
+  no-manual-deletes bar, and required a true greenfield confirmed by live discovery before rerun)
+
+**Context:**
+
+The 2026-07-23 full-estate rerun died at Step 2. `platform/management` planned green at 36/0/0, created
+32 of its 36 resources, then failed on 4 objects that "already exist - needs to be imported": the three
+MG-scoped consumption budgets `budget-mg-{globaris,platform,landingzones}-globaris`, and the
+resource-scoped diagnostic setting `diag-aa-to-law` on `aa-platform-globaris-poc`. That is failure #1
+of 4 against the user's standing bar, and it was diagnosed rather than blind-retried.
+
+The read-only orphan probe added by the FIX-1..7 change (merged as PR #46) then ran twice, at 22:19Z
+and 22:50Z. The 22:50Z run is authoritative ground truth for the current partial estate and reported 13
+findings: the 3 MG budgets above and 5 subscription-scoped budgets, all classified OWNED; `diag-aa-to-law`,
+classified **unowned**; three Defender pricing plans (`AI`, `Discovery`, `FoundationalCspm`) still at
+tier `Standard`; and `securityContacts/default`, also classified **unowned**. It found no policy
+exemptions at any scope, no tenant `Microsoft.AadIam` diagnostic setting, and no AADDS managed domain.
+
+Two things in that result are the subject of this ADR. First, the MG budgets survived a teardown that
+deleted their MGs, which means the sweep is ordered wrong, not merely incomplete. Second, two live,
+estate-created objects were classified **unowned** by a predicate whose primary test is "does the name
+contain `globaris`" - so even a correctly ordered sweep would have walked past them.
+
+*Why ordering, and not another class entry.* ADR-062 already established that MG-, subscription- and
+tenant-scoped objects are scope-path-keyed extension objects and that parent deletion does not cascade
+them. The corollary was not drawn at the time and is the whole point here: deleting the host scope does
+not delete the extension object, it makes the object **invisible, unreachable and resurrectable**. It
+is unreachable specifically for this principal - `sp-alz-poc-cicd`'s Resource Policy Contributor and
+User Access Administrator grants are scoped at the `globaris` MG and are deleted WITH that subtree, so
+a call against a deleted globaris-tree scope returns HTTP-403 `AuthorizationFailed`, not a clean 404
+(proved empirically in probe run 29756715840 and already documented at `scripts/teardown-common.sh`
+around line 529, which is why MG existence resolves through the `mg_snapshot_load` list oracle). And it
+is resurrectable because the object re-collides the moment Step 1 recreates an MG with the same name,
+which is exactly what happened.
+
+*Why the merged FIX-1 position does not fix it.* FIX-1 put the MG-scope sweep at Phase 2 step 4-pre.
+Two defects:
+
+- **D1:** step 4-pre sits inside the `remove_mg_hierarchy=true` branch, which is the NON-default. At
+  the default `false`, MG-scope diagnostic settings and MG-scope exemptions are never swept at all.
+- **D2:** on `mode=terraform` it is structurally unreachable. Phase 2 `needs` every Phase 1 job, Phase
+  1 destroys `platform/management-groups` last, so by the time Phase 2 runs the MGs are already absent
+  from the snapshot (skip) and the globaris-scoped grants are already dead (403).
+
+Phase 0 DISARM runs in BOTH modes, always, and gates Phase 1 through `needs: disarm`, with every MG
+present and every grant still bound. That is the only point in the mechanism where the sweep is both
+reachable and authorised.
+
+**Decision:**
+
+**1. RBAC feasibility: the Phase-0 sweep is possible TODAY with zero bootstrap change, but on a grant
+that is not in `bootstrap/identity.tf`, and that dependency is now explicit.**
+
+None of the roles `sp-alz-poc-cicd` holds at or above MG scope through `bootstrap/identity.tf` carries
+any `Microsoft.Consumption` write or delete action.
+
+> **CORRECTED 2026-07-23 (code review, in-place on unpublished text).** The first draft of this table
+> was wrong for two of the four roles and was not re-derived from the live definitions.
+>
+> **Authority for the corrected tables, in precedence order.** (1) `az role definition list --name
+> "<role>" --query "[0].permissions[0].actions"` run against the live `globaris.org` tenant on
+> 2026-07-23 - what this tenant actually enforces. (2) The generated source of Microsoft Learn's
+> built-in-roles reference (`MicrosoftDocs/azure-docs`,
+> `articles/role-based-access-control/built-in-roles/{management-and-governance,privileged}.md`, last
+> updated 2026-07-01 in the "June refresh - Updated permissions for several roles" publish). The two
+> agree exactly, for all four roles, action for action. Each list below is the complete `actions`
+> array; `notActions`, `dataActions` and `notDataActions` are empty for all four.
+>
+> **One of the review's two findings was itself a false positive and is recorded as such.** The review
+> asserted that Management Group Contributor carries none of the four actions the draft cited for it.
+> Three of those four are indeed absent, but `Microsoft.Authorization/*/read` **IS** in the live role,
+> confirmed by both authorities above. The draft was right about that limb, and it is the load-bearing
+> one: it is what authorises a role-assignment read at Tenant Root Group. The review's downstream
+> conclusion - that the decision 1b pre-flight 403s on every dispatch - therefore does not follow. See
+> 1b, which re-rules on the merits rather than on that finding.
+
+   - **Management Group Contributor** (`5d58bcaf-24a5-4b20-bdb6-eed9f69fbe4c`), at **Tenant Root
+     Group** (`bootstrap/identity.tf` row 1):
+     `Microsoft.Management/managementGroups/delete`, `Microsoft.Management/managementGroups/read`,
+     `Microsoft.Management/managementGroups/subscriptions/delete`,
+     `Microsoft.Management/managementGroups/subscriptions/write`,
+     `Microsoft.Management/managementGroups/write`,
+     `Microsoft.Management/managementGroups/subscriptions/read`,
+     `Microsoft.Authorization/*/read`.
+     *Draft errors, all over-statements:* there is **no** namespace wildcard on `Microsoft.Management`
+     (six explicit actions, not `managementGroups/*`), and the role carries **none** of
+     `Microsoft.Resources/subscriptions/resourceGroups/read`, `Microsoft.Resources/subscriptions/read`
+     or `Microsoft.Support/*`. *Not an error:* `Microsoft.Authorization/*/read` is real, and it is the
+     load-bearing limb - see 1b.
+   - **Resource Policy Contributor** (`36243c78-bf99-498c-9df9-86d9f8d28608`), at **globaris MG**
+     (row 2): `*/read`, `Microsoft.Authorization/policyassignments/*`,
+     `Microsoft.Authorization/policydefinitions/*`, `Microsoft.Authorization/policyexemptions/*`,
+     `Microsoft.Authorization/policyenrollments/*`, `Microsoft.Authorization/policysetdefinitions/*`,
+     `Microsoft.PolicyInsights/*`, `Microsoft.Resources/deployments/*`, `Microsoft.Support/*`.
+     *Draft errors:* the draft asserted "no `policyExemptions` limb and no `*/read`" and both
+     assertions are false. The role carries `Microsoft.Authorization/policyexemptions/*` outright,
+     and it carries the **global** `*/read`, which is broader than the `Microsoft.Authorization/*/read`
+     the reviewer proposed as the correction. It does not carry
+     `Microsoft.Resources/subscriptions/resourceGroups/read` as a discrete action (that read is
+     subsumed by `*/read`).
+   - **User Access Administrator** (`18d7d88d-d35e-4fb5-a5c3-7773c20a72d9`), at **globaris MG**
+     (row 3): `*/read`, `Microsoft.Authorization/*`, `Microsoft.Support/*`. Draft was correct.
+   - **Contributor:** assigned at the 5 subscriptions only, so it reaches nothing at MG scope.
+
+   **Two out-of-band ADR-041 bridge grants are also live and the draft inventoried only one of them.**
+   Per OQ-051, verified per scope on 2026-07-21, `sp-alz-poc-cicd` additionally holds BOTH of the
+   following at **Tenant Root Group**, neither declared in any Terraform root:
+
+   - **Cost Management Contributor** (`434105ed-43f6-45c7-a02f-909b2ba83430`): `Microsoft.Consumption/*`,
+     `Microsoft.CostManagement/*`, `Microsoft.Billing/billingPeriods/read`,
+     `Microsoft.Resources/subscriptions/read`, `Microsoft.Resources/subscriptions/resourceGroups/read`,
+     `Microsoft.Support/*`, `Microsoft.Advisor/configurations/read`,
+     `Microsoft.Advisor/recommendations/read`, `Microsoft.Management/managementGroups/read`,
+     `Microsoft.Billing/billingProperty/read`. It carries **no `Microsoft.Authorization` action at all**.
+   - **User Access Administrator** at Tenant Root Group: same three actions as row 3, but anchored one
+     level above the globaris subtree.
+
+   All three tenant-root assignments were re-confirmed live on 2026-07-23 by listing role assignments
+   at exact tenant-root scope: the CI SP holds Management Group Contributor, User Access Administrator
+   and Cost Management Contributor there, none of them carrying an ABAC condition, and the scope has
+   zero deny assignments. That matters for 1b.
+
+   The Consumption conclusion is UNCHANGED by the correction: `Microsoft.Consumption/*` appears in
+   exactly one role this principal holds, Cost Management Contributor, and it is a bridge grant.
+
+   **But the correction materially NARROWS what depends on that bridge grant, and this is good news.**
+   The draft treated the Phase-0 sweep as a single unit resting on an undeclared out-of-band role.
+   With the corrected tables, the three classes separate cleanly:
+
+   - **Policy exemptions at MG scope: fully covered by a STANDING bootstrap row.** Resource Policy
+     Contributor at globaris carries `Microsoft.Authorization/policyexemptions/*` outright - the limb
+     the draft wrongly recorded as absent - and User Access Administrator at globaris covers it again
+     via `Microsoft.Authorization/*`. Two independent standing routes, neither of them a bridge grant.
+     This class survives OQ-051 revoking both tenant-root bridges, with no new grant needed ever.
+   - **Consumption budgets at MG scope: the ONLY class that depends on the bridge grant.** This is the
+     whole of the exposure, not the sweep as a whole.
+   - **MG-scope diagnostic settings: uncovered by anything, bridge or standing** - unchanged, latent,
+     see 1d.
+
+   So the honest scope of the ADR-041 dependency is one of three classes, and the durable fix in 1c
+   only ever had to cover that one class. 1d is corrected accordingly.
+
+The operation itself is real and explicitly MG-capable: Microsoft's management-and-governance
+permissions reference defines `Microsoft.Consumption/budgets/delete` as "Delete the budgets by a
+subscription or a management group", with the same wording on `/read` and `/write`, and the REST route
+is scope-generic
+(`DELETE {scope}/providers/Microsoft.Consumption/budgets/{budgetName}?api-version=2024-08-01`, matching
+the pinned `BUDGETS_API_VERSION`).
+
+The contradiction resolves as follows: **the MG budgets were never created by the bootstrap role set.**
+They were created under the ADR-041 bridge grant, `Cost Management Contributor` at Tenant Root Group,
+applied out-of-band on 2026-07-16 and verified live per-scope on 2026-07-21. That role carries
+`Microsoft.Consumption/*` and `Microsoft.CostManagement/*`, so it covers write and delete at every
+descendant scope, and being tenant-root anchored it survives the globaris-subtree delete.
+`docs/preclearance/b0a-redeploy.md` PC-3 already records this as "a LATENT ADR-021 gap previously
+masked by the standing Owner @ globaris".
+
+   - **1a.** No bootstrap change is required for this teardown. ADR-058 QA item 14 already asserts the
+     grant is present after teardown.
+   - **1b. RE-RULED 2026-07-23 (second pass, after the review's finding 1 was itself disproved
+     against the live tenant). A pre-flight DOES ship, and it is neither of the two designs on the
+     table.** The draft mandated a role-assignment existence check
+     (`az role assignment list --scope <tenant root> --role "Cost Management Contributor"`); the
+     reviewer replaced it with a Consumption-plane capability probe
+     (`GET {tenantRootScope}/providers/Microsoft.Consumption/budgets`). **Both are rejected. The
+     pre-flight becomes an EFFECTIVE-PERMISSIONS assertion at the MG scopes the sweep actually
+     targets.** Reasoning, in the order the facts were established:
+
+     **(i) The original design was executable. The review's blocking finding was a false positive.**
+     Management Group Contributor carries `Microsoft.Authorization/*/read` and is assigned at Tenant
+     Root Group, which covers `roleAssignments/read` and the `roleDefinitions/read` needed to resolve
+     `--role` by name. The check would not have 403'd. Recorded so this is charged to the review, not
+     silently absorbed.
+
+     **(ii) The reviewer's replacement probe is NOT discriminating, and this is proven live, not
+     argued.** Listing role assignments at exact tenant-root scope on 2026-07-23 returns three
+     assignments for the CI SP: Management Group Contributor, Cost Management Contributor, and **User
+     Access Administrator** - the second ADR-041 bridge grant, which the draft's inventory omitted.
+     User Access Administrator carries the global `*/read`, which authorises
+     `Microsoft.Consumption/budgets/read` at tenant root **with no Consumption grant present at all**.
+     So `GET {tenantRootScope}/providers/Microsoft.Consumption/budgets` returns 200 whether or not the
+     grant the probe exists to check is there. It is a gate that can only ever say GO. Relocating it
+     to MG scope is worse: Resource Policy Contributor and User Access Administrator both carry `*/read`
+     at globaris as STANDING bootstrap rows, so the masking there is permanent and survives OQ-051.
+     This is the same silent-pass failure mode as decision 7's VERIFY 6e no-op, and it would be the
+     fourth instance in this project.
+
+     *The reviewer's underlying principle is right and is adopted:* probing a capability tests what
+     deny assignments and ABAC conditions actually permit, whereas enumerating an assignment tests only
+     that grant metadata exists. The instance fails because it probes the wrong VERB (read, not delete)
+     at the wrong SCOPE (tenant root, not the eleven MGs). Fix both and the principle holds.
+
+     **(iii) The original design is discriminating but structurally brittle, so reverting is also
+     wrong.** Three defects, independent of finding 1: it is pinned to Tenant Root Group, so landing
+     OQ-059(a)'s recommended globaris-scoped grant would make it hard-fail every dispatch while the
+     sweep worked perfectly; it cannot see a grant delivered via group membership or a custom role
+     (OQ-059(a) option B); and resolving the SP's own object id needs `az ad sp show`, a Microsoft
+     Graph call that no ARM role grants and that `bootstrap/identity.tf:39` explicitly says this SP
+     does not need ("No API permissions needed (all access is via ARM RBAC, not Graph)"). It works
+     only via an `Application.Read.All` consent granted out-of-band on 2026-07-08 and recorded nowhere
+     but a comment in `platform/identity/providers.tf:11-17`. A check asserting one undeclared
+     out-of-band grant would itself depend on a second one.
+
+     **(iv) The design that satisfies both: ARM's effective-permissions API, at MG scope.**
+     `GET {scope}/providers/Microsoft.Authorization/permissions?api-version=2022-04-01` returns the
+     CALLER's own effective `actions`/`notActions` at that scope.
+
+     > **Management-group scope support is UNDOCUMENTED but VERIFIED.** Microsoft documents only
+     > `List For Resource` and `List For Resource Group` for this operation group at 2022-04-01, with
+     > no management-group URI template - which is why the first pass of this correction declined to
+     > specify it. It was then executed against the live tenant on 2026-07-23 at
+     > `/providers/Microsoft.Management/managementGroups/<tenantRootId>` and returned HTTP 200 with a
+     > correct effective-permission set. It works. Because it is undocumented at this scope, decision
+     > 3d's convention applies with full force: a FAILED probe is never an EMPTY probe, and gets its
+     > own label - see the failure classification below.
+
+     Why it satisfies every constraint the other two miss:
+
+     - **Discriminating.** The needed action is `Microsoft.Consumption/budgets/delete`. A `*/read`
+       entry does not match it. The masking that defeats a read probe cannot occur.
+     - **Scope-correct.** Query each MG in `MG_SCOPES` - the exact scopes the sweep deletes at. The
+       response includes grants inherited from every ancestor, so it is correct whether the grant sits
+       at tenant root, at globaris, or anywhere between.
+     - **Grant-shape agnostic.** Survives OQ-059(a) option A, option B, a group-delivered grant, and
+       OQ-051 revoking both tenant-root bridges. **It is the only proposal that does not have to be
+       rewritten when OQ-041/OQ-059(a) resolves.**
+     - **Graph-free.** Pure ARM. No object-id resolution, so `bootstrap/identity.tf:39`'s contract
+       holds.
+     - **Authorised by a STANDING row.** The call needs `Microsoft.Authorization/permissions/read`,
+       covered by Management Group Contributor's `Microsoft.Authorization/*/read` at Tenant Root Group,
+       which inherits to every MG and is a `bootstrap/identity.tf` row, not a bridge grant.
+     - **A complete oracle in THIS estate.** The response reflects role assignments but not deny
+       assignments, and does not represent ABAC conditions. Both were checked live on 2026-07-23 at
+       tenant root: **zero deny assignments, and none of the SP's three tenant-root assignments carries
+       a condition.** Stated as a caveat rather than hidden: if a deny assignment or a conditioned
+       assignment is ever introduced, this probe stops being complete and decision 4's fatal delete
+       remains the backstop.
+
+     **Specification for the implementer.** Placement: `scripts/teardown-disarm.sh`, immediately AFTER
+     `mg_snapshot_load` and BEFORE the per-MG policy-assignment disarm loop - so it runs after the one
+     read the SP is always entitled to make, and before the first thing in the run that changes estate
+     state. For each MG in `MG_SCOPES` present in the snapshot,
+     `GET ${ARM_BASE}$(mg_scope_path "$mg")/providers/Microsoft.Authorization/permissions?api-version=2022-04-01`,
+     then glob-match each returned `actions` entry (treating `*` as a wildcard) against the literal
+     action strings below, and subtract anything matched by a `notActions` entry:
+
+     | Action tested | Absent means | Rationale |
+     |---|---|---|
+     | `Microsoft.Consumption/budgets/delete` | **FATAL, do not dispatch** | The class that depends on the ADR-041 bridge grant. Name ADR-041 and OQ-059(a) in the message. |
+     | `Microsoft.Authorization/policyExemptions/delete` | **FATAL** | Should always be present via two standing globaris rows. Absent means something changed that nobody recorded. |
+     | `Microsoft.Insights/diagnosticSettings/delete` | **WARN only, never fatal** | Expected absent - the KNOWN DESIGN GAP of 1d / OQ-059(b). Must print as such so it is never misread as a dead token. |
+
+     Failure classification, and it matters because the API is undocumented at this scope: a non-200
+     from the permissions call itself is **not** "capability absent". Fail loud under a distinct label
+     (`TEARDOWN-P0-PREFLIGHT-UNAVAILABLE`) stating that the pre-flight could not be evaluated, and
+     abort. Disposition of that label is architect-owned via the pre-clearance gate; decision 4's fatal
+     MG-scope delete plus decision 9's workflow gate are what make a considered override survivable.
+
+     **This is additive to, not a substitute for, decisions 4 and 9.** The first MG-scope budget DELETE
+     remains the only test with no proxy in it at all, it remains FATAL, and decision 9 ensures a
+     failed DISARM can no longer let `az-sweep` proceed. The pre-flight buys one thing: the failure
+     lands before DISARM removes any policy assignment, rather than after.
+
+     **OQ-051 still carries a hard dependency, restated correctly:** revoking the Cost Management
+     Contributor bridge without first landing 1c breaks the MG-scope BUDGET sweep specifically - not
+     the exemption sweep, which is covered by standing rows. The pre-flight above now detects that
+     before dispatch regardless of where the replacement grant is placed.
+   - **1c.** If the bridge grant is ever revoked, the minimum durable replacement is
+     `Cost Management Contributor` scoped at the **globaris MG**, as a standing `bootstrap/identity.tf`
+     row. It is sufficient (all three MG budgets are globaris or its descendants; subscription budgets
+     are already covered by Contributor), it inherits the BOOTSTRAP-ORDERING dance of the existing
+     MG-scoped rows, and it dies with the subtree - which is precisely what makes the ordering
+     invariant in decision 2 load-bearing rather than merely tidy. Parked as OQ-059(a).
+   - **1d.** Other MG-scope classes. Conclusions unchanged by the correction above; the supporting
+     reasoning is tightened, since the draft under-counted the coverage.
+
+     **Policy exemptions ARE deletable** at every scope in `MG_SCOPES` (all 11 are globaris or its
+     descendants), and by two independent routes rather than the one the draft cited: User Access
+     Administrator's `Microsoft.Authorization/*` at globaris, AND Resource Policy Contributor's
+     `Microsoft.Authorization/policyexemptions/*` at globaris, which the draft wrongly recorded as
+     absent. Nothing extra needed, with redundancy.
+
+     **MG-scope diagnostic settings are NOT deletable by this principal.** No role carries
+     `Microsoft.Insights/diagnosticSettings/delete` at MG scope - not the three bootstrap rows, and
+     not either ADR-041 bridge grant (Cost Management Contributor has no `Microsoft.Insights` action;
+     User Access Administrator at Tenant Root Group has `*/read` and `Microsoft.Authorization/*`, and
+     neither reaches an `Microsoft.Insights` write). The estate declares none (grep-confirmed across
+     every root), so the gap is latent. Keep both the LIST (authorised several times over by the
+     global `*/read` in Resource Policy Contributor and User Access Administrator at globaris) and the
+     DELETE, but the failure message must state that a 403 there is a KNOWN DESIGN GAP, not a dead
+     token, so it is never misread as the auth-fail-loud signal. Parked as OQ-059(b).
+
+**2. THE GOVERNING INVARIANT (G-1), and the reason this is a new ADR rather than a patch to ADR-062:**
+
+   > **An extension object must be swept BEFORE its host scope is deleted or submitted for deletion.
+   > Deleting the host first does not delete the extension object: it makes it invisible, unreachable
+   > and resurrectable. Deleting a host scope that still has an owned extension object attached is a
+   > ONE-WAY DOOR, and teardown must fail loud AT that door rather than pass through it.**
+
+   Corollary, and the part that keeps costing this project runs: "the parent cascade will get it" must
+   be PROVEN per type, never assumed. ADR-062 proved the cascade for RG-scoped exemptions and disproved
+   it for subscription-scoped ones. This ADR disproves it for MG-scoped budgets. The pattern is now
+   three-for-three that an unproven cascade assumption becomes a requires-import collision on the next
+   deploy, days later, with teardown green the whole time.
+
+**3. Placement: `scripts/teardown-disarm.sh` (Phase 0), after the per-MG policy-assignment disarm loop
+and before the final failure roll-up.** Not interleaved with that loop, so no DINE assignment can
+re-remediate mid-sweep. The in-flight branch `fix/teardown-phase0-mg-sweep` already carries the correct
+amendment header comment at that location and its root-cause reasoning is adopted as written.
+
+   Discovery is per MG in `MG_SCOPES`, skipping any MG absent from `mg_snapshot_load` (a FAILED load
+   remains FAIL LOUD and never degrades to an empty set), against base
+   `${ARM_BASE}$(mg_scope_path "$mg")`:
+
+   | Class | Discovery | Delete |
+   |---|---|---|
+   | Consumption budgets | `GET .../providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}` | same path + `/{name}` |
+   | MG diagnostic settings | `GET .../providers/microsoft.insights/diagnosticSettings?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}` | same path + `/{name}` |
+   | Policy exemptions | `GET .../providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&$filter=atExactScope()` | same path + `/{name}` |
+
+   Four non-optional construction rules:
+
+   - **3a.** Build delete URLs from `mg_scope_path` + name, NEVER from `${ARM_BASE}${id}`. Microsoft's
+     own Budgets List sample returns `"id": "subscriptions/.../budgets/TestBudget"` with NO leading
+     slash. The merged FIX-1 code is already right to build from name; keep it that way.
+   - **3b.** Send `$filter=atExactScope()` AND additionally check client-side that each returned `id`
+     starts with this MG's scope path. The filter is only live-verified at SUBSCRIPTION scope
+     (ADR-062 6d); the client-side belt removes any dependence on an unverified MG-scope semantic.
+   - **3c.** No server-side JMESPath ownership filter. FIX-1's `value[?contains(name,'globaris')].name`
+     happens to match today's three budgets, but it re-creates exactly the sweep/verify coupling
+     ADR-062 removed. List every row, classify in the ONE shared bash predicate from decision 6.
+   - **3d.** Inherit every existing convention unchanged: `az_run` so stdout stays a clean data
+     channel, `is_auth_error` on every non-zero, a failed list is never an empty list, absent-is-success,
+     and `confirm_gone_or_fail_primary` after every delete.
+
+   `MG_DELETE_ORDER` is NOT used here. The Phase-0 sweep iterates `MG_SCOPES`, because the scopes are
+   independent and there is no delete ordering to respect at that point; `MG_DELETE_ORDER` continues to
+   govern only the step 4 MG delete loop. The snapshot oracle is what makes this work at all, and at
+   Phase 0 it is at its most complete because nothing has been deleted yet.
+
+**4. At MG scope, a non-auth delete failure is FATAL, and step 4-pre is demoted to a last-chance gate.**
+
+   Everywhere else in the sweep, warn-and-continue is justified by "the next run retries idempotently".
+   At MG scope that justification is void, because THIS SAME RUN may go on to delete the scope that
+   makes the retry possible. So:
+
+   - A failed MG-scope delete in Phase 0 aborts the run.
+   - Any survivor still found at step 4-pre aborts the ENTIRE step 4 MG delete loop under a distinct
+     `TEARDOWN-P0MG-SURVIVOR` label, leaves the MG tree standing, and fails the run. Step 4-pre keeps
+     its deletes as a cheap remnant-catch, but it is no longer the primary mechanism.
+   - Leaving the tree standing costs one re-dispatch, which ADR-054 point 8 already establishes as the
+     safety net. Deleting it costs the ability to ever SEE the survivor again. That asymmetry decides
+     it.
+
+**5. New step 2-pre: resource-scoped diagnostic settings are swept before the RGs are deleted.**
+
+   This class has NO sweep anywhere today - `RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION` is referenced
+   only by the read-only probe. Add a pass after step 1 and BEFORE step 2 submits its `--no-wait` RG
+   deletes: `discover_live_rgs`, list resources per RG, then
+   `GET ${ARM_BASE}{resourceId}/providers/Microsoft.Insights/diagnosticSettings?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}`
+   and delete every owned row. Feasibility is proven rather than assumed:
+   `scripts/teardown-probe-extensions.sh` already performs this exact enumeration and completed twice
+   on 2026-07-23.
+
+   Mechanism note, recorded honestly because the fix must not appear better-founded than it is:
+   `diag-aa-to-law` is declared at `platform/management/main.tf:493`. It cannot have been created by the
+   failed apply (azurerm raises requires-import BEFORE creating), and it cannot be riding an RG that
+   survived (the same apply created both the RG and the automation account). The operating hypothesis
+   is therefore resourceUri-keyed retention inside `Microsoft.Insights` that re-surfaces when a resource
+   with an identical id is recreated. A same-run policy-created setting that happens to carry an
+   identical estate-specific name cannot be formally excluded. The fix does not depend on which is
+   true - which is exactly the point of G-1.
+
+**6. The ownership predicate is retired as a name test and rebuilt on CONTAINMENT, in three tiers.**
+
+   - **T1 CONTAINMENT (primary, structural).** An object is owned if its HOST SCOPE is owned: (a) an MG
+     in `MG_SCOPES`; (b) an RG matching `RG_SWEEP_QUERY`; (c) any resource whose id contains
+     `/resourceGroups/{rg}/` where `{rg}` matches `RG_SWEEP_QUERY`.
+   - **T2 FIXED-NAME SINGLETON.** For singletons whose NAME AZURE DICTATES, ownership is: scope is one
+     of the 5 estate subscriptions AND type appears on an explicit `ESTATE_DECLARED_SINGLETON_TYPES`
+     list that mirrors what the roots declare. The name is never consulted. Seeded with
+     `Microsoft.Security/securityContacts`. Defender pricings stay on `DEFENDER_PLANS_TO_FREE`
+     (ADR-057 d5); `autoProvisioningSettings` and `workspaceSettings` keep their existing
+     no-predicate treatment.
+   - **T3 NAME (retained, last resort).** `is_globaris_owned`, the `exempt-` limb and the
+     `policyAssignmentId` limb are unchanged, and apply to objects whose host scope is not itself
+     estate-owned (subscription-scope non-singletons, tenant scope). ADR-062's three-limb predicate
+     keeps its exact behaviour.
+
+   **Anti-widening rules, which are what make this safe:** T1 may NEVER be inverted (owning a child
+   never implies owning its host); T1(c) and T2 may never match outside the 5 estate subscription ids;
+   T2's type list is exact-match and grows only by reviewed PR with a dated justification, the same
+   discipline already applied to `SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST`.
+
+   **Why this is not a widening at all.** T1 claims strictly LESS than the sweep already claims: step 2
+   deletes the entire RG and step 4 deletes the entire MG. If T1 is ever wrong about an object, then
+   the sweep was already wrong about its HOST, and the host is by far the larger error. T2 cannot
+   over-match: one object per subscription, in a subscription that is wholly estate-owned, of a type
+   the estate declares.
+
+   Applied to the two live misclassifications: **`diag-aa-to-law` is owned by T1(c)** (its host id
+   contains `/resourceGroups/rg-management-globaris-poc/`) - no name limb and no special case.
+   **`securityContacts/default` is owned by T2.**
+
+**7. A no-op discovered while ruling on decision 6, and it is live in merged code today.**
+
+   `teardown-az-sweep.sh` FIX-4(i) and `teardown-verify.sh` VERIFY 6e both filter security contacts on
+   `is_globaris_owned(name)`, with a comment asserting the API accepts the custom Terraform name
+   `security-contact-globaris`. Microsoft's `securityContacts` Create reference at the pinned
+   `2023-12-01-preview` constrains `securityContactName` to `minLength: 7, maxLength: 7,
+   pattern: ^(default)$`, and the `SecurityContactName` enum has exactly one value, `default`. The
+   22:50Z probe confirms the live name IS `default`. So the sweep logs "not estate-owned", deletes
+   nothing, and **VERIFY 6e then certifies the subscription clean with the object still live.** That is
+   the third instance of this same trap (`diag-activity-to-security-law` was the first,
+   `exempt-dbx-managed-storage-bank-data-p1` the second). Decision 6's T2 tier is the fix.
+
+   Flagged for DevSecOps, NOT asserted: whether `azurerm_security_center_contact`
+   (`platform/security/main.tf:160-161`, name `security-contact-globaris`) will hit a requires-import
+   guard against the live `default` object on the next `platform/security` apply. Rated
+   high-probability; not confirmed in provider source this session.
+
+**8. VERIFY 10 is added, because Phase 3 looks at no MG scope at all today.**
+
+   VERIFY 0 through 9 contain no MG-scope check (confirmed by reading `teardown-verify.sh`). Add
+   VERIFY 10 after VERIFY 9: for every MG in `MG_SCOPES` that is ALSO present in the Phase 3 snapshot,
+   list all three classes at exact scope; fail on any owned row under `TEARDOWN-VERIFY-MGSCOPE`, and
+   fail on any UNCLASSIFIED row per ADR-062 decision 6. When the tree is already gone, VERIFY 10 must
+   PRINT that MG scope is unverifiable post-delete by design and that completion was gated in Phase 0
+   and at step 4-pre. It must not silently pass.
+
+**9. `az-sweep` and `verify` must gate on `needs.disarm.result`, because Phase 0 is now the only place
+the MG-scope sweep runs. (Added 2026-07-23 during the 1b re-ruling. Independent of 1b and of ADR-063's
+own subject: this is a pre-existing hole in the workflow, and it is what made a failed DISARM dangerous
+in the first place. Also raised as OQ-060.)**
+
+   Every Phase-1 root job in `.github/workflows/teardown.yml` gates on
+   `needs.disarm.result == 'success' || needs.disarm.result == 'skipped'`, so all eleven skip when
+   DISARM fails. `az-sweep` and `verify` do not: both check only `needs.guard.result == 'success'` and
+   `inputs.target == 'all'`. They list `disarm` in `needs`, but for ordering only, and the job's own
+   header comment says so explicitly - so this was a deliberate ADR-054-era choice ("az-sweep is the
+   fallback, it must run even when Phase 1 does not"), not an oversight.
+
+   That choice was defensible when DISARM only removed policy assignments. It is not defensible now,
+   for two reasons that ADR-063 itself creates:
+
+   - A failed DISARM means the MG-scope extension sweep did not complete, which under G-1 means the
+     estate has owned extension objects attached to scopes that `az-sweep`'s own
+     `remove_mg_hierarchy` loop may then delete. That is the one-way door this entire ADR exists to
+     close, walked through by a job that was told the door was open.
+   - On `target=all` with DISARM failed, all eleven Phase-1 jobs skip and `az-sweep` proceeds alone.
+     The run degrades silently from `terraform destroy` to raw REST deletes, every root's tfstate is
+     left stale against a deleted estate, and `verify` then runs and can report the estate clean,
+     because it is checking live Azure and live Azure really is empty. Teardown goes green having
+     destroyed the estate out from under its own state files.
+
+   Ruling: add `&& (needs.disarm.result == 'success' || needs.disarm.result == 'skipped')` to both
+   jobs' `if:`, matching the Phase-1 form exactly, including the `skipped` limb so single-target
+   dispatches (where `disarm` does not run) are unaffected. Phase-1 root outcomes stay ungated -
+   `az-sweep` remains the remnant-catch for a failed root, which is its actual purpose. DISARM is a
+   precondition, not a peer.
+
+   **9a. OWNER OVERRIDE, 2026-07-23. The architect's position on the `verify` half was put to the
+   owner and OVERRULED. Both jobs are gated, unconditionally.**
+
+   This is recorded as an override rather than folded into the ruling above, because the two positions
+   were different and the losing argument should not have to be rediscovered later.
+
+   - *What the architect proposed:* gate `az-sweep` hard, but leave `verify` ungated so it still runs
+     read-only after a failed DISARM, on the grounds that VERIFY is the best inventory of live estate
+     state the pipeline produces and suppressing it on exactly the runs that went wrong is backwards.
+     It would have required VERIFY to print loudly that the run ABORTED, so a clean VERIFY could never
+     be misread as "teardown succeeded". DevSecOps independently recommended the same split.
+   - *What the owner ruled:* gate both. `az-sweep` AND `verify`.
+   - *What is lost, stated plainly rather than minimised:* a failed DISARM now suppresses the
+     verification pass as well as the sweep, so the operator gets **no VERIFY output precisely in the
+     runs where the estate is most likely to be in a bad or half-known state**. Diagnosing such a run
+     needs a separate read-only probe run (`teardown-probe-extensions.sh`) or a manual dispatch, rather
+     than reading the failed run's own VERIFY section.
+   - *What is gained:* one uniform rule across every job downstream of Phase 0, with no
+     conditional-wording contract for anyone to get wrong, and no path by which a green-looking VERIFY
+     can be produced by a run that aborted. Given that three incident classes in this project have come
+     from a green run that did not do what its name implied, the owner weighted uniformity over
+     diagnostic reach. That is a defensible reading of the same evidence.
+
+   OQ-060 records the override as its resolution.
+
+- **Ungate step 4-pre only (drop the `remove_mg_hierarchy` condition)** - rejected: fixes D1 and leaves
+  D2 untouched, so the sweep stays structurally unreachable on `mode=terraform`, which is the mode a
+  healthy estate uses.
+- **Sweep in Phase 1 via terraform destroy** - rejected: mode-bound, and it dies for exactly the roots
+  that need it most. Three state blobs are CLASS-A absent (`bank-app-p1`, `bank-data-p1`, `synthetic`),
+  so Phase 1 cannot reach their objects at all.
+- **Grant Owner, or Management Group Reader, at tenant root** - rejected: against ADR-021 and the
+  OQ-008 scope-down, and against ADR-054's ruling on what this SP may hold. Decision 1c's globaris-scoped
+  `Cost Management Contributor` is the minimum that works.
+- **A third hand-written special case for `default`** - rejected: that is precisely the pattern that has
+  now failed three times. T2 generalises it once.
+- **Revert 1b to the original role-assignment existence check at Tenant Root Group** - rejected, though
+  NOT for the reason the review gave (that finding was a false positive; the check was authorised and
+  would have run). Rejected because it asserts grant metadata rather than capability, needs a Microsoft
+  Graph call the bootstrap says this SP does not need, and hard-fails the moment OQ-059(a)'s recommended
+  globaris-scoped grant lands. See 1b(i) and 1b(iii).
+- **Keep the reviewer's Consumption-plane read probe at tenant root** - rejected: proven
+  non-discriminating against the live tenant. User Access Administrator is live at Tenant Root Group as
+  the second ADR-041 bridge grant and its global `*/read` authorises
+  `Microsoft.Consumption/budgets/read` there with no Consumption grant present, so the probe returns
+  200 either way and can only say GO. Relocating it to MG scope is permanently worse, since Resource
+  Policy Contributor and User Access Administrator both carry `*/read` at globaris as standing rows.
+  See 1b(ii).
+- **Drop the pre-flight entirely and rely on decision 4 plus decision 9** - rejected, but it was the
+  first-pass ruling and it is a defensible fallback. It is correct by construction and costs nothing to
+  maintain; it simply lands the failure after DISARM has already removed policy assignments, leaving an
+  estate standing with its guardrails off for one re-dispatch. Since 1b(iv) turned out to be verifiable,
+  the cheap earlier failure is worth having. If the undocumented permissions call at MG scope ever
+  regresses, this is the fallback to take.
+- **Metadata stamping as the general ownership mechanism** - rejected as the GENERAL answer.
+  `Microsoft.Consumption/budgets`, `Microsoft.Insights/diagnosticSettings` and the `Microsoft.Security`
+  singletons expose no metadata object and no tags surface at all, so it is impossible for three of the
+  five classes in play. It remains a good policy-plane nicety - see the OQ-058(a) note.
+- **Delete the MG tree anyway and clean the survivors up afterwards** - rejected: there is no
+  afterwards. Post-delete the scope path is unreadable to this principal (403, not 404), which is the
+  entire mechanism this ADR exists to close.
+
+**Consequences:**
+
+- Positive: the collision class that voided the 2026-07-23 rerun is closed at its mechanism rather than
+  at its symptom; the sweep becomes reachable in BOTH teardown modes; two live estate objects that the
+  predicate walked past are now claimed structurally; a one-way door is converted into a fail-loud gate;
+  VERIFY finally covers MG scope; and decision 9 closes a pre-existing workflow hole under which a
+  failed DISARM let a `target=all` run destroy the estate by raw REST with zero `terraform destroy` and
+  still report green.
+- Negative / trade-offs: Phase 0 gets longer and makes more ARM calls per MG (11 scopes x 3 classes);
+  a fatal MG-scope delete failure will now stop a teardown that previously would have completed green
+  and left a landmine, so operators will see more red runs before they see fewer collisions; the
+  `Cost Management Contributor` bridge grant becomes an explicit dependency of teardown rather than an
+  incidental convenience; and the 1b pre-flight now depends on an ARM behaviour that is verified live
+  but undocumented at management-group scope, which is a maintenance liability accepted knowingly and
+  labelled distinctly so it can never be misread as "capability absent".
+- Follow-ups required: DevSecOps implements decisions 3 through 9 on `fix/teardown-phase0-mg-sweep`,
+  and REPLACES the pre-flight block currently in `scripts/teardown-disarm.sh` with the 1b(iv)
+  effective-permissions assertion - neither the role-assignment check nor the tenant-root Consumption
+  read probe survives review; the batched code-reviewer gate; the `Cost Management Contributor` grant
+  is also recorded in the teardown pre-clearance doc as an architect-owned dispatch precondition,
+  because a script check and a written disposition serve different purposes; then teardown dispatch and
+  the ADR-058 QA greenfield confirmation. OQ-059 records the two parked RBAC questions and now
+  recommends CLOSING (a) rather than carrying it. OQ-060 raised the `az-sweep`/`verify` gating question
+  and is RESOLVED by the owner override recorded in decision 9a (gate both). **OQ-061 is new and is the
+  most durable thing this correction surfaced:** the corrected role tables were only reachable by
+  reading the live tenant, and doing so exposed at least five undeclared out-of-band grants on the CI
+  principal, including a standing tenant-root User Access Administrator that `bootstrap/identity.tf`
+  does not declare. That is an ADR-021 / OQ-008 problem, not an ADR-063 one, and it outlives this ADR.
+  OQ-058(a) gets a dated architect note. OQ-053 is NOT resolved by this ADR.
+
+---
+
 ### ADR-062: Phase 3 VERIFY must be strictly BROADER than the Phase 2 sweep - completeness is gated by DISCOVERY over an ARM plane, not by an enumerated class list; subscription-scoped policy exemptions added as sub-step 6d and as the proof case
 
 - **Date:** 2026-07-21

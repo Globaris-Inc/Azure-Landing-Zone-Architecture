@@ -57,20 +57,23 @@
 # is_owned_policy_object, the API-version constants) so the delete side and the verify side can
 # never drift apart - the same ADR-062 discipline VERIFY 6d/9 already established.
 #
-# DELIBERATELY NOT ADDED: a VERIFY step for MG-scope budgets/diagnostic-settings/policy
-# exemptions (FIX-1, and FIX-2's MG-scope budget re-sweep). MG-scoped extension objects are
-# ONLY queryable WHILE their MG exists - once the MG is deleted, an MG-scope `az rest` call
-# 403s for this scoped SP (its MG-scoped grants are deleted WITH the MG - the same reason
-# mg_snapshot_load's own comment gives, and the same reason BLOCK-1 fixed
-# scripts/teardown-probe-extensions.sh). A Phase 3 VERIFY step runs AFTER Step 4's MG deletions
-# have already happened for target=all - it structurally CANNOT see these objects for any MG
-# that got deleted this run. Verification for this class instead happens INLINE, immediately
-# after each delete, WHILE the MG still exists: teardown-az-sweep.sh's FIX-1 and FIX-2 (MG
-# portion) now call confirm_gone_or_fail_primary (teardown-common.sh) right after each delete,
-# treating a still-live or indeterminate post-delete read as a hard sweep failure - this is the
-# only completion check these classes will ever get, so it is held to VERIFY's own fail-loud
-# standard rather than the warn-and-continue "belt" treatment used where a real VERIFY mirror
-# exists (see confirm_gone_or_fail_primary vs confirm_gone_or_warn_belt, teardown-common.sh).
+# SUPERSEDED note (previously "DELIBERATELY NOT ADDED", left here for the audit trail): this
+# file used to argue that a VERIFY step for MG-scope budgets/diagnostic-settings/policy
+# exemptions was structurally impossible, because those objects are only queryable WHILE their
+# MG exists (once deleted, an MG-scope `az rest` call 403s for this scoped SP - the same reason
+# mg_snapshot_load's own comment gives) and Phase 3 runs AFTER Step 4's MG deletions. That
+# reasoning is still correct for any MG a run actually DELETES this run, and is exactly why
+# confirm_gone_or_fail_primary (called inline, immediately after each delete, WHILE the MG still
+# exists - teardown-disarm.sh's Phase-0 sweep and teardown-az-sweep.sh's FIX-1/FIX-2 MG portion)
+# remains the only completion check those specific deletes will ever get.
+#
+# What it missed (ADR-063 decision 8, corrected 2026-07-23): most MG-scope teardown runs do NOT
+# delete the MG tree at all (remove_mg_hierarchy defaults false), so for every MG that is still
+# STANDING at Phase 3 time, this scope IS queryable, and nothing before today ever checked it -
+# VERIFY 0 through 9 contain no MG-scope check at all. VERIFY 10 (below, added 2026-07-23) closes
+# that gap for every MG still present in the Phase 3 snapshot, and explicitly PRINTS (rather than
+# silently passing) that a since-deleted MG is unverifiable here by design, with completion for
+# that MG already gated at Phase 0 and step 4-pre instead.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -255,7 +258,8 @@ done
 #     ANY non-zero here is FAIL LOUD, matching VERIFY 2/3/5 above - never read a failed list
 #     as "no objects". ---
 echo "== VERIFY 6: subscription-scoped object classes (budgets, cost exports, cost anomaly, diagnostic settings) =="
-ARM_BASE="https://management.azure.com"
+# ARM_BASE is sourced from teardown-common.sh (see this script's `source` line near the top) -
+# no local declaration here.
 v6_clean=1
 for sub in "${SUBS[@]}"; do
   if ! az_run budget_names_out consumption budget list --subscription "$sub" \
@@ -540,10 +544,15 @@ fi
 #     extension sweep, code-review BLOCK-2 fix, 2026-07-23) - the deterministic mirror of
 #     teardown-az-sweep.sh's FIX-2 RG-scope budget sweep. discover_live_rgs (teardown-common.sh)
 #     - the SAME RG_SWEEP_QUERY pattern VERIFY 2 already uses - never a hardcoded RG name.
-#     BUDGETS_API_VERSION (2024-08-01), is_globaris_owned ownership test. A SUBSCRIPTION-scoped
-#     RG list can never legitimately fail (section 9.4 boundary, same as VERIFY 2); a per-RG
-#     budget list failing on an RG just confirmed to exist is equally unexpected - both FAIL
-#     LOUD.
+#     BUDGETS_API_VERSION (2024-08-01). Ownership test REWIRED 2026-07-23 (ADR-063 decision 6)
+#     from is_globaris_owned(name) to T1(b) containment (is_estate_owned --rg) - the RG-scope
+#     sweep this mirrors (FIX-2) was rewired the same way, and leaving this check on a narrower
+#     name-based test than what the sweep now deletes would silently reopen exactly the
+#     verify-narrower-than-sweep gap ADR-062 exists to close (a budget on an owned RG with no
+#     "globaris" substring in its own name would be deleted by the sweep but never checked here).
+#     A SUBSCRIPTION-scoped RG list can never legitimately fail (section 9.4 boundary, same as
+#     VERIFY 2); a per-RG budget list failing on an RG just confirmed to exist is equally
+#     unexpected - both FAIL LOUD.
 echo "== VERIFY 6 (RG scope): consumption budgets on surviving RGs =="
 v6rg_clean=1
 for sub in "${SUBS[@]}"; do
@@ -556,9 +565,14 @@ for sub in "${SUBS[@]}"; do
   mapfile -t v_rg_names_budgets <<< "$v_rg_names_budgets_out"
   for rg in "${v_rg_names_budgets[@]:-}"; do
     [ -z "$rg" ] && continue
+    if ! is_estate_owned --rg "$rg"; then
+      note_fail "TEARDOWN-VERIFY-UNCLASSIFIED: RG ${rg} (sub ${sub}) returned by discover_live_rgs did not classify as estate-owned by is_estate_owned - structurally impossible for an RG_SWEEP_QUERY-matched row; route to the architect before any re-dispatch."
+      v6rg_clean=0
+      continue
+    fi
     if ! az_run v_rg_budget_names_out rest --method get \
         --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
-        --query "value[?contains(name,'globaris')].name" -o tsv; then
+        --query "value[].name" -o tsv; then
       note_fail "RG-scope budget list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'no budgets': ${AZ_RUN_STDERR}"
       v6rg_clean=0
       continue
@@ -617,10 +631,18 @@ done
 # --- VERIFY 6e: Microsoft.Security singletons, security subscription only
 #     (teardown-completeness extension sweep, code-review BLOCK-2 fix, 2026-07-23) - the
 #     deterministic mirror of teardown-az-sweep.sh's FIX-4 step 6e (same label, intentionally,
-#     for easy cross-reference between the two files). securityContacts and automations use
-#     is_globaris_owned (same predicate the sweep uses); autoProvisioningSettings/
-#     workspaceSettings use NO predicate (same subscription-wide precedent as VERIFY 7's
-#     Defender pricing check and VERIFY 8's RP-registration check - see FIX-4(iv)'s own comment,
+#     for easy cross-reference between the two files). securityContacts uses the ADR-063
+#     decision 6 T2 tier (is_estate_owned --singleton, teardown-common.sh), NOT a name test -
+#     CORRECTED 2026-07-23 (ADR-063 decision 7): the prior is_globaris_owned(name) check here
+#     could never match, because the live securityContacts object is always named "default" (the
+#     API's own securityContactName constraint, `pattern: ^(default)$`, api-version
+#     2023-12-01-preview) regardless of what name platform/security/main.tf configures - so this
+#     check was certifying the subscription clean with the object still live (the third instance
+#     of this exact trap; see is_singleton_owned's own comment, teardown-common.sh). automations
+#     keeps is_globaris_owned (T3 - its name IS this estate's own Terraform-chosen value, not
+#     Azure-dictated, so the name test is correct there); autoProvisioningSettings/
+#     workspaceSettings use NO predicate (same subscription-wide precedent as VERIFY 7's Defender
+#     pricing check and VERIFY 8's RP-registration check - see FIX-4(iv)'s own comment,
 #     teardown-az-sweep.sh, for why no ownership filter is the correct call there).
 echo "== VERIFY 6e: Microsoft.Security singletons (security subscription) =="
 if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
@@ -638,8 +660,8 @@ else
     mapfile -t v_contact_names <<< "$v_contact_rows_out"
     for name in "${v_contact_names[@]:-}"; do
       [ -z "$name" ] && continue
-      if is_globaris_owned "$name"; then
-        note_fail "Security contact ${name} still present in the security subscription."
+      if is_estate_owned --singleton "$SECURITY_SUBSCRIPTION_ID" "Microsoft.Security/securityContacts"; then
+        note_fail "Security contact ${name} still present in the security subscription (ADR-063 T2: name is never consulted - Microsoft.Security/securityContacts is always owned in an estate subscription)."
         v6e_clean=0
       fi
     done
@@ -726,6 +748,131 @@ else
     fi
   done
   [ "$v6f_clean" -eq 1 ] && echo "  clean (no OWNED tenant AAD diagnostic setting found)."
+fi
+
+# --- 10. MG-scope extension resources (ADR-063 decision 8, added 2026-07-23). VERIFY 0 through
+#     9 above contain NO MG-scope check at all - confirmed by reading this file top to bottom
+#     before this fix. For every MG in MG_SCOPES that is ALSO present in the Phase 3 snapshot
+#     (mg_snapshot_load / mg_in_snapshot, loaded once above and shared with VERIFY 1/4), list all
+#     three MG-scope extension classes (consumption budgets, MG-scope diagnostic settings,
+#     policy exemptions at atExactScope) and classify every row with is_estate_owned
+#     (teardown-common.sh) - the SAME T1/T2/T3 predicate the Phase-0 sweep
+#     (teardown-disarm.sh) and step 4-pre (teardown-az-sweep.sh FIX-1) use, so the sweep side and
+#     the verify side can never drift apart.
+#
+#     Every row found at a live MG in MG_SCOPES is OWNED by T1(a) containment (is_estate_owned
+#     --mg) - there is no legitimate "found but not ours" case at these 11 scopes, unlike VERIFY
+#     9's subscription-scope discovery scan, which shares a subscription with objects this
+#     estate does not own. A row is therefore either OWNED (fails as TEARDOWN-VERIFY-MGSCOPE) or,
+#     in the structurally-should-be-impossible case that is_estate_owned somehow returns false
+#     for a row found at a live member of MG_SCOPES, UNCLASSIFIED (fails under the SAME
+#     TEARDOWN-VERIFY-UNCLASSIFIED label ADR-062 decision 6 already established for VERIFY 9,
+#     rather than inventing a second label for the same concept) - kept as a hard fail rather
+#     than a silent pass, exactly like every other "should be impossible" defensive branch this
+#     fix adds.
+#
+#     REMNANT MEANING: Phase 0 (teardown-disarm.sh) already swept these 3 classes across every
+#     MG in MG_SCOPES before Phase 1 touched anything, and step 4-pre (teardown-az-sweep.sh
+#     FIX-1) is a fatal last-chance gate that aborts the run rather than let a survivor reach
+#     here. So a row surviving to THIS point means BOTH of those gates were bypassed (a
+#     single-root dispatch that never ran Phase 0/2, target != all, or a genuine bug) - failing
+#     loud here is the backstop for that, not the primary mechanism.
+#
+#     UNVERIFIABLE-BY-DESIGN, STATED NOT SILENCED: when an MG is a member of MG_SCOPES but
+#     ABSENT from the snapshot (already deleted - remove_mg_hierarchy=true and step 4 completed),
+#     this class is structurally UNVERIFIABLE post-delete for this scoped SP - an MG-scope
+#     `az rest` call 403s (not 404s) once that MG's grants die with the subtree (the same reason
+#     mg_snapshot_load's own comment gives). VERIFY 10 does NOT silently skip this and call it
+#     clean: it PRINTS that MG scope is unverifiable post-delete BY DESIGN and that completion
+#     for that MG was already gated at Phase 0 and at step 4-pre - the only two points that could
+#     ever see these objects - so its absence from this check is a stated design boundary, not a
+#     silent gap.
+echo "== VERIFY 10: MG-scope extension resources (budgets, diagnostic settings, policy exemptions) =="
+if [ "$mg_snapshot_ok" -eq 0 ]; then
+  echo "  Skipped - no trustworthy MG-existence snapshot (see the failure above); every MG-scope class is unresolved, not clean."
+else
+  v10_clean=1
+  for mg in "${MG_SCOPES[@]}"; do
+    if ! mg_in_snapshot "$mg"; then
+      echo "  ${mg}: gone - MG-scope extension resources are UNVERIFIABLE post-delete BY DESIGN (403, not 404, for this scoped SP once its MG-scope grants die with the subtree). Completion for this MG was gated at Phase 0 (teardown-disarm.sh) and at step 4-pre (teardown-az-sweep.sh FIX-1) before it was deleted, not here."
+      continue
+    fi
+    mg_scope="$(mg_scope_path "$mg")"
+
+    # Consumption budgets
+    if ! az_run v10_budget_rows_out rest --method get \
+        --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
+        --query "value[].name" -o tsv; then
+      note_fail "TEARDOWN-VERIFY-MGSCOPE: MG-scope budget list failed for MG ${mg} - a failed list is never read as 'no budgets' (a dead token would otherwise falsely certify this MG clean): ${AZ_RUN_STDERR}"
+      v10_clean=0
+    else
+      # shellcheck disable=SC2154  # v10_budget_rows_out is assigned indirectly by az_run's printf -v
+      mapfile -t v10_budget_names <<< "$v10_budget_rows_out"
+      for name in "${v10_budget_names[@]:-}"; do
+        [ -z "$name" ] && continue
+        if is_estate_owned --mg "$mg"; then
+          note_fail "TEARDOWN-VERIFY-MGSCOPE: MG-scope budget ${name} still present at MG ${mg} - Phase 0 / step 4-pre did not fully complete."
+        else
+          note_fail "TEARDOWN-VERIFY-UNCLASSIFIED: MG-scope budget ${name} at MG ${mg} did not classify as estate-owned by is_estate_owned - structurally impossible for a member of MG_SCOPES; route to the architect (docs/teardown-redesign.md section 13.4) before any re-dispatch."
+        fi
+        v10_clean=0
+      done
+    fi
+
+    # MG-scope diagnostic settings. Note: the estate declares none today, and this SP holds no
+    # role that can DELETE one at MG scope (ADR-063 decision 1d, OQ-059(b)) - but the LIST is
+    # authorised (User Access Administrator's */read) and a row here is still a genuine remnant
+    # that must be reported, even though this SP cannot itself clean it up.
+    if ! az_run v10_diag_rows_out rest --method get \
+        --url "${ARM_BASE}${mg_scope}/providers/microsoft.insights/diagnosticSettings?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}" \
+        --query "value[].name" -o tsv; then
+      note_fail "TEARDOWN-VERIFY-MGSCOPE: MG-scope diagnostic-settings list failed for MG ${mg} - a failed list is never read as 'no diagnostic settings' (a dead token would otherwise falsely certify this MG clean): ${AZ_RUN_STDERR}"
+      v10_clean=0
+    else
+      # shellcheck disable=SC2154  # v10_diag_rows_out is assigned indirectly by az_run's printf -v
+      mapfile -t v10_diag_names <<< "$v10_diag_rows_out"
+      for name in "${v10_diag_names[@]:-}"; do
+        [ -z "$name" ] && continue
+        if is_estate_owned --mg "$mg"; then
+          note_fail "TEARDOWN-VERIFY-MGSCOPE: MG-scope diagnostic setting ${name} still present at MG ${mg} - NOTE this is the OQ-059(b) KNOWN DESIGN GAP: this SP holds no role that can DELETE it at MG scope, so this remnant cannot be cleared by re-dispatching teardown alone. It must be removed by a privileged one-off action, or OQ-059(b) option B (a Monitoring Contributor grant) must land, before this MG can be safely deleted."
+        else
+          note_fail "TEARDOWN-VERIFY-UNCLASSIFIED: MG-scope diagnostic setting ${name} at MG ${mg} did not classify as estate-owned by is_estate_owned - structurally impossible for a member of MG_SCOPES; route to the architect (docs/teardown-redesign.md section 13.4) before any re-dispatch."
+        fi
+        v10_clean=0
+      done
+    fi
+
+    # Policy exemptions (atExactScope, with the same client-side scope-path belt the Phase-0
+    # sweep and step 4-pre use - ADR-063 rule 3b).
+    if ! az_run v10_exemption_rows_out rest --method get \
+        --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
+        --query "value[].[name, id]" -o tsv; then
+      note_fail "TEARDOWN-VERIFY-MGSCOPE: MG-scope policy exemption list failed for MG ${mg} - a failed list is never read as 'no exemptions' (a dead token would otherwise falsely certify this MG clean): ${AZ_RUN_STDERR}"
+      v10_clean=0
+    else
+      # shellcheck disable=SC2154  # v10_exemption_rows_out is assigned indirectly by az_run's printf -v
+      mapfile -t v10_exemption_rows <<< "$v10_exemption_rows_out"
+      for row in "${v10_exemption_rows[@]:-}"; do
+        [ -z "$row" ] && continue
+        v10_ex_name="$(printf '%s' "$row" | cut -f1)"
+        v10_ex_id="$(printf '%s' "$row" | cut -f2)"
+        case "$v10_ex_id" in
+          "${mg_scope}"/*)
+            if is_estate_owned --mg "$mg"; then
+              note_fail "TEARDOWN-VERIFY-MGSCOPE: MG-scope policy exemption ${v10_ex_name} still present at MG ${mg} - Phase 0 / step 4-pre did not fully complete."
+            else
+              note_fail "TEARDOWN-VERIFY-UNCLASSIFIED: MG-scope policy exemption ${v10_ex_name} at MG ${mg} did not classify as estate-owned by is_estate_owned - structurally impossible for a member of MG_SCOPES; route to the architect (docs/teardown-redesign.md section 13.4) before any re-dispatch."
+            fi
+            ;;
+          *)
+            note_fail "TEARDOWN-VERIFY-UNCLASSIFIED: MG-scope policy exemption ${v10_ex_name} (MG ${mg}) returned by atExactScope() but its id '${v10_ex_id}' does not start with this MG's own scope path '${mg_scope}' (ADR-063 rule 3b client-side belt) - cannot certify this row's scope off an unverified atExactScope() match."
+            ;;
+        esac
+        v10_clean=0
+      done
+    fi
+  done
+  [ "$v10_clean" -eq 1 ] && echo "  clean (no MG-scope budgets, diagnostic settings, or policy exemptions found on any live MG in MG_SCOPES)."
 fi
 
 echo "----------------------------------------------------------------"
