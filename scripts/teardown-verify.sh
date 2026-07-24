@@ -255,7 +255,8 @@ done
 #     ANY non-zero here is FAIL LOUD, matching VERIFY 2/3/5 above - never read a failed list
 #     as "no objects". ---
 echo "== VERIFY 6: subscription-scoped object classes (budgets, cost exports, cost anomaly, diagnostic settings) =="
-ARM_BASE="https://management.azure.com"
+# ARM_BASE is sourced from teardown-common.sh (see this script's `source` line near the top) -
+# no local declaration here (2026-07-23, teardown-phase0-mg-sweep follow-up).
 v6_clean=1
 for sub in "${SUBS[@]}"; do
   if ! az_run budget_names_out consumption budget list --subscription "$sub" \

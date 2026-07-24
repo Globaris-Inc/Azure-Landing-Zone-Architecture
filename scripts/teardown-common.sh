@@ -79,6 +79,12 @@
 # silently dropped: it remains open and tracked as its own item in OPEN-QUESTIONS.md (OQ-053,
 # "Recommended default: A now... with B considered if it recurs").
 
+# ARM management-plane base URL, used by every direct `az rest` call in teardown-disarm.sh,
+# teardown-az-sweep.sh, teardown-verify.sh, and scripts/teardown-probe-extensions.sh. Promoted
+# here (2026-07-23, teardown-phase0-mg-sweep follow-up) from three separate identical local
+# declarations - one constant, sourced once, instead of three copies that could drift.
+ARM_BASE="https://management.azure.com"
+
 # The full globaris MG tree: root + all descendants (docs/teardown-redesign.md section 3):
 # globaris -> platform -> {connectivity, security, identity, management};
 # globaris -> landingzones -> {online, corp}; globaris -> {decommissioned, sandbox}.

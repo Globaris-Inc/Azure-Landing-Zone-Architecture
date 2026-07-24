@@ -162,11 +162,10 @@ source "${script_dir}/teardown-common.sh"
 
 REMOVE_MG_HIERARCHY="${REMOVE_MG_HIERARCHY:-false}"
 
-# Moved here (2026-07-23, teardown-completeness extension sweep) from its previous
-# declaration inside step 6 - FIX-1 (step 4-pre) now needs it too, and step 4 runs before
-# step 6. Declared ONCE at the top so every step below (4-pre, 6a, 6d, 6e, 6f) shares the
-# exact same value, never re-declared.
-ARM_BASE="https://management.azure.com"
+# ARM_BASE is sourced from teardown-common.sh (promoted there 2026-07-23,
+# teardown-phase0-mg-sweep follow-up) - no local declaration here. Every step below (4-pre,
+# 6a, 6d, 6e, 6f) shares that one value, so this script and teardown-disarm.sh's own MG-scope
+# sweep (which reuses the same constant) can never drift on it.
 
 mapfile -t SUBS < <(teardown_subscriptions)
 if [ "${#SUBS[@]}" -eq 0 ]; then
@@ -362,6 +361,18 @@ else
   #     same section 9.4 boundary VERIFY 1 already applies), idempotent-absent-is-success on
   #     every delete (is_owned_policy_object / is_globaris_owned decide the DELETE, not the
   #     LIST's success/failure).
+  #
+  #     NOTE added 2026-07-23 (teardown-phase0-mg-sweep fix): teardown-disarm.sh (Phase 0) now
+  #     carries its own copy of this same sweep, run BEFORE any MG is deleted in either mode -
+  #     see that script's fourth AMENDED header comment for the full root-cause. The `disarm`
+  #     job in .github/workflows/teardown.yml gates only on `inputs.target == 'all'`, with no
+  #     `inputs.mode` check, so it runs first in BOTH mode=terraform and mode=az-sweep. That
+  #     makes THIS block (4-pre) a harmless remnant-catch no-op in both modes now, not only on
+  #     the mode=terraform path - every MG-scope extension object it would have found here was
+  #     already swept by teardown-disarm.sh earlier in the same run. Left in place deliberately
+  #     as a second-line backstop (a re-dispatch with `target=platform/management-groups` only,
+  #     or any future change that lets Phase 2 run without Phase 0 having run first, would still
+  #     be covered) - not removed, not weakened.
   echo "== Phase 2 step 4-pre: MG-scope extension sweep (budgets, diagnostic settings, policy exemptions) - before any MG delete (FIX-1) =="
   for mg in "${MG_DELETE_ORDER[@]}"; do
     if ! mg_in_snapshot "$mg"; then
@@ -507,7 +518,7 @@ fi
 #     exception: az_run for any call whose stdout is consumed as data (Trap 1), is_auth_error
 #     classification on every non-zero (Trap 2), auth-fail-loud, idempotent-absent-is-success.
 echo "== Phase 2 step 6: subscription-scope objects (budgets, cost exports, cost anomaly, diagnostic settings, Defender pricing reset, RP unregister) =="
-# ARM_BASE is declared once near the top of this script (FIX-1 in step 4-pre needs it too).
+# ARM_BASE is sourced from teardown-common.sh (see the note near the top of this script).
 
 # --- 6a. Four subscription-scoped object classes, all 5 subscriptions. Discovery is by LIST,
 #     never a hardcoded name list, so a renamed or added object is still caught. Filtered by

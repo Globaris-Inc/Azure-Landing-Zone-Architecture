@@ -35,7 +35,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./teardown-common.sh
 source "${script_dir}/teardown-common.sh"
 
-ARM_BASE="https://management.azure.com"
+# ARM_BASE is sourced from teardown-common.sh - no local declaration here (2026-07-23,
+# teardown-phase0-mg-sweep follow-up: one shared constant, not one copy per script).
 
 mapfile -t SUBS < <(teardown_subscriptions)
 if [ "${#SUBS[@]}" -eq 0 ]; then
