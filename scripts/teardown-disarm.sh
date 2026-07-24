@@ -76,6 +76,39 @@
 # `is_auth_error` is NOT loosened; the per-MG `show` is REMOVED entirely - it is never needed as
 # an existence oracle (none of these sites need an EXISTING MG's detail as data, only its
 # presence/absence).
+#
+# AMENDED a fourth time 2026-07-23 (teardown-phase0-mg-sweep fix, follow-up to the
+# teardown-completeness extension sweep): added the MG-scope extension-resource sweep at the
+# end of this script (budgets, MG-scope diagnostic settings, policy exemptions). Root cause: the
+# original placement of this sweep (teardown-az-sweep.sh Phase 2 step 4-pre, FIX-1) is too late
+# on the mode=terraform path. Phase 1 terraform-destroys platform/management-groups LAST,
+# deleting the globaris/platform/landingzones MGs; Phase 2 az-sweep `needs` every Phase 1 job so
+# it only runs AFTER those MGs are already gone. Once an MG is deleted, mg_in_snapshot no longer
+# lists it (skip) AND the scoped teardown SP's MG-scope grants die with the subtree (403
+# AuthorizationFailed on any further read at that scope), so FIX-1's sweep never gets a chance to
+# run for that MG on this path. Three live orphan budgets (budget-mg-globaris-globaris,
+# budget-mg-platform-globaris, budget-mg-landingzones-globaris) were in no root's Terraform state
+# either, so `terraform destroy` never removed them. This script runs FIRST, before any Phase 1
+# destroy (`disarm` gates every Phase 1 root job via `needs: disarm`), with every MG in
+# MG_SCOPES guaranteed still present - the correct home for this sweep on the mode=terraform
+# path. Placed AFTER the policy-ASSIGNMENT disarm loop above (not interleaved with it) so no
+# DINE policy assignment can re-remediate a budget/diagnostic-setting/exemption mid-sweep - the
+# assignments must be gone first, the same belt-and-suspenders reasoning the whole phase exists
+# for (see the file header comment). Reuses the SAME API-version constants and the SAME
+# confirm_gone_or_fail_primary PRIMARY-evidence pattern teardown-az-sweep.sh's FIX-1 already
+# established (teardown-common.sh), so the two sites can never drift on API version or scope
+# math. teardown-az-sweep.sh's own FIX-1 copy is NOT removed by this change.
+#
+# CORRECTED 2026-07-23 (same session that implemented the sweep below): the `disarm` job in
+# .github/workflows/teardown.yml gates only on `inputs.target == 'all'` - it has NO
+# `inputs.mode` check, so it runs FIRST in BOTH `mode=terraform` and `mode=az-sweep`, not only
+# on the mode=terraform path. That makes teardown-az-sweep.sh's FIX-1 a harmless remnant-catch
+# no-op in BOTH modes now (every MG-scope extension object it would find has already been swept
+# by THIS script earlier in the same run) - not exclusively on mode=terraform as an earlier draft
+# of this comment assumed. FIX-1 is left in place unweakened regardless, as a second-line
+# backstop (a `target`-scoped re-dispatch, or any future change that lets Phase 2 run without
+# Phase 0 having run first, would still need it) - see that script's own comment at the FIX-1
+# site for the matching note.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -205,10 +238,154 @@ for mg in "${MG_SCOPES[@]}"; do
   done
 done
 
+# --- MG-scope extension-resource sweep (added 2026-07-23, see the fourth AMENDED header
+#     comment above for the full root-cause). Runs AFTER the policy-ASSIGNMENT disarm loop
+#     above (so no DINE policy assignment can re-remediate a budget/diagnostic-setting/
+#     exemption mid-sweep) and BEFORE the fail/exit handling below, so a sweep failure feeds
+#     the SAME `fail` accumulator and the SAME loud-exit semantics as the rest of this script.
+#     Mirrors teardown-az-sweep.sh's FIX-1 (Phase 2 step 4-pre) - same API-version constants,
+#     same confirm_gone_or_fail_primary PRIMARY-evidence pattern (both from
+#     teardown-common.sh) - so the two sites can never drift on API version or scope math.
+#     See that script's FIX-1 comment for the note on why it stays in place as a harmless
+#     second-line backstop rather than being removed now that this sweep runs first.
+#
+#     Deliberate structural difference from FIX-1: FIX-1 hard-exits (`exit 1`) on any failure
+#     because teardown-az-sweep.sh is a single flat pass with no accumulator; this script
+#     already has an established accumulate-then-exit-loud convention (`fail=1` and keep
+#     going, one non-zero exit at the very end, matching the policy-assignment loop above), so
+#     failures here follow THAT convention instead - a failure in one class (say, budgets) at
+#     one MG does not stop the diagnostic-settings or policy-exemption sweep for that same MG,
+#     or for any other MG, from still being attempted this run. Same reason a list failure here
+#     does not `continue` past the remaining two classes for this MG (unlike the identity/
+#     role-assignment coupling above it, these three classes are structurally independent of
+#     each other - there is no data dependency between them the way role-assignment cleanup
+#     depends on the identity list captured before it).
+#
+#     Loops over MG_SCOPES (not MG_DELETE_ORDER) - this sweep does not delete any MG, only
+#     objects attached to one, so the bottom-up hierarchy-delete ordering MG_DELETE_ORDER
+#     encodes does not apply here. Gated by the SAME mg_in_snapshot check the rest of this
+#     script already uses - an MG absent from the snapshot has nothing to sweep.
+echo "== DISARM: MG-scope extension-resource sweep (budgets, diagnostic settings, policy exemptions) =="
+for mg in "${MG_SCOPES[@]}"; do
+  if ! mg_in_snapshot "$mg"; then
+    echo "  MG ${mg}: gone (absent from the existing-MG snapshot) - nothing to sweep at a nonexistent scope."
+    continue
+  fi
+  mg_scope="$(mg_scope_path "$mg")"
+
+  # Budgets (Microsoft.Consumption/budgets, BUDGETS_API_VERSION).
+  if az_run mg_budget_names_out rest --method get \
+      --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
+      --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
+    # shellcheck disable=SC2154  # mg_budget_names_out is assigned indirectly by az_run's printf -v
+    IFS=',' read -ra mg_budget_names <<< "$mg_budget_names_out"
+    for name in "${mg_budget_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      echo "  Deleting MG-scope budget ${name} (MG ${mg})"
+      mg_budget_url="${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets/${name}?api-version=${BUDGETS_API_VERSION}"
+      if ! mg_budget_del_out="$(az rest --method delete --url "$mg_budget_url" --output none 2>&1)"; then
+        if is_auth_error "$mg_budget_del_out"; then
+          echo "::error::DISARM: MG-scope budget delete for ${name} (MG ${mg}) failed with an auth/transport error: ${mg_budget_del_out}"
+          fail=1
+        else
+          echo "  ::warning::MG-scope budget delete for ${name} (MG ${mg}) failed or already gone (continuing): ${mg_budget_del_out}"
+        fi
+      else
+        # PRIMARY-pattern confirm-GET (mirrors FIX-1 exactly, teardown-common.sh) - this class
+        # has no separate Phase 3 VERIFY step (VERIFY 1/4 only check MG-scope policy
+        # ASSIGNMENTS and MG existence, never budgets/diagnostic-settings/exemptions), so this
+        # confirm-GET is the only completion check this class will ever get.
+        confirm_gone_or_fail_primary "MG-scope budget ${name} (MG ${mg})" "$mg_budget_url" || fail=1
+      fi
+    done
+  elif is_auth_error "$AZ_RUN_STDERR"; then
+    echo "::error::DISARM: MG-scope budget list failed for MG ${mg} with an auth/transport error - a failed list is never read as 'no budgets' (section 9.4): ${AZ_RUN_STDERR}"
+    fail=1
+  else
+    echo "::error::DISARM: MG-scope budget list failed for MG ${mg} with a non-auth error at a confirmed-live scope - cannot treat this as empty: ${AZ_RUN_STDERR}"
+    fail=1
+  fi
+
+  # Diagnostic settings (management-GROUP diagnostic settings op group, DISTINCT from the
+  # generic resource op group - MG_DIAGNOSTIC_SETTINGS_API_VERSION, teardown-common.sh).
+  if az_run mg_diag_names_out rest --method get \
+      --url "${ARM_BASE}${mg_scope}/providers/microsoft.insights/diagnosticSettings?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}" \
+      --query "join(',',value[].name)" -o tsv; then
+    # shellcheck disable=SC2154  # mg_diag_names_out is assigned indirectly by az_run's printf -v
+    IFS=',' read -ra mg_diag_names <<< "$mg_diag_names_out"
+    for name in "${mg_diag_names[@]:-}"; do
+      [ -z "$name" ] && continue
+      if ! is_globaris_owned "$name"; then
+        echo "  Skipping MG-scope diagnostic setting ${name} (MG ${mg}) - not estate-owned (no 'globaris' substring)."
+        continue
+      fi
+      echo "  Deleting MG-scope diagnostic setting ${name} (MG ${mg})"
+      mg_diag_url="${ARM_BASE}${mg_scope}/providers/microsoft.insights/diagnosticSettings/${name}?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}"
+      if ! mg_diag_del_out="$(az rest --method delete --url "$mg_diag_url" --output none 2>&1)"; then
+        if is_auth_error "$mg_diag_del_out"; then
+          echo "::error::DISARM: MG-scope diagnostic setting delete for ${name} (MG ${mg}) failed with an auth/transport error: ${mg_diag_del_out}"
+          fail=1
+        else
+          echo "  ::warning::MG-scope diagnostic setting delete for ${name} (MG ${mg}) failed or already gone (continuing): ${mg_diag_del_out}"
+        fi
+      else
+        # PRIMARY-pattern confirm-GET (mirrors FIX-1) - see the budget block above for the
+        # full rationale; identical here (no separate VERIFY step for this class either).
+        confirm_gone_or_fail_primary "MG-scope diagnostic setting ${name} (MG ${mg})" "$mg_diag_url" || fail=1
+      fi
+    done
+  elif is_auth_error "$AZ_RUN_STDERR"; then
+    echo "::error::DISARM: MG-scope diagnostic-settings list failed for MG ${mg} with an auth/transport error - a failed list is never read as 'no diagnostic settings' (section 9.4): ${AZ_RUN_STDERR}"
+    fail=1
+  else
+    echo "::error::DISARM: MG-scope diagnostic-settings list failed for MG ${mg} with a non-auth error at a confirmed-live scope - cannot treat this as empty: ${AZ_RUN_STDERR}"
+    fail=1
+  fi
+
+  # Policy exemptions (atExactScope, POLICY_EXEMPTIONS_API_VERSION_NEW, is_owned_policy_object
+  # predicate - the same three-limb test sub-step 6d already uses, shared so this delete site
+  # can never drift from what VERIFY 9's discovery scan expects).
+  if az_run mg_exemption_rows_out rest --method get \
+      --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
+      --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
+    # shellcheck disable=SC2154  # mg_exemption_rows_out is assigned indirectly by az_run's printf -v
+    mapfile -t mg_exemption_rows <<< "$mg_exemption_rows_out"
+    for row in "${mg_exemption_rows[@]:-}"; do
+      [ -z "$row" ] && continue
+      mg_ex_name="$(printf '%s' "$row" | cut -f1)"
+      mg_ex_assignment_id="$(printf '%s' "$row" | cut -f2)"
+      if ! is_owned_policy_object "$mg_ex_name" "$mg_ex_assignment_id"; then
+        echo "  Skipping MG-scope policy exemption ${mg_ex_name} (MG ${mg}) - not estate-owned."
+        continue
+      fi
+      echo "  Deleting MG-scope policy exemption ${mg_ex_name} (MG ${mg})"
+      mg_exemption_url="${ARM_BASE}${mg_scope}/providers/Microsoft.Authorization/policyExemptions/${mg_ex_name}?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}"
+      if ! mg_exemption_del_out="$(az rest --method delete --url "$mg_exemption_url" --output none 2>&1)"; then
+        if is_auth_error "$mg_exemption_del_out"; then
+          echo "::error::DISARM: MG-scope policy exemption delete for ${mg_ex_name} (MG ${mg}) failed with an auth/transport error: ${mg_exemption_del_out}"
+          fail=1
+        else
+          echo "  ::warning::MG-scope policy exemption delete for ${mg_ex_name} (MG ${mg}) failed or already gone (continuing): ${mg_exemption_del_out}"
+        fi
+      else
+        # PRIMARY-pattern confirm-GET (mirrors FIX-1) - see the budget block above for the
+        # full rationale; identical here (no separate VERIFY step for this class either).
+        confirm_gone_or_fail_primary "MG-scope policy exemption ${mg_ex_name} (MG ${mg})" "$mg_exemption_url" || fail=1
+      fi
+    done
+  elif is_auth_error "$AZ_RUN_STDERR"; then
+    echo "::error::DISARM: MG-scope policy exemption list failed for MG ${mg} with an auth/transport error - a failed list is never read as 'no exemptions' (section 9.4): ${AZ_RUN_STDERR}"
+    fail=1
+  else
+    echo "::error::DISARM: MG-scope policy exemption list failed for MG ${mg} with a non-auth error at a confirmed-live scope - cannot treat this as empty: ${AZ_RUN_STDERR}"
+    fail=1
+  fi
+done
+
 if [ "$fail" -ne 0 ]; then
-  echo "::error::DISARM finished with one or more real (non-idempotent) delete failures, or an auth/transport error that means a scope could not be certified disarmed - Phase 1 destroy will NOT proceed (phase-1 root jobs require disarm success). Phase 2/3 still run and will report the remaining assignments as remnants."
+  echo "::error::DISARM finished with one or more real (non-idempotent) delete failures, or an auth/transport error that means a scope could not be certified disarmed - Phase 1 destroy will NOT proceed (phase-1 root jobs require disarm success). Phase 2/3 still run and will report the remaining assignments/budgets/diagnostic-settings/exemptions as remnants."
   exit 1
 fi
 
-echo "DISARM complete - all MG-scope policy assignments cleared."
+echo "DISARM complete - all MG-scope policy assignments cleared and the MG-scope extension-resource sweep (budgets, diagnostic settings, policy exemptions) finished clean."
 exit 0
