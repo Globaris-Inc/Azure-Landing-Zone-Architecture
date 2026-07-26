@@ -215,6 +215,183 @@ is_subscription_scope_benign() {
 }
 
 # ---------------------------------------------------------------------------
+# ADR-063 decision 6 (2026-07-23): the T1/T2/T3 CONTAINMENT-based ownership predicate.
+# Retires the name-only test as the PRIMARY ownership test. T3 (is_owned_policy_object /
+# is_globaris_owned above) stays in force UNCHANGED as the last-resort tier - see each
+# function's own comment above. ONE shared implementation (is_estate_owned, at the bottom of
+# this block) is wired into the Phase-0 MG-scope sweep (teardown-disarm.sh) and into
+# FIX-1/FIX-2/FIX-4 (teardown-az-sweep.sh) and VERIFY 6e/10 (teardown-verify.sh), so every one
+# of those sites classifies the same object the same way and can never drift apart.
+#
+# Root cause this closes (ADR-063): two live estate objects were classified UNOWNED by the
+# name-only predicate even though both were provably estate-created - diag-aa-to-law (a
+# resource-scoped diagnostic setting whose host resource lives inside
+# rg-management-globaris-poc) and securityContacts/default (whose name is dictated by the Azure
+# API, not by this estate's Terraform - azurerm_security_center_contact's configured name is
+# never what ends up live, see is_singleton_owned's own comment below). Neither carries a name
+# the old predicate could ever match, so a correctly-ordered sweep would still have walked past
+# both.
+#
+# T1 CONTAINMENT (primary, structural) - is_mg_owned / is_rg_owned / is_resource_in_owned_rg.
+# An object is owned if its HOST SCOPE is owned:
+#   (a) an MG in MG_SCOPES.
+#   (b) an RG matching RG_SWEEP_QUERY (the same pattern the RG sweep and every
+#       discover_live_rgs caller already use).
+#   (c) any resource whose id contains "/resourceGroups/{rg}/" where {rg} matches (b), AND
+#       whose subscription segment is one of the 5 estate subscriptions
+#       (is_estate_subscription) - binds the anti-widening rule structurally rather than
+#       relying on every caller only ever looping over the 5 known subscriptions.
+# T1 claims strictly LESS than the sweep already claims: step 2 deletes the entire RG and step 4
+# deletes the entire MG (when remove_mg_hierarchy=true). If T1 is ever wrong about an object, the
+# sweep was already wrong about its much larger HOST - so this is not a widening of blast radius,
+# it closes a gap the sweep already implied. T1 may NEVER be inverted (owning a child never
+# implies owning its host) - none of the three helpers below ever tests a CHILD to conclude
+# something about its PARENT.
+#
+# T2 FIXED-NAME SINGLETON - is_singleton_owned. For a singleton whose NAME AZURE ITSELF
+# dictates (not this estate's Terraform), ownership is: the scope is one of the 5 estate
+# subscriptions (is_estate_subscription) AND the resource type exact-matches an entry in
+# ESTATE_DECLARED_SINGLETON_TYPES. The object's own NAME is never consulted - that is the whole
+# point of this tier. Seeded with Microsoft.Security/securityContacts (ADR-063 decision 7: the
+# live object is always named "default", pinned by the API's own
+# `securityContactName: pattern ^(default)$` constraint at api-version 2023-12-01-preview - no
+# Terraform-configured name can ever change that; see platform/security/main.tf's
+# azurerm_security_center_contact.this block). Grows only by reviewed PR with a dated
+# justification, the same discipline SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST already uses. Defender
+# pricing plans stay on the separate DEFENDER_PLANS_TO_FREE allow-list (ADR-057 decision 5);
+# autoProvisioningSettings / workspaceSettings keep their existing no-predicate treatment (both
+# are reverted-to-baseline WRITES on a known fixed surface, not delete-if-owned classifications -
+# see FIX-4(iv)'s own comment, teardown-az-sweep.sh).
+#
+# T3 NAME (retained, last resort) - is_owned_policy_object / is_globaris_owned, UNCHANGED.
+# Applies to objects whose host scope is NOT itself estate-owned under T1 (subscription-scope
+# non-singletons, tenant scope) - never as a substitute for T1 where containment already
+# applies.
+#
+# Anti-widening rules (binding): T1 may never be inverted (see above). T1(c) and T2 may never
+# match outside the 5 estate subscription ids - enforced STRUCTURALLY inside
+# is_resource_in_owned_rg and is_singleton_owned via is_estate_subscription, not left to caller
+# discipline alone. T2's type list is exact-match only (case-insensitive on the type string,
+# exact on the value - same discipline SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST already uses) and
+# grows only by reviewed PR with a dated justification.
+# ---------------------------------------------------------------------------
+
+# is_mg_owned "<mg>" - T1(a). True if <mg> is a member of MG_SCOPES (the full, hardcoded
+# globaris tree this estate owns - see MG_SCOPES's own comment above). Deliberately does NOT
+# consult mg_snapshot/mg_in_snapshot - existence and ownership are different questions; a caller
+# that also needs to know whether the MG currently EXISTS must check mg_in_snapshot separately
+# (every call site in this codebase already does, before it ever reaches an ownership question).
+is_mg_owned() {
+  local mg="${1:-}" m
+  for m in "${MG_SCOPES[@]}"; do
+    [ "$m" = "$mg" ] && return 0
+  done
+  return 1
+}
+
+# is_rg_owned "<rg-name>" - T1(b). The SAME test RG_SWEEP_QUERY encodes as a JMESPath filter
+# (contains(name,'globaris') || contains(name,'amba-monitoring')), re-expressed as a bash case so
+# a caller that already has a bare RG name in hand (rather than a fresh JMESPath list) can test
+# it directly. Kept in lock-step with RG_SWEEP_QUERY BY HAND - the same maintenance coupling that
+# constant's own comment already documents; if the naming convention ever changes, update both
+# together.
+is_rg_owned() {
+  case "${1:-}" in
+    *globaris*|*amba-monitoring*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# is_estate_subscription "<sub-id>" - true if <sub-id> is one of the 5 subscription IDs this
+# estate spans (teardown_subscriptions, above). Structural backing for the T1(c)/T2
+# anti-widening rule - never hardcodes a subscription ID (populated from the same
+# job-environment GitHub Secrets teardown_subscriptions already reads).
+is_estate_subscription() {
+  local target="${1:-}" s
+  for s in $(teardown_subscriptions); do
+    [ "$s" = "$target" ] && return 0
+  done
+  return 1
+}
+
+# is_resource_in_owned_rg "<arm-resource-id>" - T1(c). True if <arm-resource-id> both (i) names
+# a subscription that is one of the 5 estate subscriptions (is_estate_subscription - binds the
+# anti-widening rule structurally, not just by caller-loop discipline) and (ii) contains
+# "/resourceGroups/{rg}/" where {rg} satisfies is_rg_owned. Matches ADR-063 decision 6's literal
+# T1(c) wording ("any resource whose id contains /resourceGroups/{rg}/ where {rg} matches
+# RG_SWEEP_QUERY"). Literal "/resourceGroups/" segment match only (ARM's own canonical casing,
+# the casing every `az` list/show call in this codebase already returns ids in) - not a
+# case-insensitive scan, matching how the policyAssignmentId limb in is_owned_policy_object
+# above is also a literal-substring test, not a normalized one.
+is_resource_in_owned_rg() {
+  local id="${1:-}" sub rg
+  case "$id" in
+    /subscriptions/*/resourceGroups/*)
+      sub="${id#/subscriptions/}"
+      sub="${sub%%/*}"
+      is_estate_subscription "$sub" || return 1
+      rg="${id#*/resourceGroups/}"
+      rg="${rg%%/*}"
+      is_rg_owned "$rg"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# ESTATE_DECLARED_SINGLETON_TYPES - the T2 type list (ADR-063 decision 6). Exact-match only
+# (case-insensitive on the string, never a substring/wildcard) - grows only by reviewed PR with a
+# dated justification, mirroring SUBSCRIPTION_SCOPE_BENIGN_ALLOWLIST's own discipline.
+#   - Microsoft.Security/securityContacts: seeded 2026-07-23 (ADR-063 decision 7). The live
+#     object is always named "default" - pinned by the API's own `securityContactName` regex
+#     constraint (`^(default)$`, api-version 2023-12-01-preview) - regardless of what name this
+#     estate's Terraform configures. The name-only predicate could never match this object,
+#     which is exactly why FIX-4(i) and VERIFY 6e were certifying the subscription clean with it
+#     still live (ADR-063 decision 7).
+declare -ga ESTATE_DECLARED_SINGLETON_TYPES=("Microsoft.Security/securityContacts")
+
+# is_singleton_owned "<sub-id>" "<type>" - T2. True if <sub-id> is one of the 5 estate
+# subscriptions (is_estate_subscription) AND <type> exact-matches (case-insensitive) an entry in
+# ESTATE_DECLARED_SINGLETON_TYPES. The object's own NAME is NEVER consulted - callers must not
+# pass a name to this function and must not gate on one themselves; that is what distinguishes
+# this tier from T3.
+is_singleton_owned() {
+  local sub="${1:-}" type="${2:-}" type_lc want want_lc
+  is_estate_subscription "$sub" || return 1
+  type_lc="$(printf '%s' "$type" | tr '[:upper:]' '[:lower:]')"
+  for want in "${ESTATE_DECLARED_SINGLETON_TYPES[@]}"; do
+    want_lc="$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')"
+    [ "$type_lc" = "$want_lc" ] && return 0
+  done
+  return 1
+}
+
+# is_estate_owned - THE single dispatcher for the ADR-063 decision 6 three-tier predicate. Every
+# call site (the Phase-0 MG-scope sweep, FIX-1/FIX-2/FIX-4 in teardown-az-sweep.sh, VERIFY 6e/10
+# in teardown-verify.sh) goes through this one function, so none of them can independently drift
+# on what "owned" means. The tier is selected explicitly by the caller via its first argument,
+# because each tier's inputs are shaped differently (an MG name is not an RG name is not a
+# resource id is not a sub+type pair) - "one shared implementation" means one place where all
+# three tiers are defined and reachable under one name, not one call signature.
+#
+#   is_estate_owned --mg          "<mg-name>"                  T1(a)
+#   is_estate_owned --rg          "<rg-name>"                  T1(b)
+#   is_estate_owned --resource-id "<arm-resource-id>"           T1(c)
+#   is_estate_owned --singleton   "<sub-id>" "<type>"           T2
+#   is_estate_owned --name        "<name>" ["<assignment-id>"]  T3 (delegates to
+#                                                                    is_owned_policy_object,
+#                                                                    UNCHANGED from ADR-062)
+is_estate_owned() {
+  case "${1:-}" in
+    --mg)          is_mg_owned "${2:-}" ;;
+    --rg)          is_rg_owned "${2:-}" ;;
+    --resource-id) is_resource_in_owned_rg "${2:-}" ;;
+    --singleton)   is_singleton_owned "${2:-}" "${3:-}" ;;
+    --name)        is_owned_policy_object "${2:-}" "${3:-}" ;;
+    *)             return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Extension-resource sweep constants (teardown-completeness fix, 2026-07-23).
 # Shared by scripts/teardown-probe-extensions.sh (report-only) and the new
 # FIX-1..FIX-5 sub-steps in teardown-az-sweep.sh (report-and-delete), so the

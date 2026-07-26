@@ -31,6 +31,268 @@
 
 <!-- Newest at the top. -->
 
+### OQ-061: The CI service principal depends on at least five UNDECLARED out-of-band grants, including tenant-root User Access Administrator - the repo's identity model and the live tenant have drifted apart
+
+- **Raised:** 2026-07-23 (assembled while correcting ADR-063 decision 1; the individual pieces were
+  found in three separate places and none of them was visible from the others)
+- **Section:** 10 (Pipeline & Tooling) / identity; consolidates and outranks the grant-inventory
+  fragments in OQ-051 and OQ-059(a); extends OQ-008 and ADR-021; relates to ADR-041, ADR-063
+- **Blocking:** No for the next teardown - every grant below is currently LIVE, so the mechanism works.
+  **Yes for closing ADR-021 / OQ-008**, whose entire subject is that this principal holds least
+  privilege, which cannot be assessed while the real privilege set is not written down anywhere.
+- **Priority:** High. The specific item that makes it High is standing tenant-root User Access
+  Administrator on a CI service principal.
+
+**Question:**
+
+`bootstrap/identity.tf` is supposed to be the declaration of what `sp-alz-poc-cicd` can do. It is not.
+Verified live against the tenant on 2026-07-23, the principal additionally holds the following, none of
+it in any Terraform root:
+
+**ARM role assignments at Tenant Root Group** (listed at exact scope; the SP object id is
+`e630bdd0-...`, referenced abstractly here):
+
+| Role | Declared? | Origin |
+|---|---|---|
+| Management Group Contributor (`5d58bcaf-...`) | **Yes** | `bootstrap/identity.tf` row 1 |
+| User Access Administrator (`18d7d88d-...`) | **No** | ADR-041 bridge, applied 2026-07-16 |
+| Cost Management Contributor (`434105ed-...`) | **No** | ADR-041 bridge, applied 2026-07-16 |
+
+`bootstrap/identity.tf` declares User Access Administrator at **Globaris MG** only (row 3). The
+tenant-root copy is a strictly wider, undeclared duplicate. It carries `*/read` and
+`Microsoft.Authorization/*` across the entire tenant, which is the single widest standing privilege in
+this estate and is held by an unattended CI principal that authenticates from GitHub Actions.
+
+**Microsoft Graph app roles**, admin-consented out-of-band on 2026-07-08, recorded ONLY in a comment
+block at `platform/identity/providers.tf:11-17` and in no register, ADR or `.tf` resource:
+
+- `Policy.Read.All`
+- `Policy.ReadWrite.ConditionalAccess`
+- `Application.Read.All`
+
+These are directly contradicted by `bootstrap/identity.tf:39`, which states "No API permissions needed
+(all access is via ARM RBAC, not Graph)". Two files in the same repo assert incompatible things about
+the same principal, and the false one is the one in the file that is supposed to be authoritative. This
+is not academic: the ADR-063 draft pre-flight was built on `az ad sp show`, a Graph call that works only
+because of `Application.Read.All`, and the design was reviewed twice before anyone noticed it depended
+on a grant the bootstrap denies exists.
+
+**Also to confirm, not asserted:** `docs/preclearance/platform-identity.md:51` records two TEMP
+directory roles on this SP, Application Administrator and Groups Administrator, with an instruction to
+remove both after the apply. Whether that removal happened has not been verified in this pass. If they
+are still attached, the inventory is seven, not five.
+
+**Why this needs its own entry rather than staying distributed.** Each fragment currently lives
+somewhere that only makes sense if you already knew to look: the ARM bridges in ADR-041 and OQ-051, the
+Consumption one restated again in OQ-059(a), the Graph roles in a provider comment. No document
+anywhere states the principal's actual effective privilege. That is precisely the condition under which
+OQ-008's scope-down cannot be evaluated, and it is how a tenant-root User Access Administrator reached
+seven days past its stated time-box with, per OQ-051, no revocation owner.
+
+**Options being considered:**
+- **A (RECOMMENDED): one reconciliation pass that ends with every live grant either declared in
+  Terraform or revoked, and nothing in between.** For each of the five, decide deliberately: does the
+  mechanism need it, and if so at what scope. The expected outcome, to be confirmed rather than assumed:
+  tenant-root User Access Administrator is REVOKED (its declared Globaris-MG sibling covers everything
+  the estate roots actually do, and ADR-063's corrected role tables show the MG-scope sweep does not
+  need it); Cost Management Contributor is replaced by the narrower standing row in OQ-059(a) option A;
+  the three Graph app roles are either declared with `azuread_app_role_assignment` resources or
+  formally accepted as an out-of-band prerequisite, and `bootstrap/identity.tf:39` is corrected either
+  way because it is false as written. Cost: one focused change plus a revocation with a named owner.
+- **B: declare everything as-is in Terraform, revoke nothing.** Fixes the drift and the false comment,
+  fixes nothing about least privilege. Makes standing tenant-root User Access Administrator an official
+  design position, which should only happen deliberately and is not recommended.
+- **C: accept as-is, write the inventory into the teardown and deploy pre-clearance docs, revisit after
+  the rebuild campaign.** Lowest effort, keeps the current mechanism untouched, and is the honest choice
+  if the campaign cannot absorb an identity change right now. It still fixes the worst part, which is
+  that nobody can see the real privilege set. `bootstrap/identity.tf:39` must be corrected under this
+  option too.
+- **Recommended default: A, with C as the immediate step if the rebuild campaign is mid-flight.** The
+  inventory table above is written so it can be pasted into a pre-clearance doc today under either.
+
+**Sub-item (b): the register itself has the same failure, and it is cheap to fix.** OQ-041 is cited by
+ADR-041 (three times) and by OQ-051 as "the OQ-041 recommendation", and **no OQ-041 entry was ever
+written into this file**. OQ-044 and OQ-045 are the same: referenced across `DECISIONS.md` and the
+design docs, absent from the register. So the durable disposition of the Cost Management grant has been
+notionally open for a week while being invisible in the one file whose job is to list open items. This
+belongs with (a) because it is the same root cause in the records plane: decisions and grants made
+out-of-band and recorded only in prose next to the thing they affected. Fix: write the missing entries
+or explicitly retire the numbers, and treat a reference to a non-existent OQ as a review defect.
+
+---
+
+### OQ-060: A failed Phase-0 DISARM does not stop `az-sweep` or `verify`, so a `target=all` teardown can destroy the whole estate by raw REST with zero `terraform destroy` and still report green
+
+- **Raised:** 2026-07-23 (found during the ADR-063 code review; independent of ADR-063's own subject)
+- **Section:** 10 (Pipeline & Tooling) / teardown; relates to ADR-054 (four-phase shape), ADR-058
+  (independent QA gate), ADR-063 decision 9
+- **Blocking:** No for design, YES for the next `target=all` dispatch if DISARM is at any risk of
+  failing. ADR-063 decision 9 rules on the main limb; this entry exists because the current behaviour
+  was DELIBERATE, so reversing it is a decision the owner should see, and because the `verify` half is
+  genuinely arguable.
+- **Priority:** High
+
+**Question:**
+
+In `.github/workflows/teardown.yml`, all eleven Phase-1 root jobs gate on
+`needs.disarm.result == 'success' || needs.disarm.result == 'skipped'`, so every one of them skips when
+Phase 0 DISARM fails. `az-sweep` and `verify` do not. Both list `disarm` in `needs`, but their `if:`
+conditions check only `needs.guard.result == 'success'` and `inputs.target == 'all'`, and the
+`az-sweep` job's own header comment states the intent outright: "`needs` lists every Phase 1 job for
+ORDERING only (run after them) - `!cancelled()` means none of their individual outcomes gates this job,
+only guard's confirm check does."
+
+That was a reasonable ADR-054-era choice while `az-sweep` was purely a remnant-catch for a *failed
+root*. It is not reasonable for a failed *DISARM*, and the failure mode is severe:
+
+- On `target=all` with DISARM failed, all eleven Phase-1 jobs skip and `az-sweep` runs alone. The run
+  silently degrades from `terraform destroy` to raw REST deletes. The estate is destroyed and **every
+  root's tfstate is left describing resources that no longer exist**, which is the precondition for
+  the requires-import collision class that has now voided two rebuilds.
+- `verify` then runs, checks live Azure, finds live Azure genuinely empty, and reports the teardown
+  clean. The run goes green having done the one thing the four-phase design exists to prevent.
+- Post-ADR-063 there is a second harm: DISARM is now the only place the MG-scope extension sweep runs.
+  A failed DISARM means owned extension objects are still attached to MG scopes that `az-sweep`'s own
+  `remove_mg_hierarchy` loop may then delete, which is exactly the G-1 one-way door.
+- DINE policy assignments may also still be armed, so `az-sweep`'s RG deletes race live remediation.
+
+**Options being considered:**
+- A (RECOMMENDED, and ruled in ADR-063 decision 9 for the `az-sweep` half): add
+  `&& (needs.disarm.result == 'success' || needs.disarm.result == 'skipped')` to both jobs, matching
+  the Phase-1 form exactly. The `skipped` limb keeps single-target dispatches working, where `disarm`
+  does not run at all. Phase-1 root outcomes stay ungated, so `az-sweep` keeps its real job of
+  catching remnants from a failed root. Cost: a failed DISARM now produces a run that deletes nothing,
+  which is the correct outcome and costs one re-dispatch.
+- B: gate `az-sweep` on DISARM as in A, but let `verify` still run read-only after a failed DISARM,
+  for its diagnostic value - VERIFY is the best inventory of live estate state the pipeline produces,
+  and suppressing it on the exact runs that went wrong is arguably backwards. Requires VERIFY to print
+  loudly that the run ABORTED and that a clean result means nothing was destroyed, so a green VERIFY
+  can never be misread as "teardown succeeded". This is the only genuinely open half of the question.
+- C: leave both ungated and rely on the operator reading the run summary. Rejected on its face: three
+  incident classes in this project have come from a green run that did not do what its name implied.
+
+**Recommended default (architect):** **A for `az-sweep`, and B for `verify`** - gate the destructive job
+hard, keep the read-only inventory but make it self-labelling. If the wording work in B is not wanted,
+take A for both; that is strictly safe and merely less informative.
+
+**RESOLVED 2026-07-23 (owner): option A for BOTH jobs. The architect's recommendation was overruled on
+the `verify` half.**
+
+The architect recommended A for `az-sweep` and B for `verify`, and DevSecOps independently recommended
+the same split. The owner ruled that both jobs are gated on `needs.disarm.result`, with no exception
+for the read-only pass. Recorded as ADR-063 decision **9a**, an explicit owner override of decision 9.
+
+The overruled argument is preserved so the trade-off is not relitigated from a blank slate: VERIFY is
+the most complete inventory of live estate state the pipeline produces, and gating it means it is
+suppressed on exactly the runs that went wrong. **What that costs, plainly: after a failed DISARM the
+operator gets no VERIFY output at all, in precisely the runs where the estate is most likely to be in a
+bad or half-known state.** Diagnosing such a run now requires a separate read-only probe
+(`teardown-probe-extensions.sh`) or a manual dispatch rather than reading the failed run's own VERIFY
+section.
+
+What the override buys is one uniform rule for every job downstream of Phase 0, no conditional-wording
+contract for a future change to get wrong, and no path by which an aborted run can emit a
+green-looking VERIFY. Three incident classes in this project have come from a green run that did not do
+what its name implied, and the owner weighted that history above diagnostic reach.
+
+DevSecOps is implementing the override. If the loss of post-failure visibility proves painful in
+practice, the re-open is narrow and should be argued on evidence: a separately dispatchable read-only
+VERIFY, not a relaxation of the gate.
+
+---
+
+### OQ-059: Where does the Consumption-plane grant live durably, and who owns the MG-scope `Microsoft.Insights` delete gap?
+
+- **Raised:** 2026-07-23 (ADR-063, Phase-0 MG-scope extension sweep)
+- **Section:** 10 (Pipeline & Tooling) / teardown; relates to ADR-021, ADR-041, ADR-054, ADR-063;
+  cross-references OQ-041 and OQ-051
+- **Blocking:** No for the next teardown. ADR-063 decision 1a establishes that the Phase-0 sweep works
+  TODAY with zero bootstrap change, because the ADR-041 bridge grant is live. **(a) is now recommended
+  for RESOLUTION rather than continued parking** - see the 2026-07-23 update below.
+- **Priority:** Medium for (a), Low for (b)
+- **Updated:** 2026-07-23 (code review of ADR-063; the decision 1b pre-flight was withdrawn and the
+  framing of (a) changed with it)
+
+**Question:**
+
+ADR-063 decision 1 resolved how `sp-alz-poc-cicd` is able to delete MG-scoped consumption budgets at
+all: not through any role in `bootstrap/identity.tf`, but through the ADR-041 bridge grant of
+`Cost Management Contributor` at Tenant Root Group, applied out-of-band on 2026-07-16. Two questions
+were left open by that ruling.
+
+> **RECORDS NOTE, 2026-07-23.** This question is not new. ADR-041 raised it and routed it to "OQ-041",
+> with the recommendation "a new bootstrap row at globaris MG scope, revoking the tenant-root temp"
+> (`DECISIONS.md`, ADR-041 decision text and follow-ups). OQ-051 then cites "the OQ-041
+> recommendation" as though it were a live entry. **There is no OQ-041 entry in this file. It was
+> never written.** The question has therefore been open, referenced by two ADRs and one OQ, and
+> invisible in its own register for a week. OQ-059(a) below IS that question, and it is the single
+> live home for it from now on; treat any future reference to OQ-041 as pointing here. The same orphan
+> pattern exists for OQ-044 and OQ-045; all three are now tracked together in **OQ-061 sub-item (b)**,
+> alongside the undeclared-grant inventory they are the records-plane symptom of.
+
+**(a) Where should the Consumption-plane grant live permanently?** Today it is an out-of-band assignment
+that no Terraform root declares, which means nothing in the repo would stop it being revoked, and
+nothing would warn that revoking it breaks teardown. **This is now a hard dependency of the teardown
+mechanism, and OQ-051 must not be actioned without first landing an answer here.**
+
+- A: add a standing `bootstrap/identity.tf` row granting `Cost Management Contributor` at the
+  **globaris MG**. Sufficient for all three MG budgets (globaris and its descendants); subscription
+  budgets are already covered by Contributor. Inherits the BOOTSTRAP-ORDERING dance of the existing
+  MG-scoped rows, and dies with the subtree, which is what makes the ADR-063 G-1 ordering invariant
+  load-bearing rather than merely tidy.
+- B: define a custom role carrying only `Microsoft.Consumption/budgets/{read,write,delete}` and assign
+  that instead. Tighter, but adds a custom-role definition to maintain and to tear down.
+- C: keep the ADR-041 tenant-root bridge permanently and document it as a standing grant.
+- Recommended default: **A**, and it should be RESOLVED AND LANDED now rather than parked again.
+
+**Why the framing changed on 2026-07-23.** The original recommendation added "with the ADR-063 decision
+1b pre-flight assertion retained regardless of which option lands". That was false as written: the
+pre-flight was pinned to Tenant Root Group, so **landing option A would have made it hard-fail every
+dispatch** while the sweep itself worked correctly. The check and the recommended fix were mutually
+exclusive and nobody noticed, because the check was written against the grant's current location rather
+than against the capability. ADR-063 decision 1b has been re-ruled and the pre-flight rebuilt as an
+effective-permissions assertion at MG scope, which is indifferent to where the grant sits. Two
+consequences for this question:
+
+- **The pre-flight no longer papers over this question.** Whichever of A, B or C lands - and whether
+  the grant arrives at tenant root, at globaris, via a custom role or via a group - the 1b(iv) probe
+  reads the SP's own effective actions at each MG scope and answers correctly. It does not have to be
+  rewritten when this resolves, which is exactly what disqualified both earlier designs.
+- **So resolving this is no longer urgent for teardown mechanics, but it IS still the right thing to
+  do,** because the mechanism should not depend on an undeclared out-of-band grant that nothing in the
+  repo protects and whose revocation is tracked as an unowned action in OQ-051.
+
+Scope correction while resolving: the corrected ADR-063 decision-1 tables show this grant is needed for
+**one** of the three Phase-0 MG-scope classes, not all three. MG-scope policy exemptions are already
+covered twice over by standing `bootstrap/identity.tf` rows (Resource Policy Contributor's
+`Microsoft.Authorization/policyexemptions/*` and User Access Administrator's `Microsoft.Authorization/*`,
+both at globaris). Only the Consumption budget class needs anything new, which makes option A a
+one-row change with a well-bounded justification.
+
+Verified while re-ruling, and recorded here because it is reusable: ARM's effective-permissions API
+(`GET {scope}/providers/Microsoft.Authorization/permissions?api-version=2022-04-01`) **does work at
+management-group scope**, returning HTTP 200 and the caller's own effective `actions`/`notActions`,
+even though Microsoft documents only `List For Resource` and `List For Resource Group` for that
+operation group. Confirmed live against this tenant on 2026-07-23. Because it is undocumented at that
+scope, ADR-063 1b(iv) requires a failed call to be labelled distinctly and never treated as
+"capability absent".
+
+**(b) Who owns the MG-scope `Microsoft.Insights/diagnosticSettings/delete` gap?** ADR-063 decision 1d
+established that no role this SP holds can DELETE a diagnostic setting at MG scope, although it can
+list one (User Access Administrator's `*/read`). The estate declares no MG-scope diagnostic setting
+today, verified by grep across every root, so the gap is latent rather than live.
+
+- A: accept the gap. Keep discovery in place so a future one is always SEEN, and make the delete fail
+  loud with wording that names this as a known design gap rather than a dead token, so it is never
+  misread as the auth-fail-loud signal.
+- B: grant `Monitoring Contributor` at globaris pre-emptively, so the class is deletable the day
+  something declares one.
+- Recommended default: **A**, on the grounds that the estate declares none and a pre-emptive grant
+  widens the SP for a resource class that does not exist. Revisit the moment any root declares an
+  MG-scope diagnostic setting - and note that such a root must not merge without B landing first.
+
+---
+
 ### OQ-058: Post-rebuild follow-ons parked out of the ADR-062 exemption ruling
 
 - **Raised:** 2026-07-21 (ADR-062, subscription-scoped exemption survivor)
@@ -53,6 +315,16 @@ survivor, which already exists without metadata, and the predicate must therefor
 It also touches `.tf` in roots that are about to apply, which is why it is parked rather than bundled.
 - Recommended default: **do it, after the rebuild is green**, as a small cross-root change covering all
   8 exemption resources, with the name limb retained as a fallback rather than removed.
+
+**ARCHITECT NOTE 2026-07-23 (ADR-063, applies to (a) only):** the recommendation above STANDS
+unchanged - do the metadata stamp after the rebuild is green, as a fallback limb, never as a
+dependency. What must be corrected is its GENERALITY. ADR-063 decision 6 replaced the name-first
+ownership test with containment-first, and while ruling on it the following became clear: a metadata
+stamp cannot be the structural answer, because `Microsoft.Consumption/budgets`,
+`Microsoft.Insights/diagnosticSettings` and the `Microsoft.Security` singletons expose no metadata
+object and no tags surface at all. That is three of the five extension classes now in play. The general
+mechanism is T1 containment (an object is owned when its host scope is owned); metadata stamping remains
+a worthwhile policy-plane nicety for the 8 exemption resources and nothing more.
 
 **(b) Is there a discovery mechanism for the cost and monitor planes?** ADR-062 decision 5 states
 plainly that ARG has no table for Consumption budgets, CostManagement exports, CostManagement

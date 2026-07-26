@@ -106,6 +106,32 @@
 # any FUTURE blob-delete code must honour, and scripts/teardown-probe-state.sh for the read-only
 # detection half this fix DOES add (OQ-053 option A(ii)).
 #
+# AMENDED a seventh time 2026-07-23 (ADR-063, the Phase-0 MG-scope sweep architect ruling that
+# followed the teardown-completeness extension sweep above): four changes.
+#   - New step 2-pre (decision 5): resource-scoped diagnostic settings, swept AFTER step 1 and
+#     BEFORE step 2 submits its --no-wait RG deletes - this class had NO sweep anywhere before
+#     today (RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION was referenced only by the read-only probe,
+#     scripts/teardown-probe-extensions.sh, whose enumeration shape this step reuses). Root
+#     cause: diag-aa-to-law (platform/management/main.tf:493) is a resourceUri-keyed extension
+#     resource that does NOT cascade away when its host resource is deleted (the same G-1
+#     invariant as every other class in this fix) - it is what the 2026-07-23 rebuild collided on
+#     at Step 2 ("already exists - needs to be imported").
+#   - FIX-1 (step 4-pre) is DEMOTED from primary mechanism to a last-chance gate (decision 4): the
+#     Phase-0 sweep in teardown-disarm.sh is now the primary MG-scope sweep, reachable in BOTH
+#     teardown modes (FIX-1 here is reachable only when remove_mg_hierarchy=true AND, on
+#     mode=terraform, only after Phase 1 has already deleted the MGs it would need to read - see
+#     ADR-063's own root-cause account). Any survivor FIX-1 still finds now ABORTS the entire step
+#     4 MG delete loop under the TEARDOWN-P0MG-SURVIVOR label and leaves the MG tree standing,
+#     rather than warn-and-continue - see FIX-1's own comment below.
+#   - FIX-1, FIX-2 and FIX-4 are rewired onto the shared T1/T2/T3 is_estate_owned predicate
+#     (ADR-063 decision 6, teardown-common.sh) in place of their prior per-row name filters - see
+#     each site's own comment for what changed and why the old filter is now redundant rather
+#     than removed for its own sake.
+#   - FIX-4(i)'s stale comment claiming the securityContacts API "allows" this estate's custom
+#     name is corrected (ADR-063 decision 7): it does not - the live object is always named
+#     "default", pinned by the API's own name-pattern constraint, regardless of what this
+#     estate's Terraform configures.
+#
 # FIX-7 note (documentation only, NO teardown code change - this is a RERUN-side guard for
 # platform/identity, not a teardown responsibility): on any rerun after a partial teardown or a
 # state-gone az-sweep, platform/identity MUST probe whether an Azure AD Domain Services managed
@@ -162,10 +188,37 @@ source "${script_dir}/teardown-common.sh"
 
 REMOVE_MG_HIERARCHY="${REMOVE_MG_HIERARCHY:-false}"
 
-# ARM_BASE is sourced from teardown-common.sh (promoted there 2026-07-23,
-# teardown-phase0-mg-sweep follow-up) - no local declaration here. Every step below (4-pre,
-# 6a, 6d, 6e, 6f) shares that one value, so this script and teardown-disarm.sh's own MG-scope
-# sweep (which reuses the same constant) can never drift on it.
+# ARM_BASE is sourced from teardown-common.sh (single shared declaration) - no local
+# declaration here. Every step below (4-pre, 6a, 6d, 6e, 6f) shares that one value.
+
+# _is_authz_denied_design_gap "<error text>" - precise RBAC-denial discriminator used ONLY at the
+# MG-scope diagnostic-setting DELETE failure branch in step 4-pre below (ADR-063 decision 1d /
+# OQ-059(b)). IDENTICAL function body to the copy in teardown-disarm.sh (Phase 0's mirror of this
+# same check) - the two must never drift, so if this is ever edited, edit both. Matches ONLY the
+# literal ARM error code `AuthorizationFailed` and the two RBAC-denial phrases Microsoft's own RBAC
+# troubleshooting reference shows verbatim
+# (learn.microsoft.com/en-us/azure/role-based-access-control/troubleshooting, "Symptom - Unable to
+# assign a role" / "Symptom - Authorization failed", fetched live 2026-07-23): "...does not have
+# authorization or an ABAC condition not fulfilled to perform action '...' ... please refresh your
+# credentials." and the short form "...(code: AuthorizationFailed)". Deliberately does NOT match
+# bare `403` or bare `Forbidden` - that is what made the previous version of this check collide
+# with `is_auth_error` (which matches bare `credential`/`401`/`403`), since Azure's own
+# AuthorizationFailed message always ends with the "refresh your credentials" boilerplate.
+# `AuthorizationFailed` is ARM's AUTHORIZATION-layer error code, returned only for an authenticated
+# principal that lacks the needed action at the target scope; a dead/expired token fails at the
+# separate AUTHENTICATION layer (AAD/Entra token validation - AADSTS7xxxxx,
+# ExpiredAuthenticationToken, "valid time range", "not within") BEFORE ARM ever evaluates
+# authorization, so it structurally cannot produce this code or either phrase - the two shapes are
+# mutually exclusive by Azure's own request pipeline, not just empirically distinct today. This is
+# why checking this FIRST (ahead of the broad `is_auth_error`) at its one call site is safe and
+# does not reopen the codebase's general auth-fail-loud rule: nothing a dead token can say matches
+# this pattern. `is_auth_error` itself is untouched and keeps its normal broad role everywhere
+# else, including as the SECOND check at that same call site. Proved against realistic verbatim
+# strings in a standalone harness before being wired in (see the WORKLOG entry for this fix
+# round).
+_is_authz_denied_design_gap() {
+  printf '%s' "${1:-}" | grep -qiE 'AuthorizationFailed|does not have authorization|ABAC condition'
+}
 
 mapfile -t SUBS < <(teardown_subscriptions)
 if [ "${#SUBS[@]}" -eq 0 ]; then
@@ -207,6 +260,88 @@ for sub in "${SUBS[@]}"; do
       dbx_managed_rgs+=("$managed_rg_name")
       dbx_managed_rg_subs+=("$sub")
     fi
+  done
+done
+
+# --- 2-pre. Resource-scoped diagnostic settings, swept BEFORE step 2 below submits its
+#     --no-wait RG deletes (ADR-063 decision 5, 2026-07-23). This class had no sweep anywhere in
+#     this codebase before today - RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION was referenced only
+#     by the read-only probe (scripts/teardown-probe-extensions.sh), whose enumeration shape this
+#     step reuses (discover_live_rgs -> az resource list per RG -> diagnosticSettings GET per
+#     resource id). G-1 (ADR-063): a resource-scoped diagnostic setting is an extension object
+#     keyed to its host resource's URI, and does NOT reliably cascade away just because the host
+#     resource is later deleted by step 2's RG delete - the live proof is diag-aa-to-law
+#     (platform/management/main.tf:493, on the platform automation account inside
+#     rg-management-globaris-poc), which is what the 2026-07-23 rebuild collided on at Step 2
+#     ("already exists - needs to be imported") despite both the RG and the automation account
+#     having been deleted by an earlier teardown. Ownership is T1(c) containment
+#     (is_estate_owned --resource-id, teardown-common.sh, ADR-063 decision 6): the resource lives
+#     inside an RG discover_live_rgs already filtered to RG_SWEEP_QUERY, so every row found here
+#     is owned by definition - called explicitly below anyway (never hardcoded true) so this site
+#     can never silently drift from the shared predicate.
+#
+#     No separate Phase 3 VERIFY step exists for this class (by the time VERIFY runs, the
+#     resource and its RG are expected to be fully gone via step 2's own cascade, and there is
+#     no other class-specific completion gate for it) - this delete's own confirm-GET is
+#     therefore the ONLY completion check this class will ever get, same PRIMARY-evidence
+#     rationale FIX-1's MG-scope confirm-GETs already use (confirm_gone_or_fail_primary,
+#     teardown-common.sh).
+#
+#     List-call failure handling differs from every other list in this script: a resource-scoped
+#     diagnostic-settings GET can legitimately 404/BadRequest for a resource TYPE that does not
+#     support diagnostic settings at all (most do; some do not, per the probe's own established
+#     precedent) - only an auth-shaped failure fails loud here; any other failure is expected
+#     noise and is skipped, not treated as "no diagnostic settings" for a class that never existed
+#     at all.
+echo "== Phase 2 step 2-pre: resource-scoped diagnostic settings (before RG deletes are submitted) =="
+for sub in "${SUBS[@]}"; do
+  if ! discover_live_rgs rg2pre_names_out "$sub"; then
+    echo "::error::RG list failed for subscription ${sub} while discovering resource-scoped diagnostic-settings targets - a failed list is never read as 'no RGs' (section 9.4): ${AZ_RUN_STDERR}"
+    exit 1
+  fi
+  # shellcheck disable=SC2154  # rg2pre_names_out is assigned indirectly by az_run's printf -v
+  mapfile -t rg2pre_names <<< "$rg2pre_names_out"
+  for rg in "${rg2pre_names[@]:-}"; do
+    [ -z "$rg" ] && continue
+    if ! az_run rg2pre_resource_ids_out resource list --resource-group "$rg" --subscription "$sub" --query "[].id" -o tsv; then
+      echo "::error::resource list failed for RG ${rg} (sub ${sub}) while enumerating resources for the resource-scoped diagnostic-settings sweep: ${AZ_RUN_STDERR}"
+      exit 1
+    fi
+    # shellcheck disable=SC2154  # rg2pre_resource_ids_out is assigned indirectly by az_run's printf -v
+    mapfile -t rg2pre_resource_ids <<< "$rg2pre_resource_ids_out"
+    for res_id in "${rg2pre_resource_ids[@]:-}"; do
+      [ -z "$res_id" ] && continue
+      if ! az_run rg2pre_diag_names_out rest --method get \
+          --url "${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}" \
+          --query "value[].name" -o tsv; then
+        if is_auth_error "$AZ_RUN_STDERR"; then
+          echo "::error::resource-scoped diagnostic-settings list failed for ${res_id} with an auth/transport error: ${AZ_RUN_STDERR}"
+          exit 1
+        fi
+        # Expected noise for a resource type that does not support diagnostic settings at all -
+        # not a class that "has none"; skip this resource, not the whole sweep.
+        continue
+      fi
+      # shellcheck disable=SC2154  # rg2pre_diag_names_out is assigned indirectly by az_run's printf -v
+      mapfile -t rg2pre_diag_names <<< "$rg2pre_diag_names_out"
+      for name in "${rg2pre_diag_names[@]:-}"; do
+        [ -z "$name" ] && continue
+        if ! is_estate_owned --resource-id "$res_id"; then
+          # Structurally unreachable (res_id came from a discover_live_rgs-filtered RG) - kept
+          # as a hard stop rather than a silent skip, same defensive posture as every other
+          # "should be impossible" branch this fix adds.
+          echo "::error::resource-scoped diagnostic setting ${name} on ${res_id} did not classify as estate-owned by is_estate_owned - this should be structurally impossible for a resource inside an RG_SWEEP_QUERY-matched RG. Failing loud rather than silently skipping."
+          exit 1
+        fi
+        echo "  Deleting resource-scoped diagnostic setting ${name} (resource ${res_id})"
+        rg2pre_diag_url="${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings/${name}?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}"
+        if ! rg2pre_diag_del_out="$(az rest --method delete --url "$rg2pre_diag_url" --output none 2>&1)"; then
+          echo "::error::resource-scoped diagnostic setting delete for ${name} (resource ${res_id}) failed: ${rg2pre_diag_del_out}"
+          exit 1
+        fi
+        confirm_gone_or_fail_primary "resource-scoped diagnostic setting ${name} (resource ${res_id})" "$rg2pre_diag_url" || exit 1
+      done
+    done
   done
 done
 
@@ -342,110 +477,162 @@ fi
 if [ "$REMOVE_MG_HIERARCHY" != "true" ]; then
   echo "  Skipped (remove_mg_hierarchy=false) - the MG tree is left in place. (MG-existence snapshot above is still loaded for step 6a's MG-scope budget sweep.)"
 else
-  # --- 4-pre (FIX-1, teardown-completeness extension sweep, 2026-07-23). Sweeps every
-  #     MG-scope EXTENSION resource - budgets, diagnostic settings, policy exemptions - across
-  #     every MG still present in the snapshot, STRICTLY BEFORE the delete loop below issues a
-  #     single `az account management-group delete`. Root cause this closes: an extension
-  #     resource's ARM ID is formed by appending its own provider path onto WHATEVER scope it
-  #     was attached to (an MG here) - ARM does NOT cascade-delete an extension resource when
-  #     its host scope is deleted, so an orphaned MG-scoped exemption/budget/diagnostic-setting
-  #     then COLLIDES the next time Step 1 (a later run) recreates an MG of the same name. This
-  #     is a FULL sweep-all-MGs-first pass (not interleaved with the delete loop below) - that
-  #     still satisfies "strictly before each delete" (every sweep call in this block completes
-  #     before ANY `management-group delete` call runs) while leaving the tested delete loop's
-  #     own body untouched.
+  # --- 4-pre (FIX-1, teardown-completeness extension sweep, 2026-07-23; DEMOTED to a
+  #     last-chance gate by ADR-063 decision 4, 2026-07-23). Sweeps every MG-scope EXTENSION
+  #     resource - budgets, diagnostic settings, policy exemptions - across every MG still
+  #     present in the snapshot, STRICTLY BEFORE the delete loop below issues a single
+  #     `az account management-group delete`. Root cause this closes: an extension resource's
+  #     ARM ID is formed by appending its own provider path onto WHATEVER scope it was attached
+  #     to (an MG here) - ARM does NOT cascade-delete an extension resource when its host scope
+  #     is deleted, so an orphaned MG-scoped exemption/budget/diagnostic-setting then COLLIDES
+  #     the next time Step 1 (a later run) recreates an MG of the same name.
   #
-  #     Same conventions as every other step in this script: az_run for any list whose stdout
-  #     feeds a compare/mapfile (Finding #2), is_auth_error auth-fail-loud on every non-zero
-  #     list (an MG present in the snapshot can never legitimately fail a read at its own scope -
-  #     same section 9.4 boundary VERIFY 1 already applies), idempotent-absent-is-success on
-  #     every delete (is_owned_policy_object / is_globaris_owned decide the DELETE, not the
-  #     LIST's success/failure).
+  #     NO LONGER THE PRIMARY MECHANISM (ADR-063 decision 4): the Phase-0 sweep in
+  #     teardown-disarm.sh now runs this same sweep, reachable in BOTH teardown modes with every
+  #     MG-scope grant still bound, before Phase 1/2 touch anything - see that script's own
+  #     comment for why it is the only reachable, authorised placement. On a healthy run this
+  #     block should find NOTHING (Phase 0 already swept it), so it is now a cheap remnant-catch,
+  #     not the mechanism this fix depends on.
   #
-  #     NOTE added 2026-07-23 (teardown-phase0-mg-sweep fix): teardown-disarm.sh (Phase 0) now
-  #     carries its own copy of this same sweep, run BEFORE any MG is deleted in either mode -
-  #     see that script's fourth AMENDED header comment for the full root-cause. The `disarm`
-  #     job in .github/workflows/teardown.yml gates only on `inputs.target == 'all'`, with no
-  #     `inputs.mode` check, so it runs first in BOTH mode=terraform and mode=az-sweep. That
-  #     makes THIS block (4-pre) a harmless remnant-catch no-op in both modes now, not only on
-  #     the mode=terraform path - every MG-scope extension object it would have found here was
-  #     already swept by teardown-disarm.sh earlier in the same run. Left in place deliberately
-  #     as a second-line backstop (a re-dispatch with `target=platform/management-groups` only,
-  #     or any future change that lets Phase 2 run without Phase 0 having run first, would still
-  #     be covered) - not removed, not weakened.
-  echo "== Phase 2 step 4-pre: MG-scope extension sweep (budgets, diagnostic settings, policy exemptions) - before any MG delete (FIX-1) =="
+  #     LAST-CHANCE GATE, NOT warn-and-continue (ADR-063 decision 4): everywhere else in this
+  #     script, "the next run retries idempotently" justifies a warning and a continue. That
+  #     justification is VOID here specifically, because THIS SAME RUN is about to delete the MG
+  #     scope that makes the retry possible (the delete loop immediately below). So ANY survivor
+  #     found in this block - a list failure, a delete failure, or a still-live confirm-GET -
+  #     now ABORTS THE ENTIRE step 4 MG delete loop under the distinct TEARDOWN-P0MG-SURVIVOR
+  #     label and leaves the MG tree standing, rather than deleting a host scope that still has
+  #     an owned extension object attached (G-1's one-way door). Because Phase 0 gates every
+  #     downstream job (`needs: disarm`), reaching this block at all already means Phase 0
+  #     succeeded - so a survivor found HERE is a genuinely anomalous, late-discovered condition
+  #     (a race, a remediation policy, replication lag), not the expected common case, and
+  #     leaving the tree standing for one idempotent re-dispatch (ADR-054 point 8) is a small
+  #     price against permanently losing the ability to ever see the survivor again.
+  #
+  #     OWNERSHIP (ADR-063 decision 6): every object found at any MG in MG_SCOPES is owned by
+  #     T1(a) containment (is_estate_owned --mg, teardown-common.sh) - the MG itself is fully
+  #     estate-owned, so anything living on it is owned regardless of its own name. The prior
+  #     per-row name filters (contains(name,'globaris') for budgets, is_globaris_owned for
+  #     diagnostic settings, is_owned_policy_object for exemptions) are REMOVED - they were
+  #     redundant at best (T1 containment already implies ownership) and were part of what let
+  #     securityContacts/default-shaped misclassifications happen elsewhere (ADR-063 decision 7).
+  #
+  #     Same list/delete conventions as every other step in this script otherwise: az_run for any
+  #     list whose stdout feeds a compare/mapfile (Finding #2), is_auth_error classification,
+  #     confirm_gone_or_fail_primary after every delete (no separate Phase 3 VERIFY step exists
+  #     for MG scope - see that function's own comment, teardown-common.sh).
+  echo "== Phase 2 step 4-pre: MG-scope extension LAST-CHANCE GATE (budgets, diagnostic settings, policy exemptions) - before any MG delete (FIX-1, demoted by ADR-063 decision 4) =="
   for mg in "${MG_DELETE_ORDER[@]}"; do
     if ! mg_in_snapshot "$mg"; then
       echo "  MG ${mg}: already gone (absent from the snapshot) - nothing to sweep."
       continue
     fi
+    if ! is_estate_owned --mg "$mg"; then
+      echo "::error::TEARDOWN-P0MG-SURVIVOR: step 4-pre: MG ${mg} did not classify as estate-owned by is_estate_owned - structurally impossible for a member of MG_DELETE_ORDER (a permutation of MG_SCOPES). Aborting the MG delete loop rather than proceeding on an unexpected classification."
+      exit 1
+    fi
     mg_scope="$(mg_scope_path "$mg")"
 
-    # Budgets (Microsoft.Consumption/budgets, BUDGETS_API_VERSION).
+    # Budgets (Microsoft.Consumption/budgets, BUDGETS_API_VERSION). No server-side name filter
+    # (ADR-063 decision 6) - T1(a) containment already owns every row found at this MG.
     if ! az_run mg_budget_names_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
-        --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
+        --query "value[].name" -o tsv; then
       echo "::error::MG-scope budget list failed for MG ${mg} - a failed list is never read as 'no budgets' (section 9.4): ${AZ_RUN_STDERR}"
       exit 1
     fi
     # shellcheck disable=SC2154  # mg_budget_names_out is assigned indirectly by az_run's printf -v
-    IFS=',' read -ra mg_budget_names <<< "$mg_budget_names_out"
+    mapfile -t mg_budget_names <<< "$mg_budget_names_out"
     for name in "${mg_budget_names[@]:-}"; do
       [ -z "$name" ] && continue
       echo "  Deleting MG-scope budget ${name} (MG ${mg})"
       mg_budget_url="${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets/${name}?api-version=${BUDGETS_API_VERSION}"
       if ! mg_budget_del_out="$(az rest --method delete --url "$mg_budget_url" --output none 2>&1)"; then
-        if is_auth_error "$mg_budget_del_out"; then
-          echo "::error::MG-scope budget delete for ${name} (MG ${mg}) failed with an auth/transport error: ${mg_budget_del_out}"
-          exit 1
-        fi
-        echo "  ::warning::MG-scope budget delete for ${name} (MG ${mg}) failed or already gone (continuing): ${mg_budget_del_out}"
-      else
-        # PRIMARY-pattern confirm-GET (code-review BLOCK-2 fix, 2026-07-23): this scope has no
-        # separate Phase 3 VERIFY step (MG-scope objects are 403-shadowed once their MG is
-        # deleted) - this confirm-GET IS the completion check, run here while the MG still
-        # exists. See confirm_gone_or_fail_primary's own comment (teardown-common.sh).
-        confirm_gone_or_fail_primary "MG-scope budget ${name} (MG ${mg})" "$mg_budget_url" || exit 1
+        echo "::error::TEARDOWN-P0MG-SURVIVOR: MG-scope budget delete for ${name} (MG ${mg}) failed - still present at this last-chance gate; aborting the MG delete loop rather than deleting a host scope with an owned extension object still attached (ADR-063 G-1): ${mg_budget_del_out}"
+        exit 1
       fi
+      # PRIMARY-pattern confirm-GET (code-review BLOCK-2 fix, 2026-07-23): this scope has no
+      # separate Phase 3 VERIFY step (MG-scope objects are 403-shadowed once their MG is
+      # deleted) - this confirm-GET IS the completion check, run here while the MG still
+      # exists. See confirm_gone_or_fail_primary's own comment (teardown-common.sh).
+      confirm_gone_or_fail_primary "TEARDOWN-P0MG-SURVIVOR: MG-scope budget ${name} (MG ${mg})" "$mg_budget_url" || exit 1
     done
 
     # Diagnostic settings (management-GROUP diagnostic settings op group, DISTINCT from the
-    # generic resource op group - MG_DIAGNOSTIC_SETTINGS_API_VERSION, see teardown-common.sh).
+    # generic resource op group - MG_DIAGNOSTIC_SETTINGS_API_VERSION, see teardown-common.sh). No
+    # per-row name filter (ADR-063 decision 6) - T1(a) containment already owns every row found.
+    # ADR-063 decision 1d: a 403 on the DELETE below is a KNOWN DESIGN GAP (OQ-059(b)), not the
+    # generic auth-fail-loud dead-token signal - see the dedicated branch below.
+    #
+    # AMENDED AGAIN 2026-07-23 (code-review BLOCK, second pass on Finding #2 - the first pass's
+    # fix was itself defective and is superseded below). The first pass made the delete-failure
+    # branch check `is_auth_error` FIRST, before the narrower 403/Forbidden/AuthorizationFailed
+    # design-gap grep, reasoning that this matched the codebase-wide rule (teardown-common.sh line
+    # 667). That reasoning was wrong for THIS branch specifically: `is_auth_error` matches on bare
+    # `credential` and bare `403` (deliberately broad, by design, and NOT loosened here), and
+    # Azure's own genuine `AuthorizationFailed` RBAC-denial text - the EXACT OQ-059(b) case this
+    # branch exists to label - contains both. Verified live against Microsoft's RBAC troubleshooting
+    # reference (learn.microsoft.com/en-us/azure/role-based-access-control/troubleshooting,
+    # "Symptom - Unable to assign a role" / "Symptom - Authorization failed" sections, fetched
+    # 2026-07-23): the documented error body reads "...does not have authorization or an ABAC
+    # condition not fulfilled to perform action '...' over scope '...' or the scope is invalid. If
+    # access was recently granted, please refresh your credentials." and the short form is
+    # "...(code: AuthorizationFailed)". So `is_auth_error` matched FIRST on every real occurrence of
+    # the design gap, and the design-gap `elif` was dead code for the one input it was written to
+    # handle - an operator hitting the actual OQ-059(b) gap got pointed at re-authentication instead
+    # of the real remediation. Simply reordering back to grep-first would re-open the ORIGINAL
+    # first-review finding (a dead token whose text happens to contain bare `403`/`Forbidden` gets
+    # mislabelled "KNOWN DESIGN GAP"), because the old grep pattern itself was too broad - it was
+    # never the ordering that was wrong, it was that both candidate patterns overlapped on bare
+    # `403`.
+    #
+    # THE FIX: `_is_authz_denied_design_gap` (defined near the top of this file), a precise, narrow
+    # discriminator matching ONLY the literal ARM error code `AuthorizationFailed` and the two
+    # RBAC-denial phrases Azure's own docs show verbatim (`does not have authorization`, `ABAC
+    # condition`) - deliberately DROPPING bare `403`/`Forbidden`, which is what caused the
+    # collision. `AuthorizationFailed` is ARM's authorization-layer code, returned only for an
+    # authenticated principal lacking the needed action; a dead/expired token fails at the separate
+    # AUTHENTICATION layer (AADSTS7xxxxx, ExpiredAuthenticationToken, "valid time range", "not
+    # within") BEFORE ARM ever evaluates authorization, so it structurally cannot produce this code
+    # or either phrase - mutually exclusive by Azure's own layering, not just distinct today.
+    # Checking it FIRST is therefore safe and does not reopen the auth-fail-loud rule: nothing a
+    # dead token can say matches it. `is_auth_error` remains checked next, its normal unmodified
+    # broad role (NOT loosened), for genuine dead-token/transport failures; a final else covers
+    # anything matching neither shape. Mirrored at the identical site in teardown-disarm.sh (Phase
+    # 0) with the SAME function body so the two cannot drift.
     if ! az_run mg_diag_names_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/microsoft.insights/diagnosticSettings?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}" \
-        --query "join(',',value[].name)" -o tsv; then
+        --query "value[].name" -o tsv; then
       echo "::error::MG-scope diagnostic-settings list failed for MG ${mg} - a failed list is never read as 'no diagnostic settings' (section 9.4): ${AZ_RUN_STDERR}"
       exit 1
     fi
     # shellcheck disable=SC2154  # mg_diag_names_out is assigned indirectly by az_run's printf -v
-    IFS=',' read -ra mg_diag_names <<< "$mg_diag_names_out"
+    mapfile -t mg_diag_names <<< "$mg_diag_names_out"
     for name in "${mg_diag_names[@]:-}"; do
       [ -z "$name" ] && continue
-      if ! is_globaris_owned "$name"; then
-        echo "  Skipping MG-scope diagnostic setting ${name} (MG ${mg}) - not estate-owned (no 'globaris' substring)."
-        continue
-      fi
       echo "  Deleting MG-scope diagnostic setting ${name} (MG ${mg})"
       mg_diag_url="${ARM_BASE}${mg_scope}/providers/microsoft.insights/diagnosticSettings/${name}?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}"
       if ! mg_diag_del_out="$(az rest --method delete --url "$mg_diag_url" --output none 2>&1)"; then
-        if is_auth_error "$mg_diag_del_out"; then
-          echo "::error::MG-scope diagnostic setting delete for ${name} (MG ${mg}) failed with an auth/transport error: ${mg_diag_del_out}"
-          exit 1
+        if _is_authz_denied_design_gap "$mg_diag_del_out"; then
+          echo "::error::TEARDOWN-P0MG-SURVIVOR (KNOWN DESIGN GAP, OQ-059(b)): MG-scope diagnostic setting delete for ${name} (MG ${mg}) returned an RBAC-denial (AuthorizationFailed) - no role held by this OIDC SP carries Microsoft.Insights/diagnosticSettings/delete at MG scope. This is NOT the generic auth-fail-loud dead-token signal. Aborting the MG delete loop rather than deleting a host scope with this object still attached (ADR-063 G-1); OQ-059(b) option B (a Monitoring Contributor grant) or a privileged one-off delete must land before this MG can be safely deleted: ${mg_diag_del_out}"
+        elif is_auth_error "$mg_diag_del_out"; then
+          echo "::error::TEARDOWN-P0MG-SURVIVOR: MG-scope diagnostic setting delete for ${name} (MG ${mg}) failed with an auth/transport error - cannot certify this as the KNOWN DESIGN GAP (OQ-059(b)) off a possibly-dead token: ${mg_diag_del_out}"
+        else
+          echo "::error::TEARDOWN-P0MG-SURVIVOR: MG-scope diagnostic setting delete for ${name} (MG ${mg}) failed - still present at this last-chance gate; aborting the MG delete loop (ADR-063 G-1): ${mg_diag_del_out}"
         fi
-        echo "  ::warning::MG-scope diagnostic setting delete for ${name} (MG ${mg}) failed or already gone (continuing): ${mg_diag_del_out}"
-      else
-        # PRIMARY-pattern confirm-GET (BLOCK-2 fix) - see the budget block above for the full
-        # rationale; identical here (no separate VERIFY step for MG scope).
-        confirm_gone_or_fail_primary "MG-scope diagnostic setting ${name} (MG ${mg})" "$mg_diag_url" || exit 1
+        exit 1
       fi
+      # PRIMARY-pattern confirm-GET (BLOCK-2 fix) - see the budget block above for the full
+      # rationale; identical here (no separate VERIFY step for MG scope).
+      confirm_gone_or_fail_primary "TEARDOWN-P0MG-SURVIVOR: MG-scope diagnostic setting ${name} (MG ${mg})" "$mg_diag_url" || exit 1
     done
 
-    # Policy exemptions (atExactScope, POLICY_EXEMPTIONS_API_VERSION_NEW, is_owned_policy_object
-    # predicate - same three-limb test 6d already uses, shared so the delete side can never
-    # drift from what a future VERIFY-side check expects).
+    # Policy exemptions (atExactScope, POLICY_EXEMPTIONS_API_VERSION_NEW). No per-row predicate
+    # filter (ADR-063 decision 6) - T1(a) containment already owns every row found at this MG;
+    # is_owned_policy_object stays the T3 mechanism for scopes that are NOT themselves
+    # estate-owned (subscription/tenant scope), not for MG scope.
     if ! az_run mg_exemption_rows_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
-        --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
+        --query "value[].[name, id]" -o tsv; then
       echo "::error::MG-scope policy exemption list failed for MG ${mg} - a failed list is never read as 'no exemptions' (section 9.4): ${AZ_RUN_STDERR}"
       exit 1
     fi
@@ -454,24 +641,23 @@ else
     for row in "${mg_exemption_rows[@]:-}"; do
       [ -z "$row" ] && continue
       mg_ex_name="$(printf '%s' "$row" | cut -f1)"
-      mg_ex_assignment_id="$(printf '%s' "$row" | cut -f2)"
-      if ! is_owned_policy_object "$mg_ex_name" "$mg_ex_assignment_id"; then
-        echo "  Skipping MG-scope policy exemption ${mg_ex_name} (MG ${mg}) - not estate-owned."
-        continue
-      fi
+      mg_ex_id="$(printf '%s' "$row" | cut -f2)"
+      case "$mg_ex_id" in
+        "${mg_scope}"/*) ;;
+        *)
+          echo "::error::TEARDOWN-P0MG-SURVIVOR: MG-scope policy exemption ${mg_ex_name} (MG ${mg}) returned by atExactScope() but its id '${mg_ex_id}' does not start with this MG's own scope path '${mg_scope}' (ADR-063 rule 3b client-side belt). Not deleting off an unverified scope match; aborting the MG delete loop."
+          exit 1
+          ;;
+      esac
       echo "  Deleting MG-scope policy exemption ${mg_ex_name} (MG ${mg})"
       mg_exemption_url="${ARM_BASE}${mg_scope}/providers/Microsoft.Authorization/policyExemptions/${mg_ex_name}?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}"
       if ! mg_exemption_del_out="$(az rest --method delete --url "$mg_exemption_url" --output none 2>&1)"; then
-        if is_auth_error "$mg_exemption_del_out"; then
-          echo "::error::MG-scope policy exemption delete for ${mg_ex_name} (MG ${mg}) failed with an auth/transport error: ${mg_exemption_del_out}"
-          exit 1
-        fi
-        echo "  ::warning::MG-scope policy exemption delete for ${mg_ex_name} (MG ${mg}) failed or already gone (continuing): ${mg_exemption_del_out}"
-      else
-        # PRIMARY-pattern confirm-GET (BLOCK-2 fix) - see the budget block above for the full
-        # rationale; identical here (no separate VERIFY step for MG scope).
-        confirm_gone_or_fail_primary "MG-scope policy exemption ${mg_ex_name} (MG ${mg})" "$mg_exemption_url" || exit 1
+        echo "::error::TEARDOWN-P0MG-SURVIVOR: MG-scope policy exemption delete for ${mg_ex_name} (MG ${mg}) failed - still present at this last-chance gate; aborting the MG delete loop (ADR-063 G-1): ${mg_exemption_del_out}"
+        exit 1
       fi
+      # PRIMARY-pattern confirm-GET (BLOCK-2 fix) - see the budget block above for the full
+      # rationale; identical here (no separate VERIFY step for MG scope).
+      confirm_gone_or_fail_primary "TEARDOWN-P0MG-SURVIVOR: MG-scope policy exemption ${mg_ex_name} (MG ${mg})" "$mg_exemption_url" || exit 1
     done
   done
 
@@ -573,6 +759,11 @@ for sub in "${SUBS[@]}"; do
   # step 4-pre's MG-scope sweep (FIX-1): this loop is unconditional (runs every sweep,
   # remove_mg_hierarchy true or false) while FIX-1 only runs when MGs are actually being
   # deleted - genuinely different coverage, not pure duplication.
+  #
+  # No server-side or per-row name filter (ADR-063 decision 6, rewired from
+  # contains(name,'globaris')): T1(b) containment (is_estate_owned --rg, teardown-common.sh)
+  # already owns every row found on an RG discover_live_rgs returned - it only ever returns
+  # RG_SWEEP_QUERY-matched RGs, so this call is a defensive assertion, not a live filter.
   if ! discover_live_rgs rg6a_names_out "$sub"; then
     echo "::error::RG list failed for subscription ${sub} while discovering RG-scope budget targets - a failed list is never read as 'no RGs' (section 9.4): ${AZ_RUN_STDERR}"
     exit 1
@@ -581,14 +772,18 @@ for sub in "${SUBS[@]}"; do
   mapfile -t rg6a_names <<< "$rg6a_names_out"
   for rg in "${rg6a_names[@]:-}"; do
     [ -z "$rg" ] && continue
+    if ! is_estate_owned --rg "$rg"; then
+      echo "::error::RG-scope budget sweep: RG ${rg} (sub ${sub}) did not classify as estate-owned by is_estate_owned - structurally impossible for a row discover_live_rgs returned (RG_SWEEP_QUERY-filtered). Failing loud rather than silently skipping."
+      exit 1
+    fi
     if ! az_run rg_budget_names_out rest --method get \
         --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
-        --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
+        --query "value[].name" -o tsv; then
       echo "::error::RG-scope budget list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'no budgets' (section 9.4): ${AZ_RUN_STDERR}"
       exit 1
     fi
     # shellcheck disable=SC2154  # rg_budget_names_out is assigned indirectly by az_run's printf -v
-    IFS=',' read -ra rg_budget_names <<< "$rg_budget_names_out"
+    mapfile -t rg_budget_names <<< "$rg_budget_names_out"
     for name in "${rg_budget_names[@]:-}"; do
       [ -z "$name" ] && continue
       echo "  Deleting RG-scope budget ${name} (RG ${rg}, sub ${sub})"
@@ -719,30 +914,35 @@ for mg in "${MG_DELETE_ORDER[@]}"; do
     echo "  MG ${mg}: absent from the snapshot - nothing to sweep."
     continue
   fi
+  if ! is_estate_owned --mg "$mg"; then
+    echo "::error::6a (MG scope): MG ${mg} did not classify as estate-owned by is_estate_owned - structurally impossible for a member of MG_DELETE_ORDER. Failing loud rather than silently skipping."
+    exit 1
+  fi
   mg_scope="$(mg_scope_path "$mg")"
+  # No server-side name filter (ADR-063 decision 6, rewired from contains(name,'globaris')) -
+  # T1(a) containment already owns every row found at this MG.
   if ! az_run mg6a_budget_names_out rest --method get \
       --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
-      --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
+      --query "value[].name" -o tsv; then
     echo "::error::MG-scope budget list failed for MG ${mg} - a failed list is never read as 'no budgets' (section 9.4): ${AZ_RUN_STDERR}"
     exit 1
   fi
   # shellcheck disable=SC2154  # mg6a_budget_names_out is assigned indirectly by az_run's printf -v
-  IFS=',' read -ra mg6a_budget_names <<< "$mg6a_budget_names_out"
+  mapfile -t mg6a_budget_names <<< "$mg6a_budget_names_out"
   for name in "${mg6a_budget_names[@]:-}"; do
     [ -z "$name" ] && continue
     echo "  Deleting MG-scope budget ${name} (MG ${mg})"
     mg6a_budget_url="${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets/${name}?api-version=${BUDGETS_API_VERSION}"
+    # ADR-063 decision 4: at MG scope a non-auth delete failure is FATAL, not warn-and-continue -
+    # "the next run retries idempotently" is void here because THIS run may go on to delete the
+    # MG that makes the retry possible (step 4 above, or a later az-sweep dispatch).
     if ! mg6a_budget_del_out="$(az rest --method delete --url "$mg6a_budget_url" --output none 2>&1)"; then
-      if is_auth_error "$mg6a_budget_del_out"; then
-        echo "::error::MG-scope budget delete for ${name} (MG ${mg}) failed with an auth/transport error: ${mg6a_budget_del_out}"
-        exit 1
-      fi
-      echo "  ::warning::MG-scope budget delete for ${name} (MG ${mg}) failed or already gone (continuing): ${mg6a_budget_del_out}"
-    else
-      # PRIMARY-pattern confirm-GET (BLOCK-2 fix) - no separate VERIFY step exists for MG
-      # scope (same rationale as FIX-1's confirm-GETs above).
-      confirm_gone_or_fail_primary "MG-scope budget ${name} (MG ${mg})" "$mg6a_budget_url" || exit 1
+      echo "::error::MG-scope budget delete for ${name} (MG ${mg}) failed - not treating this as idempotent-retryable at MG scope (ADR-063 decision 4, G-1): ${mg6a_budget_del_out}"
+      exit 1
     fi
+    # PRIMARY-pattern confirm-GET (BLOCK-2 fix) - no separate VERIFY step exists for MG
+    # scope (same rationale as FIX-1's confirm-GETs above).
+    confirm_gone_or_fail_primary "MG-scope budget ${name} (MG ${mg})" "$mg6a_budget_url" || exit 1
   done
 done
 
@@ -933,10 +1133,17 @@ done
 
 # --- 6e. Microsoft.Security singleton reset/sweep, security subscription only (FIX-4,
 #     teardown-completeness extension sweep, 2026-07-23). Four sub-classes:
-#       (i)   securityContacts - subscription-scoped singleton-per-name, discovered by LIST
-#             (never hardcoded - platform/security/main.tf names it
-#             "security-contact-${var.org_prefix}", a custom name the current API allows, not
-#             the historical fixed "default") and deleted if is_globaris_owned.
+#       (i)   securityContacts - a TRUE subscription-scoped singleton, discovered by LIST and
+#             deleted under the ADR-063 decision 6 T2 tier (is_estate_owned --singleton), NOT a
+#             name test. CORRECTED 2026-07-23 (ADR-063 decision 7): platform/security/main.tf
+#             configures name = "security-contact-${var.org_prefix}", but that name is NEVER
+#             what ends up live - the API's own securityContactName constraint
+#             (`pattern: ^(default)$`, api-version 2023-12-01-preview) pins every live object to
+#             exactly "default", regardless of what this estate's Terraform requests. The prior
+#             comment here ("a custom name the current API allows") was WRONG and is the reason
+#             this sub-step, and VERIFY 6e, were silently deleting nothing: is_globaris_owned
+#             (a name test) can never match an object that is always named "default". See
+#             is_singleton_owned's own comment (teardown-common.sh) for the fix.
 #       (ii)  Microsoft.Security/automations - discovered by a SUBSCRIPTION-WIDE list (returns
 #             every automation regardless of which RG it is nested under) rather than assuming
 #             it lives in a specific RG. NOTE: azurerm_security_center_automation IS genuinely
@@ -965,7 +1172,7 @@ if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
   exit 1
 fi
 
-# (i) securityContacts
+# (i) securityContacts - T2 (is_estate_owned --singleton), NOT a name test (ADR-063 decision 7).
 if ! az_run sec_contact_rows_out rest --method get \
     --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/securityContacts?api-version=${SECURITY_CONTACTS_API_VERSION}" \
     --query "value[].name" -o tsv; then
@@ -976,9 +1183,13 @@ fi
 mapfile -t sec_contact_names <<< "$sec_contact_rows_out"
 for name in "${sec_contact_names[@]:-}"; do
   [ -z "$name" ] && continue
-  if ! is_globaris_owned "$name"; then
-    echo "  Skipping security contact ${name} - not estate-owned (no 'globaris' substring)."
-    continue
+  if ! is_estate_owned --singleton "$SECURITY_SUBSCRIPTION_ID" "Microsoft.Security/securityContacts"; then
+    # Structurally unreachable: SECURITY_SUBSCRIPTION_ID is one of the 5 env vars
+    # is_estate_subscription checks, and Microsoft.Security/securityContacts is seeded on
+    # ESTATE_DECLARED_SINGLETON_TYPES above - kept as a hard stop, not a silent skip, in case the
+    # two are ever edited out of lock-step.
+    echo "::error::security contact ${name} did not classify as estate-owned by is_estate_owned --singleton - this should be structurally impossible for the security subscription. Failing loud rather than silently skipping."
+    exit 1
   fi
   echo "  Deleting security contact ${name} (sub ${SECURITY_SUBSCRIPTION_ID})"
   sec_contact_url="${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/securityContacts/${name}?api-version=${SECURITY_CONTACTS_API_VERSION}"

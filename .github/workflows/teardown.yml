@@ -290,11 +290,21 @@ jobs:
   # Phase 2 - AZ SWEEP (ADR-054). Fallback for mode=az-sweep (state gone) AND a
   # remnant-catch pass after Phase 1 in mode=terraform. `needs` lists every Phase 1 job for
   # ORDERING only (run after them) - `!cancelled()` means none of their individual outcomes
-  # gates this job, only guard's confirm check does. target=all only (see header).
+  # gates this job. target=all only (see header).
+  #
+  # GATED ON disarm.result (2026-07-23, ADR-063 decision 9, owner override 9a). Previously
+  # this job gated ONLY on guard.result and target=='all', so a failed DISARM (Phase 0) did
+  # NOT stop this job - on target=all with DISARM failed, every Phase-1 root job above skips
+  # (they all gate on disarm.result) but az-sweep proceeded alone, degrading the run from
+  # `terraform destroy` to raw REST deletes with zero terraform state updates, while ADR-063's
+  # own MG-scope extension sweep (now in Phase 0/disarm) may not have completed either - the
+  # one-way-door G-1 gap this ADR exists to close, walked through by the one job that was told
+  # the door was open. The `skipped` limb matches the Phase-1 root-job form exactly so a
+  # single-target dispatch (where disarm does not run at all) is unaffected.
   az-sweep:
     name: "Phase 2 - AZ SWEEP (fallback / remnant-catch)"
     needs: [guard, disarm, synthetic, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1, connectivity, security, identity, management, management-groups]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && inputs.target == 'all' }}
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.target == 'all' }}
     runs-on: ubuntu-latest
     environment: production-destroy
     steps:
@@ -328,14 +338,28 @@ jobs:
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: bash scripts/teardown-az-sweep.sh
 
-  # Phase 3 - VERIFY (ADR-054). Always last, always runs for target=all. FAILS the run if
-  # any estate remnant is found - a green Phase 3 is the definition of "teardown succeeded
-  # E2E". Read-only (no deletions) but still needs the production-destroy environment for
-  # OIDC (the only federated credential trust configured for this class of operation).
+  # Phase 3 - VERIFY (ADR-054). Always last, runs for target=all. FAILS the run if any estate
+  # remnant is found - a green Phase 3 is the definition of "teardown succeeded E2E".
+  # Read-only (no deletions) but still needs the production-destroy environment for OIDC (the
+  # only federated credential trust configured for this class of operation).
+  #
+  # GATED ON disarm.result (2026-07-23, ADR-063 decision 9, OWNER OVERRIDE 9a - see
+  # DECISIONS.md for the full record). The architect's proposal was to gate az-sweep only and
+  # leave verify ungated, on the grounds that VERIFY is the best inventory of live estate state
+  # the pipeline produces and suppressing it on exactly the runs that went wrong is backwards;
+  # DevSecOps independently recommended the same split. The owner overruled that and ruled to
+  # gate BOTH jobs, unconditionally, for one uniform rule with no conditional-wording contract
+  # to get wrong and no path by which a green-looking VERIFY can be produced by a run that
+  # aborted. Cost, stated plainly per the override record: a failed DISARM now suppresses
+  # VERIFY too, so an operator gets no VERIFY output precisely in the runs where the estate is
+  # most likely to be in a bad or half-known state - diagnosing such a run needs a separate
+  # read-only dispatch (scripts/teardown-probe-extensions.sh) or a manual run, not this job's
+  # own output. Implemented as ruled. The `skipped` limb matches the Phase-1 root-job form
+  # exactly so a single-target dispatch (where disarm does not run at all) is unaffected.
   verify:
     name: "Phase 3 - VERIFY (loud completion check)"
     needs: [guard, disarm, synthetic, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1, connectivity, security, identity, management, management-groups, az-sweep]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && inputs.target == 'all' }}
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.target == 'all' }}
     runs-on: ubuntu-latest
     environment: production-destroy
     steps:
