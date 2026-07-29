@@ -132,6 +132,20 @@
 #     "default", pinned by the API's own name-pattern constraint, regardless of what this
 #     estate's Terraform configures.
 #
+# AMENDED an eighth time 2026-07-29 (ADR-064): the Phase 2 `6a (MG portion)` MG-scope
+# consumption-budget re-sweep that the sixth amendment's FIX-2 added is REMOVED. It was the only
+# step anywhere in this script that read or wrote an MG scope AFTER the step-4 delete loop
+# (line ~664) could have deleted that scope in the same job - exactly the one-way door ADR-063's
+# G-1 forbids - and it was fully redundant with Phase 0 DISARM's MG-scope sweep
+# (teardown-disarm.sh), which covers every MG in MG_SCOPES pre-deletion in both teardown modes.
+# Live teardown run 30476963087 crashed on it (403 RBACAccessDenied listing budgets at the
+# just-deleted `connectivity` MG, section 9.4 correctly failing loud on the auth-shaped error),
+# which aborted step 6 before 6c (RP unregister) and 6e (securityContacts) ever ran. See ADR-064
+# in DECISIONS.md for the full analysis and the governing invariant it adds: no teardown step
+# may read or write an MG scope after that MG could have been deleted in the same job. FIX-2's
+# RG-scope budget sweep (the 6a RG portion, inside the subscription loop above) is UNCHANGED by
+# this amendment - it stays RG-scoped, never touches an MG, and remains backstopped by VERIFY 6.
+#
 # FIX-7 note (documentation only, NO teardown code change - this is a RERUN-side guard for
 # platform/identity, not a teardown responsibility): on any rerun after a partial teardown or a
 # state-gone az-sweep, platform/identity MUST probe whether an Azure AD Domain Services managed
@@ -464,18 +478,18 @@ echo "== Phase 2 step 4: MG hierarchy removal (remove_mg_hierarchy=${REMOVE_MG_H
 # pre-sweep and delete loop need it whenever remove_mg_hierarchy=true, and mg_in_snapshot
 # silently reads every MG as "absent" against an unloaded snapshot (${MG_SNAPSHOT[$name]+x} is
 # false on an empty array) - exactly the kind of silent false-clean this codebase's own
-# is_auth_error/mg_snapshot_ok discipline exists to prevent. Step 6a's own MG-scope budget
-# sweep (FIX-2, further down this script) does its OWN fresh reload immediately before it runs
-# (see that block's comment - it cannot safely reuse THIS load once step 4's delete loop has
-# run, since a deleted MG would still read "present" against a snapshot taken before its
-# deletion). One extra `az account management-group list` call per run either way (cheap,
-# VERIFY already calls it unconditionally too).
+# is_auth_error/mg_snapshot_ok discipline exists to prevent. This load is now consumed only by
+# step 4-pre and the step-4 delete loop immediately below - ADR-064 REMOVED the former 6a
+# MG-portion budget re-sweep that used to take its own separate fresh reload further down this
+# script, because it was the one place that read an MG scope AFTER this same loop could have
+# deleted it (see ADR-064, DECISIONS.md). One extra `az account management-group list` call per
+# run either way (cheap, VERIFY already calls it unconditionally too).
 if ! mg_snapshot_load; then
   echo "::error::Step 4 cannot proceed without a trustworthy MG-existence snapshot."
   exit 1
 fi
 if [ "$REMOVE_MG_HIERARCHY" != "true" ]; then
-  echo "  Skipped (remove_mg_hierarchy=false) - the MG tree is left in place. (MG-existence snapshot above is still loaded for step 6a's MG-scope budget sweep.)"
+  echo "  Skipped (remove_mg_hierarchy=false) - the MG tree is left in place."
 else
   # --- 4-pre (FIX-1, teardown-completeness extension sweep, 2026-07-23; DEMOTED to a
   #     last-chance gate by ADR-063 decision 4, 2026-07-23). Sweeps every MG-scope EXTENSION
@@ -883,66 +897,6 @@ for sub in "${SUBS[@]}"; do
       fi
       echo "  ::warning::diagnostic setting delete for ${name} failed or already gone (continuing - idempotent retry on next run): ${diag_del_out}"
     fi
-  done
-done
-
-# --- 6a (MG portion, FIX-2, teardown-completeness extension sweep, 2026-07-23). MG-scope
-#     budgets, run UNCONDITIONALLY (once, not gated on remove_mg_hierarchy) over every MG
-#     currently live. This is a DIFFERENT coverage window than FIX-1's step 4-pre sweep (which
-#     only ever runs when remove_mg_hierarchy=true, immediately before that MG is deleted): a
-#     run with remove_mg_hierarchy=false never reaches step 4-pre at all, so an MG-scope budget
-#     left over from an EARLIER run (MG hierarchy kept in place) would otherwise never be swept.
-#
-#     FRESH RELOAD, NOT the step-4 snapshot (bug fix, code-review BLOCK-2 follow-up,
-#     2026-07-23): this block originally reused the SAME MG_SNAPSHOT step 4 loaded at the very
-#     start of the script. When remove_mg_hierarchy=true, step 4's own delete loop deletes MGs
-#     BETWEEN that snapshot load and this block running later in the script - MG_SNAPSHOT is a
-#     plain associative array, never updated after deletion, so mg_in_snapshot would have kept
-#     reporting a just-deleted MG as "present" here, and this block would have attempted a
-#     budget list against a scope the SP's grants were just deleted with (403
-#     AuthorizationFailed - is_auth_error correctly matches it, so the whole run would exit 1
-#     loud on a perfectly successful teardown). Reloading the snapshot HERE, immediately before
-#     this loop, makes it reflect ground truth as of RIGHT NOW - any MG step 4 deleted earlier
-#     in this same run correctly reads as absent and is skipped, no 403, no false failure.
-if ! mg_snapshot_load; then
-  echo "::error::Step 6a (MG scope) cannot proceed without a trustworthy MG-existence snapshot."
-  exit 1
-fi
-echo "-- 6a (MG scope): consumption budgets --"
-for mg in "${MG_DELETE_ORDER[@]}"; do
-  if ! mg_in_snapshot "$mg"; then
-    echo "  MG ${mg}: absent from the snapshot - nothing to sweep."
-    continue
-  fi
-  if ! is_estate_owned --mg "$mg"; then
-    echo "::error::6a (MG scope): MG ${mg} did not classify as estate-owned by is_estate_owned - structurally impossible for a member of MG_DELETE_ORDER. Failing loud rather than silently skipping."
-    exit 1
-  fi
-  mg_scope="$(mg_scope_path "$mg")"
-  # No server-side name filter (ADR-063 decision 6, rewired from contains(name,'globaris')) -
-  # T1(a) containment already owns every row found at this MG.
-  if ! az_run mg6a_budget_names_out rest --method get \
-      --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
-      --query "value[].name" -o tsv; then
-    echo "::error::MG-scope budget list failed for MG ${mg} - a failed list is never read as 'no budgets' (section 9.4): ${AZ_RUN_STDERR}"
-    exit 1
-  fi
-  # shellcheck disable=SC2154  # mg6a_budget_names_out is assigned indirectly by az_run's printf -v
-  mapfile -t mg6a_budget_names <<< "$mg6a_budget_names_out"
-  for name in "${mg6a_budget_names[@]:-}"; do
-    [ -z "$name" ] && continue
-    echo "  Deleting MG-scope budget ${name} (MG ${mg})"
-    mg6a_budget_url="${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets/${name}?api-version=${BUDGETS_API_VERSION}"
-    # ADR-063 decision 4: at MG scope a non-auth delete failure is FATAL, not warn-and-continue -
-    # "the next run retries idempotently" is void here because THIS run may go on to delete the
-    # MG that makes the retry possible (step 4 above, or a later az-sweep dispatch).
-    if ! mg6a_budget_del_out="$(az rest --method delete --url "$mg6a_budget_url" --output none 2>&1)"; then
-      echo "::error::MG-scope budget delete for ${name} (MG ${mg}) failed - not treating this as idempotent-retryable at MG scope (ADR-063 decision 4, G-1): ${mg6a_budget_del_out}"
-      exit 1
-    fi
-    # PRIMARY-pattern confirm-GET (BLOCK-2 fix) - no separate VERIFY step exists for MG
-    # scope (same rationale as FIX-1's confirm-GETs above).
-    confirm_gone_or_fail_primary "MG-scope budget ${name} (MG ${mg})" "$mg6a_budget_url" || exit 1
   done
 done
 
