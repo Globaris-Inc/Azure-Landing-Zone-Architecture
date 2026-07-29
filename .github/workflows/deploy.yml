@@ -2,7 +2,7 @@
 # Purpose: Manual Terraform plan/apply for ONE root or the WHOLE environment (in order).
 # Section: 10 — Pipeline & Tooling (ADR-019). Replaces apply-on-merge.yml (LESSON 17:
 #          deploys are explicit, not merge-triggered).
-# Last updated: 2026-07-16
+# Last updated: 2026-07-29
 #
 # Requirement 1 (per-root): set target=<a single root>.
 # Requirement 2 (full env): set target=all — the needs: graph applies every root in
@@ -138,6 +138,23 @@ jobs:
       - name: Reject enable_conditional_access_override outside identity/all
         run: |
           echo "::error::enable_conditional_access_override only affects platform/identity (ADR-055 two-pass). Set target=platform/identity or target=all, or leave the override blank."
+          exit 1
+
+  # ADR-065 decision 6. ADR-060 already rules that full-estate deploy is sequential
+  # single-target (never target=all apply), but nothing enforced that in code, so
+  # target=all + action=apply could be dispatched. Every root job below sets
+  # manage_runner_ip: target != 'all', which is false at target=all, so the state SA
+  # firewall is never opened and every root would 403 at `terraform init` - the same
+  # failure mode ADR-065 diagnosed and fixed on the teardown side. Reject it up front,
+  # same pattern as the guards above. action=plan at target=all is left unchanged
+  # (read-only, low-harm) pending OQ-057.
+  guard-target-all-apply:
+    if: ${{ inputs.target == 'all' && inputs.action == 'apply' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject target=all with action=apply
+        run: |
+          echo "::error::full-estate deploy is sequential single-target per ADR-060; target=all + apply would 403 every root at init against the firewalled state SA. Dispatch one root at a time."
           exit 1
 
   management-groups:
