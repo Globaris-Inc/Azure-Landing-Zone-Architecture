@@ -640,9 +640,22 @@ teardown_subscriptions() {
 # Deliberately broad ("token" / "credential" alone match) per the locked design - a caller
 # distinguishes a genuine NotFound from everything else itself; this classifier only answers
 # "is this specific failure text auth-shaped".
+#
+# 401/403 are word-boundary anchored (`\b401\b` / `\b403\b`), NOT bare substrings (fix for
+# run 30181672979, which false-failed a confirmed-gone MG-scope budget delete - the
+# confirm-GET's own 404 NotFound body carries an ARM Request ID GUID, and the bare `403`
+# match fired on the digits `403` embedded inside that GUID's `4038` segment, so a genuine
+# NotFound was misclassified as a fatal auth error before is_not_found_error ever ran (see
+# confirm_gone_by_get above - is_auth_error is checked first by design, so it must not
+# false-fire on digits that merely co-occur inside an unrelated GUID/request-id/byte-count).
+# A word boundary requires a non-word character (or string edge) immediately adjacent, so a
+# real status code standalone ("403", "(403)", "403 Forbidden") still matches, while `403`
+# sitting inside a longer digit/hex run (`4038`, `1403`, `403a`) does not - and a genuine
+# GUID segment (4/8/12 hex chars) can never hold `401`/`403` as a boundary-anchored substring,
+# since the match is shorter than every segment length. The non-numeric tokens are untouched.
 is_auth_error() {
   local text="${1:-}"
-  printf '%s' "$text" | grep -qiE 'AADSTS|valid time range|not within|AuthenticationFailed|ExpiredAuthenticationToken|token|credential|401|403|az login'
+  printf '%s' "$text" | grep -qiE 'AADSTS|valid time range|not within|AuthenticationFailed|ExpiredAuthenticationToken|token|credential|\b401\b|\b403\b|az login'
 }
 
 # is_not_found_error "<text>" - classify captured az/curl stderr (or any error text) as a
