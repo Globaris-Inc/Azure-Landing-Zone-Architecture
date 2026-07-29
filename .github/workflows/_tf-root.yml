@@ -1,7 +1,7 @@
 # .github/workflows/_tf-root.yml
 # Purpose: Reusable Terraform workflow for a SINGLE root — plan | apply | destroy.
 # Section: 10 — Pipeline & Tooling (ADR-019). Called by deploy.yml and teardown.yml.
-# Last updated: 2026-07-19
+# Last updated: 2026-07-29
 #
 # Auth: OIDC federated credential — no secrets stored for login. Gated callers
 # pass a GitHub Environment via `gh_environment`; an EMPTY string = ungated
@@ -82,7 +82,11 @@ on:
         # WARNING (concurrency): on `target=all`, sibling roots run in parallel and would
         # flip the SAME state SA `default_action` against each other — one job's restore-Deny
         # can cut another mid-init. Only enable this for SINGLE-root (`target != all`) runs.
-        # deploy.yml already gates manage_runner_ip on target != 'all'.
+        # deploy.yml gates manage_runner_ip on target != 'all'; teardown.yml (ADR-065,
+        # 2026-07-29) now does the same for its single-root Phase 1 terraform destroy jobs -
+        # previously teardown.yml never wired this input at all, so every Phase 1 job 403'd
+        # at init against the firewalled state SA (root cause, ADR-065 context). teardown.yml
+        # never enables it for target=all (Phase 1 does not run there at all, ADR-065).
         description: "Flip the state SA default_action to Allow for this run, restored to Deny on exit (single-root runs only)"
         required: false
         type: boolean
