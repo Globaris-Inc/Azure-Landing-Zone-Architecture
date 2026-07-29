@@ -37,6 +37,77 @@
 
 <!-- Newest at the top. -->
 
+### ADR-064: The Phase 2 step 6a MG-portion budget re-sweep is REMOVED - it is the only az-sweep step that reads an MG scope AFTER the step-4 delete loop ran, which ADR-063 G-1 forbids, and it is fully redundant with the Phase 0 DISARM sweep
+
+- **Date:** 2026-07-29
+- **Section:** 10 (Pipeline & Tooling) / teardown. ENFORCES ADR-063's G-1 one-way-door invariant. SUPERSEDES the single sub-part of ADR-063 that left the Phase 2 `6a (MG portion)` FIX-2 budget re-sweep in place: ADR-063 ruled on decision 3 (Phase-0 placement) and decision 4 (step 4-pre demotion) but never revisited this third, post-deletion MG-scope sweep. Builds on ADR-054 (four-phase shape, MG list-snapshot oracle, auth-fail-loud), ADR-062 (deleted-scope-403), ADR-057 (step 6). ADR-063 otherwise stands unchanged.
+- **Status:** Accepted (architect ruling; user directed the diagnosis of run 30476963087 and that the fix land through CI with no manual deletes; implementation handed to DevSecOps, then Code Review, then merge)
+- **Decision makers:** claude (architect); user
+
+**Context:**
+
+Live teardown run 30476963087 (target=all, mode=terraform, remove_mg_hierarchy=true, ref banking, HEAD ea6c630) was the first run to reach Phase 2 `6a (MG portion)` alive; earlier attempts died sooner. Phase 0 DISARM passed (the recent is_auth_error fix worked). Phase 2 az-sweep then did the real cleanup: deleted every estate RG, deleted `diag-aa-to-law`, re-parented all 5 subscriptions to tenant root, ran the step-4 MG delete loop that deleted the ENTIRE globaris tree (connectivity, security, identity, management, online, corp, decommissioned, sandbox, platform, landingzones, globaris), and cleared subscription-scope budgets, cost exports and anomaly actions. It then crashed at `-- 6a (MG scope): consumption budgets --` on MG `connectivity`:
+
+> `ERROR: Unauthorized({"code":"RBACAccessDenied", ...})` / "Interactive authentication is needed. Please run: az login"
+
+producing the fatal `MG-scope budget list failed for MG connectivity` (teardown-az-sweep.sh line 927, section 9.4 auth-fail-loud).
+
+The block that crashed carries its OWN fresh `mg_snapshot_load` (line 907), added as the code-review BLOCK-2 follow-up specifically to avoid a stale snapshot. It did not help, and the sequence proves why:
+
+1. line 907 reloaded the snapshot AFTER step 4 had already deleted `connectivity`.
+2. line 913 `mg_in_snapshot connectivity` returned TRUE, so `az account management-group list` STILL enumerated `connectivity`.
+3. line 924 the budget list at the `connectivity` scope returned 403 RBACAccessDenied.
+
+The MG-list control-plane read is eventually-consistent and lagged the committed `az account management-group delete`, while the SP's globaris-subtree grant over the `connectivity` scope was already gone (the deleted-scope-403 ADR-062 documented). So the fresh reload saw a false "present" and the sweep walked into a scope it had itself just deleted. The BLOCK-2 fix rested on a false premise: that `az account management-group list` reflects a just-committed MG delete immediately. It does not.
+
+This is not an independent bug. It is a loose end of ADR-063. ADR-063 established G-1 ("an extension object must be swept BEFORE its host scope is deleted ... deleting a host that still has an owned extension object attached is a ONE-WAY DOOR"), moved the authoritative MG-scope sweep to Phase 0 DISARM (decision 3), and demoted step 4-pre to a pre-deletion last-chance gate (decision 4). But the `6a (MG portion)` FIX-2 budget re-sweep was never revisited, and it is the ONE az-sweep step that touches an MG scope AFTER the step-4 delete loop. It sits on the far side of the exact door G-1 forbids. Its stated purpose (cover the `remove_mg_hierarchy=false` window where step 4-pre never runs) is void, because Phase 0 DISARM sweeps MG-scope budgets across every MG in `MG_SCOPES`, before any deletion, in BOTH modes, regardless of `remove_mg_hierarchy`.
+
+The two remnants Phase 3 VERIFY then reported (Microsoft.CostManagementExports still Registered; securityContacts/default still present) are downstream of this crash, not separate defects: the crash aborted step 6 before 6c (RP unregister) and 6e (securityContacts) ran. Removing the crash lets those steps run.
+
+**Decision:**
+
+REMOVE the Phase 2 `6a (MG portion)` MG-scope consumption-budget re-sweep from `scripts/teardown-az-sweep.sh` in full, including its dedicated fresh `mg_snapshot_load`. Do not soften it, do not reorder it, do not re-gate it. It is genuinely dead and hazardous, and the honest answer is removal.
+
+Justification, per mode. `az-sweep` runs only when `target=all`, and the workflow gates `az-sweep` on `needs.disarm.result == 'success'` while `disarm` sits under the same `target=all` gate (ADR-063 decision 9), so Phase 0 DISARM has ALWAYS run and succeeded before Phase 2 in every path where 6a could execute:
+
+- **mode=terraform, remove_mg_hierarchy=true:** Phase 0 DISARM swept every MG-scope budget with a `confirm_gone_or_fail_primary` completion check while all MGs were live; Phase 1 terraform-destroyed the roots; step 4-pre re-verified pre-deletion; step 4 deleted the MGs. By the time 6a runs there is nothing to sweep and the scopes are gone. Pure hazard, zero coverage. This is the mode that crashed.
+- **mode=terraform, remove_mg_hierarchy=false:** step 4 deletes no MG, so there is no crash, but 6a still adds nothing - Phase 0 DISARM already swept those budgets pre-deletion.
+- **mode=az-sweep (state-gone F4), either remove_mg_hierarchy:** Phase 1 is skipped by design, but Phase 0 DISARM still runs (target=all gate, no mode check) and is the authoritative MG-scope sweep. With remove_mg_hierarchy=true the step-4 delete loop then deletes the MGs and 6a would re-hit them; with false, 6a is redundant against DISARM.
+
+Nothing is lost. There is no re-creation window between Phase 0 and Phase 2: DISARM deletes every MG-scope policy ASSIGNMENT (and each DINE identity's role assignment) first, so no deployIfNotExists remediation can re-create a budget, and the estate's MG budgets are Terraform/DISARM-removed, not policy-created. The DINE belt-and-suspenders rationale for a second sweep is therefore void. Completion evidence is not lost either: Phase 0 DISARM's own `confirm_gone_or_fail_primary` is the PRIMARY-evidence gate for MG-scope budgets (there is no Phase 3 VERIFY of MG-scope budgets because the scope is 403-shadowed post-delete; ADR-063 decision 8's VERIFY 10 checks only MGs still present).
+
+Governing invariant this enforces (add to the mechanism's design principles):
+
+> No teardown step may READ or WRITE an MG scope after that MG could have been deleted in the same job. MG-scope extension objects are swept EXACTLY ONCE, strictly before any MG deletion: authoritatively in Phase 0 DISARM (both modes, every MG in MG_SCOPES still live), with step 4-pre as the pre-deletion last-chance gate. There is deliberately NO post-deletion MG-scope sweep, because the MG-list existence oracle (`az account management-group list`) is eventually-consistent and cannot reliably distinguish "this MG was just deleted by our own step-4 loop" from "the token died" during the deletion-propagation window.
+
+**Alternatives considered:**
+
+- **Option 2, reorder the 6a MG-portion sweep to run before the step-4 delete loop** - rejected. That is exactly what step 4-pre already is (a pre-deletion MG-scope budget/diagnostic-setting/exemption sweep). Relocating 6a would duplicate step 4-pre's budget limb and still preserve a sweep Phase 0 DISARM already makes redundant. Correct pre-deletion coverage exists twice already (Phase 0 authoritative plus step 4-pre gate); a third copy adds maintenance surface, not safety.
+- **Option 3, gate the re-sweep to skip MGs no longer live via a refreshed snapshot or a per-MG existence re-check** - rejected on the crux the run exposed. The existence oracle IS the unreliable signal: `az account management-group list` still returned the just-deleted `connectivity`, so `mg_in_snapshot` returned a false "present" even off a fresh reload. A per-MG existence re-check reads the same lagging endpoint and returns the same false "present". You therefore cannot distinguish a deleted-scope-403 (our own delete) from a dead-token-403 (real auth failure) from the snapshot, and section 9.4 must NOT soften auth-fail-loud for a genuinely live MG. The only mechanism that WOULD distinguish them is tracking in-process which MG names step 4 deleted and skipping them, but that is just "do not sweep an MG after deleting it", i.e. removal, dressed up with a redundant data structure to keep a redundant sweep.
+- **Keep 6a but downgrade its list/delete failures to warn-and-continue** - rejected. It violates ADR-063 decision 4 (MG-scope failures are fatal) and re-introduces the swallow-the-error false-clean class section 9.4 exists to close. There is no safe way to keep a post-deletion MG-scope sweep.
+
+**Consequences:**
+
+- Positive: the run 30476963087 crash class is closed at the root, not patched around; step 6c (RP unregister) and 6e (securityContacts) become reachable again, removing the two downstream Phase 3 VERIFY remnants. G-1 is now honoured everywhere in az-sweep, not just at Phase 0 and step 4-pre. One fewer eventually-consistent MG-list read per run.
+- Negative / trade-offs: MG-scope budget removal now depends on Phase 0 DISARM having run, but that is already a hard precondition (ADR-063 decision 9 gates az-sweep on disarm success), so this removes a redundant belt, not a load-bearing one. If a future change ever let Phase 2 run WITHOUT Phase 0 (it must not; decision 9 forbids it), step 4-pre still covers the remove_mg_hierarchy=true path pre-deletion and VERIFY 10 still fails loud on any survivor at a live MG.
+- Follow-ups required: DevSecOps implements the removal (spec below); Code Review confirms no other post-step-4 MG-scope read remains; QA confirms a clean target=all + remove_mg_hierarchy=true teardown reaches step 7 and Phase 3 VERIFY 10 with no `6a (MG scope)` 403.
+
+**Implementation spec for DevSecOps** (`scripts/teardown-az-sweep.sh`, origin/banking HEAD ea6c630):
+
+1. DELETE the entire `6a (MG portion, FIX-2 ...)` block, currently lines 889-947: from the comment line `# --- 6a (MG portion, FIX-2, teardown-completeness extension sweep, 2026-07-23). MG-scope` through the closing `done` of its `for mg in "${MG_DELETE_ORDER[@]}"` consumption-budget loop (the `done` immediately before the `# --- 6d.` comment). This removes the block comment (889-906), the dedicated `mg_snapshot_load` guard (907-910), the `echo "-- 6a (MG scope): consumption budgets --"` (911), and the loop (912-947). Also remove the now-doubled blank line left behind.
+2. DO NOT touch the RG-scope budget sweep that also carries the FIX-2 label. It lives INSIDE the `for sub in "${SUBS[@]}"` subscription loop of step 6a (the `discover_live_rgs` plus per-RG `Microsoft.Consumption/budgets` block). It is RG-scoped, runs on surviving RGs, stays queryable post-delete, and is backstopped by VERIFY 6 (RG scope). It stays.
+3. DO NOT touch step 4-pre (`Phase 2 step 4-pre` last-chance gate) or the step-4 `mg_snapshot_load` (line 473). Both are pre-deletion and remain load-bearing. Only the SECOND `mg_snapshot_load` (line 907, unique to the removed block) is deleted.
+4. Comment-coherence updates (comment-only, no behaviour change):
+   - Step-4 header comment (around lines 462-472): remove the sentence "Step 6a's own MG-scope budget sweep (FIX-2, further down this script) does its OWN fresh reload immediately before it runs ...". The step-4 `mg_snapshot_load` is now consumed only by step 4-pre and the step-4 delete loop.
+   - The remove_mg_hierarchy=false skip message (line 478): drop the trailing "(MG-existence snapshot above is still loaded for step 6a's MG-scope budget sweep.)".
+   - The file header seventh-amendment / ADR-063 block: add a note that ADR-064 removed the 6a MG-portion re-sweep; leave the FIX-2 RG-scope budget description intact.
+   - Add a one-line ADR-064 amendment header to the file's top comment block pointing to this ADR.
+5. No change to `teardown-common.sh`, `teardown-disarm.sh`, `teardown-verify.sh`, or `.github/workflows/teardown.yml`. Phase 0 DISARM's MG-scope sweep and its `confirm_gone_or_fail_primary` completion checks are the sole authoritative MG-scope path and are unchanged.
+
+**Sibling-limb enumeration (so the budget limb is not fixed while a sibling is left to fail next run):** a full read of `scripts/teardown-az-sweep.sh` confirms `6a (MG portion)` consumption budgets is the ONLY step that reads or writes an MG scope AFTER the step-4 delete loop (line 664). There is NO post-deletion MG-scope diagnostic-setting or policy-exemption sibling: those two classes are swept only in step 4-pre (pre-deletion). Every other step 6 sub-step (6d subscription exemptions, 6d RG exemptions, 6b Defender pricing, 6c RP unregister, 6e Microsoft.Security singletons, 6f tenant AAD diagnostic setting) and step 7 (RG reconcile) operates at subscription, RG or tenant scope, never MG. Removing the budget limb leaves no sibling to fail on the next run.
+
+---
+
 ### ADR-063: An extension object is swept BEFORE its host scope is deleted, and it is claimed by CONTAINMENT rather than by name - the MG-scope sweep moves to Phase 0 DISARM, MG-scope delete failures become fatal, resource-scoped diagnostic settings get a pre-RG-delete pass, and the name-only ownership predicate is retired as the primary test
 
 - **Date:** 2026-07-23
