@@ -35,7 +35,9 @@
 
 - **Raised:** 2026-07-30 (found uncommitted in a Temp-path worktree during the post-PR-54 sweep; flagged again by the code-reviewer because the rescue location is gitignored)
 - **Section:** 10 (Pipeline & Tooling) / pre-clearance. Relates to the ADR-060 sequential single-target dispatch and the 2026-07-22 full-estate rebuild runbook.
-- **Blocking:** No for any current change. YES for the next full-estate dispatch, which has no valid pre-clearance without a decision here.
+- **Blocking:** ~~No for any current change. YES for the next full-estate dispatch, which has no valid
+  pre-clearance without a decision here.~~ **CLEARED 2026-07-30 - resolved by Option A; see the RESOLVED
+  block below. The full-estate dispatch now has a valid, committed pre-clearance.**
 - **Priority:** High the moment a rebuild dispatch is contemplated.
 
 **Question:**
@@ -74,7 +76,68 @@ Two decisions are needed, and they are independent:
 - C: leave it preserved and gitignored until a dispatch is actually planned. Cheapest now, and the
   option with a demonstrated failure history in this repo.
 
-**RESOLVED YYYY-MM-DD:** [pending]
+**RESOLVED 2026-07-30: Option A, both limbs, in one architect pass.** The artefact is
+`docs/preclearance/2026-07-22-full-estate-rebuild.md` on branch `docs/preclearance-refresh-2026-07-30`,
+cut off `banking` at `ed3450e`. Both decisions are answered separately below because they were raised
+separately.
+
+**Limb 1, DURABILITY: satisfied, and satisfied literally.** The rescued 225-line addendum is now IN the
+repository, appended to the pre-clearance file **verbatim and unedited**, under a dated provenance banner
+that records what it is, that it was nearly lost, and which of its sections survive re-clearance. It was
+landed by applying `.claude/preserved/2026-07-29-refresh-addendum.patch` rather than by retyping, so
+there is no transcription drift between the rescued file and the committed one. Nothing above it in that
+file was rewritten; the file's existing append-only, dated-addendum convention is preserved. Once this
+branch is committed the work exists in git rather than on one machine, and the `.claude/preserved/`
+copies become redundant backups rather than the only extant version. **Option C is explicitly rejected**
+and should not be reached for again: a gitignored directory is outside version control, and "preserved"
+is not "durable". That is the same reasoning that made `scripts/check-worktrees.sh` a preflight gate.
+
+**Limb 2, VALIDITY: the addendum's GO verdict is NOT valid and does not carry.** It was assessed against
+`ed3450e`, and it fails for a reason larger than the two stale merges the question named:
+
+- The dispatch it cleared **was actually attempted and failed at Step 3** (`platform/security` run
+  `30499221661`, ADR-067). Its GO for that root was falsified by the run itself, before any code change
+  is considered. A pre-clearance whose subject already failed cannot be carried forward on a code diff.
+- **PR #53 (ADR-067) does not invalidate it. It helps.** Assessed file by file: the `sentinel.tf`
+  `depends_on` additions are meta-arguments that create no address and produce no diff, so the Step-3
+  plan shape is byte-identical; the `defender.tf` change is a comment only; the `-parallelism=1` in
+  `_tf-root.yml` is appended to the **apply** step only, keyed on the conditional
+  `inputs.root == 'platform/security'`, which occurs exactly once (`_tf-root.yml:366`). The caller input
+  `root: platform/security` itself occurs twice (`deploy.yml:232`, `teardown.yml:395`), but the teardown
+  caller passes `action: destroy` and the append is gated `if: inputs.action == 'apply'`, so plan and
+  destroy are untouched. Net effect at apply is
+  positive (it closes ADR-067 Classes 1 and 3) with one duration watch-item.
+- **PR #54's `platform/security/providers.tf` change is INERT at apply.**
+  `features.log_analytics_workspace.permanently_delete_on_destroy` was verified against the **pinned
+  azurerm v4.71.0** documentation: Optional, default `false`, and it governs the DESTROY path only. It
+  has no create, read or update path and needs no version bump.
+- **What actually moves the verdict is what none of those changes covers.** ADR-067 Class 2 (a
+  soft-deleted Security LAW being RECOVERED by the create PUT, re-hydrating roughly eleven orphaned
+  `Microsoft.SecurityInsights` children that the emptied state does not know about) is closed **only on
+  the teardown path**, by the native provider purge and by az-sweep step 7b. Neither can act on a
+  workspace that is already in soft delete unless a teardown is dispatched from a ref containing them,
+  and both merged in PR #54 (`2ca1fc5`) on 2026-07-30. **Every teardown run recorded in this repository
+  predates that merge**, so on the available evidence the workspace is more likely than not in soft
+  delete right now, and Step 3 would reproduce Class 2 exactly. Nothing on the apply path purges
+  anything and there is no plan-time signal.
+
+**New verdict: whole-run GO-CONDITIONAL.** No NO-GO and no open code blocker. `platform/security` moves
+GO -> **GO-CONDITIONAL** on **PC-1SEC** (prove the Security LAW is not in soft delete; if it is, purge it
+via a `target=all mode=az-sweep` teardown dispatch from a ref at or after `2ca1fc5`, never by hand), and
+**PC-1Y** (prove the estate is actually greenfield) gates every root, because the last recorded live
+event is a failed partial apply and no committed artefact records a teardown after it. The full per-root
+table, the verified-versus-assumed split, the 2026-07-30 lifecycle re-audit, and the Step-0 amendment to
+the dispatch runbook are all in the 2026-07-30 refresh section of the pre-clearance file.
+
+**Follow-up, deliberately not written as an ADR in that pass to hold scope, recorded here so it is not
+lost:** PC-1SEC generalizes. A purge-on-destroy mechanism is teardown-side and can never repair a rebuild
+whose teardown predates it, so every future pre-clearance should carry an explicit **soft-delete-recovery
+sweep** across every soft-deleting type in the estate: Log Analytics workspace, Key Vault, API Management
+and Cognitive Services. This repo has now been bitten by that class twice, at PC-4S (APIM) and at
+PC-1SEC (LAW). The cheapest durable form is F4 in the refresh's findings table: add the soft-delete
+class to the read-only `teardown-probe.yml`, which today probes extension resources and state blobs but
+queries no soft-delete list at all. Worth an ADR the next time the pre-clearance framework itself is
+touched.
 
 ---
 
