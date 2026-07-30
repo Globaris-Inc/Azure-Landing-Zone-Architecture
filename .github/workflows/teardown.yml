@@ -2,7 +2,7 @@
 # Purpose: Manual, guarded, RELIABLE end-to-end teardown of the whole environment or one
 #          root - zero manual deletion (ADR-054 / docs/teardown-redesign.md).
 # Section: 10 - Pipeline & Tooling (ADR-019, ADR-054, OQ-012/OQ-013).
-# Last updated: 2026-07-29
+# Last updated: 2026-07-30
 #
 # Guards (destroy is irreversible):
 #   1. `confirm` must be typed exactly as `destroy` (a cheap pre-check before any login).
@@ -19,6 +19,20 @@
 #             Deletes every MG-scope policy ASSIGNMENT across the globaris tree BEFORE any
 #             resource deletion, so DINE remediation cannot re-create resources mid-sweep
 #             (fixes F3 - the rg-amba-monitoring-001 resurrection loop).
+#   Phase 0.5 - DATABRICKS PRECASCADE (scripts/teardown-databricks-precascade.sh) - az,
+#             target=all AND mode=terraform only (code-review Finding 2, 2026-07-30, ADR-066
+#             decision 4 PREFERRED form). `enable_data_platform = true` is the LIVE setting
+#             (envs/poc.tfvars), so bank-data-p1's Databricks workspace is genuinely deployed.
+#             Force-deletes the workspace (--no-wait --force-deletion) WHILE IT IS STILL LIVE,
+#             before Phase 1 runs, so the RP-managed resource group cascades cleanly instead of
+#             being retained as an orphan by a later PLAIN terraform destroy (bank-data-p1's
+#             pinned avm-res-databricks-workspace 0.5.0 module issues a plain delete with no
+#             force-deletion). Runs alongside Phase 0 DISARM (both gate on `guard` only, no
+#             ordering dependency between them); `bank-data-p1` (Phase 1, chain position 2)
+#             additionally `needs` this job. Not wired for mode=az-sweep: Phase 1 never runs in
+#             that path, so az-sweep's own step 1 (teardown-az-sweep.sh, unchanged) already
+#             force-deletes the workspace first there - wiring this job there too would be a
+#             redundant duplicate, not a fix.
 #   Phase 1 - DESTROY  (terraform, per root, incl. synthetic) - mode=terraform only. `needs`
 #             is for ORDERING ONLY; every root job's `if:` uses `!cancelled()` (NOT
 #             `!failure()`), so one root's failure never cascade-skips the others (fixes F1).
@@ -55,19 +69,24 @@
 #             thin remnant-catch BELT that runs AFTER all 11 Phase 1 jobs, because
 #             terraform-destroy now covers the bulk of the estate natively: (a) Databricks
 #             workspace-delete cascade (never `az group delete` the RP-managed RG directly -
-#             deny-assignment, fixes F2) - DEFERRED WIRING, see the TODO at that step; no
-#             Databricks is deployed in the current estate so this is not yet load-bearing;
-#             (b) orphaned-RG naming-pattern sweep (belt/backstop); (c) KV soft-delete/purge
-#             report; (d) Security Log Analytics workspace purge (OQ-063) - terraform destroy
-#             only SOFT-deletes the LAW, so this step recovers-then-force-purges it so the
-#             next redeploy creates a genuinely fresh workspace instead of recovering one with
-#             stale Sentinel children; (e) the ADR-057 subscription-scope step 6, now a
-#             no-op backstop in the mode=terraform path (platform/management and
-#             platform/security's own terraform destroy clean subscription scope natively) but
-#             still the PRIMARY mechanism in the mode=az-sweep fallback; (f, gated on
-#             `remove_mg_hierarchy`) bottom-up MG-hierarchy removal for a clean redeploy slate
-#             (ADR-054 section 5 - subs are only re-parented to the tenant root, never
-#             deleted).
+#             deny-assignment, fixes F2) - Databricks IS deployed in this estate
+#             (enable_data_platform=true, envs/poc.tfvars); this step's own force-delete is
+#             typically a no-op belt in the mode=terraform path because the Phase 0.5
+#             `databricks-precascade` job (above) already cascaded the workspace + managed RG
+#             before Phase 1 ran, per ADR-066 decision 4 - see that phase's own comment; (b)
+#             orphaned-RG naming-pattern sweep (belt/backstop); (c) KV soft-delete/purge
+#             report; (d) Security Log Analytics workspace purge (OQ-063) - now runs as this
+#             script's LAST step (step 7b, after the reconcile wait, code-review Finding 1
+#             fix, 2026-07-30) and is a BACKSTOP: `platform/security/providers.tf` purges the
+#             LAW NATIVELY on terraform destroy (Cloud Engineer fix, same pass), so this step
+#             is load-bearing only for the mode=az-sweep fallback (which never runs terraform
+#             destroy) or an older `platform/security` state applied before that fix; (e) the
+#             ADR-057 subscription-scope step 6, now a no-op backstop in the mode=terraform
+#             path (platform/management and platform/security's own terraform destroy clean
+#             subscription scope natively) but still the PRIMARY mechanism in the mode=az-sweep
+#             fallback; (f, gated on `remove_mg_hierarchy`) bottom-up MG-hierarchy removal for a
+#             clean redeploy slate (ADR-054 section 5 - subs are only re-parented to the tenant
+#             root, never deleted).
 #   Phase 3 - VERIFY   (scripts/teardown-verify.sh)   - az, always, last, target=all only.
 #             FAILS LOUDLY (non-zero) if any estate remnant remains. A green Phase 3 IS the
 #             definition of "teardown succeeded E2E" - never a silent half-teardown.
@@ -76,13 +95,18 @@
 #   the bootstrap state backend + OIDC app, so redeploy is immediate. include_bootstrap=true
 #   surfaces a MANUAL scorched-earth runbook (the SP can't delete its own OIDC app, and the
 #   state-backend RG name is non-deterministic - LESSON 18 gap).
-# Scope note (ADR-054, amended ADR-065, RE-AMENDED ADR-066): Phase 0/2/3 (disarm/az-sweep/
-#   verify) only run for target=all - they are whole-estate operations (MG-scope policy
-#   disarm, remnant-catch sweep, MG hierarchy removal) that would be destructive surprises on
-#   an ad hoc single-root destroy. A single-root destroy (target != all) runs ONLY that
-#   root's Phase 1 terraform-destroy, unaffected by the other phases - unchanged by ADR-066,
-#   plus the state-empty resilience fix in `_tf-root.yml` (which applies universally) and the
-#   JIT state-SA firewall flip (`manage_runner_ip: true`, ADR-066 - previously
+# Scope note (ADR-054, amended ADR-065, RE-AMENDED ADR-066): Phase 0/0.5/2/3 (disarm/
+#   databricks-precascade/az-sweep/verify) only run for target=all - they are whole-estate
+#   operations (MG-scope policy disarm, Databricks precascade, remnant-catch sweep, MG
+#   hierarchy removal) that would be destructive surprises on an ad hoc single-root destroy. A
+#   single-root destroy (target != all) runs ONLY that root's Phase 1 terraform-destroy,
+#   unaffected by the other phases - unchanged by ADR-066. This is a known, accepted scope
+#   boundary: a standalone single-root `landing-zones/bank-data-p1` destroy does not get the
+#   Phase 0.5 Databricks precascade belt either, so it still hits the plain-delete
+#   orphan-managed-RG gap Phase 0.5 exists to close at target=all - not a new gap, the same
+#   single-root exclusion every other whole-estate-only phase already carries. Also unaffected
+#   by ADR-066: the state-empty resilience fix in `_tf-root.yml` (which applies universally) and
+#   the JIT state-SA firewall flip (`manage_runner_ip: true`, ADR-066 - previously
 #   `target != 'all'`, ADR-065) so the single-root destroy can reach the firewalled state SA.
 #   A target=all destroy with the default mode=terraform (ADR-066, supersedes ADR-065
 #   decision 1) now RUNS all 11 Phase 1 per-root terraform destroy jobs, SERIALIZED in
@@ -182,7 +206,7 @@ jobs:
           # remains the state-gone fallback (ADR-065 decision 4, kept) - Phase 1 is skipped.
           if [ "$TARGET" = "all" ]; then
             if [ "$MODE" = "terraform" ]; then
-              echo "NOTICE: target=all mode=terraform (default, ADR-066) runs the full waved teardown - Phase 0 DISARM, all 11 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order (one state-SA-touching job open at a time), the Phase 2 az-sweep thin remnant-catch belt, and Phase 3 VERIFY."
+              echo "NOTICE: target=all mode=terraform (default, ADR-066) runs the full waved teardown - Phase 0 DISARM, Phase 0.5 Databricks precascade (force-deletes any live Databricks workspace ahead of Phase 1), all 11 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order (one state-SA-touching job open at a time), the Phase 2 az-sweep thin remnant-catch belt, and Phase 3 VERIFY."
             else
               echo "NOTICE: target=all mode=az-sweep runs the state-gone FALLBACK path (ADR-065 decision 4, kept) - Phase 0 DISARM + Phase 2 AZ SWEEP (whole-estate, its original full-coverage role for this path only) + Phase 3 VERIFY; every Phase 1 per-root terraform destroy job is skipped (gated on mode=='terraform')."
             fi
@@ -210,6 +234,40 @@ jobs:
 
       - name: Disarm all MG-scope policy assignments
         run: bash scripts/teardown-disarm.sh
+
+  # Phase 0.5 - DATABRICKS PRECASCADE (ADR-066 decision 4 PREFERRED form; code-review Finding 2,
+  # 2026-07-30). Runs alongside Phase 0 DISARM (both only `need: [guard]`, no ordering
+  # dependency between them) so the Databricks workspace force-delete is submitted WHILE the
+  # workspace is still live, ahead of Phase 1's bank-data-p1 destroy. target=all AND
+  # mode=terraform only - mode=az-sweep never runs Phase 1 at all, so az-sweep's own step 1
+  # (teardown-az-sweep.sh, unchanged) already force-deletes the workspace first in that path;
+  # wiring this job there too would be a redundant duplicate, not a fix. See
+  # scripts/teardown-databricks-precascade.sh's own header for the full root-cause account.
+  databricks-precascade:
+    name: "Phase 0.5 - DATABRICKS PRECASCADE (force-delete while live)"
+    needs: [guard]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && inputs.target == 'all' && inputs.mode == 'terraform' }}
+    runs-on: ubuntu-latest
+    environment: production-destroy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Force-delete any live Databricks workspace (cascades the managed RG)
+        env:
+          MANAGEMENT_SUBSCRIPTION_ID: ${{ secrets.MANAGEMENT_SUBSCRIPTION_ID }}
+          CONNECTIVITY_SUBSCRIPTION_ID: ${{ secrets.CONNECTIVITY_SUBSCRIPTION_ID }}
+          IDENTITY_SUBSCRIPTION_ID: ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
+          SECURITY_SUBSCRIPTION_ID: ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
+          LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
+        run: bash scripts/teardown-databricks-precascade.sh
 
   # Phase 1 (ADR-066): a strictly LINEAR reverse-dependency `needs` chain of 11 jobs -
   # synthetic -> bank-data-p1 -> bank-app-p1 -> online-p1 -> corp-a2 -> corp-a1 -> security ->
@@ -253,14 +311,19 @@ jobs:
       manage_runner_ip: true
     secrets: inherit
 
-  # NOTE (ADR-066 decision 4, DEFERRED - see the TODO on the Databricks step in
-  # scripts/teardown-az-sweep.sh): bank-data-p1's terraform destroy issues a PLAIN delete on
-  # the Databricks workspace when enable_data_platform=true, which retains an orphan managed
-  # RG that Phase 2's Databricks force-cascade (below, unchanged) runs TOO LATE to help with,
-  # because Phase 2 now runs AFTER this job, not before it. No Databricks is deployed in the
-  # current estate, so this gap is not yet load-bearing - tracked, not fixed, in this change.
+  # NOTE (ADR-066 decision 4, IMPLEMENTED - code-review Finding 2, 2026-07-30): Databricks IS
+  # deployed in this estate (enable_data_platform=true, envs/poc.tfvars), so bank-data-p1's
+  # terraform destroy issuing a PLAIN delete on the workspace (retaining an orphan managed RG)
+  # is genuinely load-bearing, not a theoretical gap. Closed by the new Phase 0.5
+  # `databricks-precascade` job (above), which force-deletes the workspace WHILE IT IS STILL
+  # LIVE, before this job runs - see that job's own comment. `needs` includes it for ORDERING
+  # ONLY (same F1 convention as `synthetic` below - a sibling/helper job's own result is never
+  # gated on here, only guard/disarm are hard gates): if the precascade job itself fails, this
+  # job still RUNS and still goes green (preserving INV-1 - all 11 layers run green), and any
+  # resulting orphan managed RG is then a correct, loud VERIFY 2/3 failure (ADR-066 decision 5),
+  # not a silently-skipped mandatory layer.
   bank-data-p1:
-    needs: [guard, disarm, synthetic]
+    needs: [guard, disarm, databricks-precascade, synthetic]
     if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/bank-data-p1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
@@ -334,10 +397,23 @@ jobs:
       backend_rel: "../../"
       gh_environment: production-destroy
       # ADR-066: chain position 7 of 11. Its terraform destroy also destroys
-      # azurerm_resource_group.security (this root owns and destroys its own RG) - the
-      # Security LAW is only SOFT-deleted here (provider features{} carries no
-      # log_analytics_workspace.permanently_delete_on_destroy flag today); Phase 2's new
-      # OQ-063 belt step purges it afterward (see scripts/teardown-az-sweep.sh).
+      # azurerm_resource_group.security (this root owns and destroys its own RG). The Security
+      # LAW is now PURGED NATIVELY as part of this same destroy
+      # (platform/security/providers.tf sets `permanently_delete_on_destroy = true`, Cloud
+      # Engineer fix, 2026-07-30) - Phase 2's OQ-063 step (teardown-az-sweep.sh, "step 7b") is
+      # now a BACKSTOP for this class, not the primary purge.
+      #
+      # SINGLE-ROOT CALLOUT (Finding 5, code-review, 2026-07-30): the native purge above only
+      # ever applies when this root's OWN terraform destroy actually deletes the workspace. A
+      # single-root `target=platform/security` teardown gets exactly that (the native purge
+      # fires normally, no gap). The gap is the OTHER direction: Phase 2's OQ-063 backstop step
+      # ONLY runs at target=all (it lives in the az-sweep job, target=all only) - so if this
+      # root's destroy is ever run in a way that leaves the LAW merely soft-deleted (e.g. an
+      # older provider config without the purge feature, or a partial/interrupted destroy),
+      # a single-root `platform/security` teardown has NO belt to catch it. Operators tearing
+      # down `platform/security` alone should confirm the provider purge feature is in effect
+      # (or dispatch a target=all run at least once) rather than assume LAW-clean from a
+      # single-root run alone.
       manage_runner_ip: true
     secrets: inherit
 
