@@ -173,11 +173,46 @@ state-reset:
   environment: production-destroy
 ```
 
-**Reviewer note, written here because it will look like a defect:** every other destructive job in
+~~**Reviewer note, written here because it will look like a defect:** every other destructive job in
 `teardown.yml` uses `!cancelled()` so one root's failure cannot cascade-skip the others (the F1 fix).
 Phase 4 deliberately does NOT. Its entire safety argument is that the estate has been PROVEN empty
 first, and `!cancelled()` would let it run after a failed or skipped VERIFY, which is FM-1 manufactured
-on purpose. Do not normalise this job to the file convention.
+on purpose. Do not normalise this job to the file convention.~~
+
+> **ADDENDUM 2026-07-30 - the struck note above is WRONG, and so is the `if:` in the YAML block above
+> it. Caught at the code-review gate before Phase 4 ever ran.**
+>
+> The corrected condition, which the implementation now carries:
+>
+> ```
+> if: ${{ !cancelled() && needs.guard.result == 'success' && needs.verify.result == 'success' && inputs.target == 'all' }}
+> ```
+>
+> **Why the original was wrong.** GitHub Actions applies an IMPLICIT `success()` requirement across
+> every job listed in `needs:` unless the `if:` expression itself invokes a status-check function
+> (`success()`, `failure()`, `cancelled()`, `always()`). A plain string comparison such as
+> `needs.verify.result == 'success'` does NOT count as invoking one. At `mode=az-sweep` all 11 Phase-1
+> jobs are gated on `inputs.mode == 'terraform'` and report `skipped`, so the implicit `success()` over
+> this job's 13-entry `needs:` list fails and GitHub auto-skips Phase 4 entirely - **in the exact mode
+> this ADR exists to fix**, with the run still green because a skipped job is not a failed one. An
+> operator following the runbook would reset state through the teardown, watch it pass, and get nothing.
+>
+> **Why the safety argument survives intact.** `!cancelled()` removes only the implicit
+> all-needs-must-succeed default. It does not weaken the explicit `needs.verify.result == 'success'`
+> conjunct, which remains the whole gate: Phase 4 still cannot run after a failed, skipped or cancelled
+> VERIFY, so FM-1 stays impossible. The two mechanisms were conflated in the original reasoning.
+>
+> **Corroboration in-file:** the sibling `az-sweep` and `verify` jobs depend on the same 11 Phase-1
+> jobs and both carry `!cancelled()`, which is precisely why they ran in run `30576653339`
+> (`mode=az-sweep`) while every Phase-1 job around them showed `skipped`. **17 of the 18 jobs** in
+> `teardown.yml` carry `!cancelled()` on their job-level `if:` (verified with
+> `grep -E '^    if: .*!cancelled\(\)'`); the only job without one is `guard`, which has no `if:` at
+> all because it is the entry job with no dependencies. The first draft of `state-reset` was the sole
+> job with an `if:` that omitted it.
+>
+> Also amended: `mode=terraform` per-root eligibility now behaves as decision 4 always intended - a
+> single failed Phase-1 destroy no longer cascade-skips the whole job, so roots that DID destroy
+> cleanly still get reset while the failed one is correctly excluded by the per-key check.
 
 This satisfies the pre-registered FIX-6 ordering invariant on both of its limbs, without weakening
 either:

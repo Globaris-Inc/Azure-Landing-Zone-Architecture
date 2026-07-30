@@ -13,8 +13,11 @@
 #      reviewer) - this is also the ONLY federated credential trust configured for these
 #      operations (bootstrap/identity.tf), so it doubles as an OIDC auth requirement.
 #
-# Four-phase design (ADR-054, full fix-spec docs/teardown-redesign.md), fixing 4 root causes
-# from an earlier E2E failure that forced manual deletion:
+# Five-phase design (ADR-054, full fix-spec docs/teardown-redesign.md; Phase 4 added by
+# ADR-068), fixing 4 root causes from an earlier E2E failure that forced manual deletion, plus
+# the ADR-068 state-blob gap found in a later rebuild (a green target=all teardown left every
+# workload/platform Terraform state blob fully populated, because mode=az-sweep never runs
+# Phase 1 and Phase 1's own destroy is the only thing that ever emptied state natively):
 #   Phase 0 - DISARM   (scripts/teardown-disarm.sh)   - az, always, first, target=all only.
 #             Deletes every MG-scope policy ASSIGNMENT across the globaris tree BEFORE any
 #             resource deletion, so DINE remediation cannot re-create resources mid-sweep
@@ -90,6 +93,19 @@
 #   Phase 3 - VERIFY   (scripts/teardown-verify.sh)   - az, always, last, target=all only.
 #             FAILS LOUDLY (non-zero) if any estate remnant remains. A green Phase 3 IS the
 #             definition of "teardown succeeded E2E" - never a silent half-teardown.
+#   Phase 4 - STATE RESET (scripts/teardown-state-reset.sh) - az, target=all only, HARD-gated
+#             on `needs.verify.result == 'success'` (not the file's usual `!cancelled()`
+#             convention - see the state-reset job's own comment for why that is deliberate).
+#             Overwrites every eligible workload/platform Terraform state blob with a
+#             canonical, metadata-labelled EMPTY document (never deletes a blob - deletion is
+#             permanently forbidden, INV-STATE, ADR-068) so a `target=all` teardown that goes
+#             green also leaves the state backend behaving as if it had never been used,
+#             identically in both modes. Two permanent/conditional carve-outs
+#             (`platform/identity` under mode=az-sweep; `platform/management-groups` unless
+#             `remove_mg_hierarchy=true`) are NOT reset - see that script's own header for the
+#             full evidence-boundary reasoning. This closes the gap where a `mode=az-sweep`
+#             teardown (Phase 1 never runs there) left every workload/platform root's state
+#             fully populated describing resources VERIFY had just proven gone.
 #
 # Scope (OQ-012, unchanged): default tears down the 9 workload/platform roots ONLY and KEEPS
 #   the bootstrap state backend + OIDC app, so redeploy is immediate. include_bootstrap=true
@@ -206,9 +222,9 @@ jobs:
           # remains the state-gone fallback (ADR-065 decision 4, kept) - Phase 1 is skipped.
           if [ "$TARGET" = "all" ]; then
             if [ "$MODE" = "terraform" ]; then
-              echo "NOTICE: target=all mode=terraform (default, ADR-066) runs the full waved teardown - Phase 0 DISARM, Phase 0.5 Databricks precascade (force-deletes any live Databricks workspace ahead of Phase 1), all 11 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order (one state-SA-touching job open at a time), the Phase 2 az-sweep thin remnant-catch belt, and Phase 3 VERIFY."
+              echo "NOTICE: target=all mode=terraform (default, ADR-066) runs the full waved teardown - Phase 0 DISARM, Phase 0.5 Databricks precascade (force-deletes any live Databricks workspace ahead of Phase 1), all 11 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order (one state-SA-touching job open at a time), the Phase 2 az-sweep thin remnant-catch belt, Phase 3 VERIFY, and (ADR-068, if VERIFY passes) Phase 4 STATE RESET - each Phase 1 root's state is reset only if that root's OWN destroy job succeeded (identity is eligible in this mode)."
             else
-              echo "NOTICE: target=all mode=az-sweep runs the state-gone FALLBACK path (ADR-065 decision 4, kept) - Phase 0 DISARM + Phase 2 AZ SWEEP (whole-estate, its original full-coverage role for this path only) + Phase 3 VERIFY; every Phase 1 per-root terraform destroy job is skipped (gated on mode=='terraform')."
+              echo "NOTICE: target=all mode=az-sweep runs the state-gone FALLBACK path (ADR-065 decision 4, kept) - Phase 0 DISARM + Phase 2 AZ SWEEP (whole-estate, its original full-coverage role for this path only) + Phase 3 VERIFY; every Phase 1 per-root terraform destroy job is skipped (gated on mode=='terraform'). If VERIFY passes, Phase 4 STATE RESET (ADR-068) then resets every eligible workload/platform state blob to canonical empty EXCEPT platform/identity (carve-out A - never reset in this mode, since VERIFY has no Entra/PIM check) and platform/management-groups unless remove_mg_hierarchy=true (carve-out B)."
             fi
           fi
           echo "Confirmed. target=$TARGET mode=$MODE include_bootstrap=$INCLUDE_BOOTSTRAP remove_mg_hierarchy=$REMOVE_MG_HIERARCHY"
@@ -566,6 +582,147 @@ jobs:
           LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
           REMOVE_MG_HIERARCHY: ${{ inputs.remove_mg_hierarchy }}
         run: bash scripts/teardown-verify.sh
+
+  # Phase 4 - STATE RESET (ADR-068, DECISIONS.md). Runs scripts/teardown-state-reset.sh, which
+  # overwrites (never deletes - INV-STATE) every eligible workload/platform Terraform state
+  # blob with a canonical, metadata-labelled EMPTY document, so a green target=all teardown
+  # also leaves the state backend behaving as if it had never been used - closing the gap
+  # where mode=az-sweep (Phase 1 never runs there) left every root's state fully populated
+  # describing resources VERIFY had just proven gone. See that script's own header for the
+  # full per-key eligibility rules (carve-out A: platform/identity, never reset under
+  # mode=az-sweep; carve-out B: platform/management-groups, only when
+  # remove_mg_hierarchy=true) and for why "reset an already-empty blob" is a clean no-op, not
+  # a special case.
+  #
+  # THE `!cancelled()` PREFIX IS LOAD-BEARING. DO NOT REMOVE IT.
+  #
+  # CORRECTED 2026-07-30 at the code-review gate, before this ever ran. The first version of
+  # this job omitted `!cancelled()` on the reasoning that a hard `needs.verify.result ==
+  # 'success'` gate was stricter, and carried a comment forbidding anyone from "fixing" it.
+  # That reasoning was wrong, and ADR-068 decision 2's own quoted YAML carried the same defect
+  # (see its 2026-07-30 addendum). GitHub Actions applies an IMPLICIT `success()` requirement
+  # across every job in `needs:` UNLESS the `if:` expression itself invokes a status-check
+  # function (`success()`, `failure()`, `cancelled()`, `always()`). A plain string comparison
+  # like `needs.verify.result == 'success'` does NOT count as invoking one.
+  #
+  # Consequence of the omission: at `mode=az-sweep` all 11 Phase-1 jobs are gated on
+  # `inputs.mode == 'terraform'` and report `skipped`, so the implicit `success()` over this
+  # job's 13-entry `needs:` list fails and GitHub auto-skips Phase 4 outright - in the exact
+  # mode ADR-068 exists to fix, with the run still reporting green because a skipped job is
+  # not a failed one. An operator following the runbook would "reset state through the
+  # teardown", watch it go green, and get nothing.
+  #
+  # `!cancelled()` removes only that IMPLICIT all-needs-must-succeed default. It does not
+  # weaken the EXPLICIT `needs.verify.result == 'success'` conjunct below, which remains the
+  # entire safety gate: Phase 4 still cannot run after a failed, skipped or cancelled VERIFY,
+  # so FM-1 (state emptied while resources may be live) stays impossible. This is the same
+  # shape the sibling `az-sweep` and `verify` jobs already use, and the reason they run at all
+  # in az-sweep mode while the Phase-1 jobs around them are skipped.
+  #
+  # If a future change makes VERIFY itself target-selective or partial, re-examine the
+  # explicit conjunct THEN. Do not touch the `!cancelled()` prefix.
+  state-reset:
+    name: "Phase 4 - STATE RESET (canonical empty state, ADR-068)"
+    needs: [guard, verify, synthetic, bank-data-p1, bank-app-p1, online-p1, corp-a2, corp-a1,
+            security, connectivity, identity, management, management-groups]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.verify.result == 'success' && inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    environment: production-destroy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required repo Variables (LESSON 15 - vars, not secrets)
+        run: |
+          missing=""
+          [ -n "${{ vars.AZURE_CLIENT_ID }}" ]       || missing="$missing AZURE_CLIENT_ID"
+          [ -n "${{ vars.AZURE_TENANT_ID }}" ]       || missing="$missing AZURE_TENANT_ID"
+          [ -n "${{ vars.AZURE_SUBSCRIPTION_ID }}" ] || missing="$missing AZURE_SUBSCRIPTION_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required repository Variables:$missing (Settings -> Variables, NOT Secrets)"
+            exit 1
+          fi
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Same JIT open/3-consecutive-probe-wait pattern as teardown-probe.yml's own "Open state
+      # SA firewall" step (ADR-025) - copied rather than shared, matching that workflow's own
+      # precedent (it has no Terraform root/backend_rel context to reuse _tf-root.yml's step
+      # from, and this job has none either). This job is always the LAST job in a target=all
+      # run that ever touches the state SA (it needs every Phase 1 job plus verify), so exactly
+      # one flip is ever open at a time (LESSON 31) - safe by construction.
+      - name: Open state SA firewall for this run (ADR-025)
+        env:
+          BACKEND_HCL: envs/poc.backend.hcl
+        run: |
+          set -euo pipefail
+          SA_NAME="$(grep -E '^\s*storage_account_name' "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          RG_NAME="$(grep -E '^\s*resource_group_name'  "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          CONTAINER="$(grep -E '^\s*container_name'     "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
+          echo "Flipping default_action=Allow on $SA_NAME (rg $RG_NAME) for this state-reset run"
+          az storage account update \
+            --name "$SA_NAME" --resource-group "$RG_NAME" \
+            --default-action Allow --output none
+          echo "STATE_SA_NAME=$SA_NAME" >> "$GITHUB_ENV"
+          echo "STATE_SA_RG=$RG_NAME"   >> "$GITHUB_ENV"
+          echo "SA_OPENED=1"            >> "$GITHUB_ENV"
+          # default_action=Allow is monotonic once propagated but NOT instant and NOT
+          # consistent across front-end nodes at the moment it flips (same caveat _tf-root.yml
+          # documents) - require 3 CONSECUTIVE successful blob-list probes, 8s apart, before
+          # declaring the firewall open.
+          echo "Waiting for the state-SA firewall to open (3 consecutive probe successes required)..."
+          ready=0
+          consecutive=0
+          for i in $(seq 1 32); do
+            if az storage blob list \
+                 --account-name "$SA_NAME" --container-name "$CONTAINER" \
+                 --auth-mode login --num-results 1 --only-show-errors -o none 2>/dev/null; then
+              consecutive=$((consecutive + 1))
+              echo "Probe success $consecutive/3 (~$(( (i-1) * 8 ))s elapsed)."
+              if [ "$consecutive" -ge 3 ]; then
+                echo "State SA firewall settled after ~$(( (i-1) * 8 ))s."
+                ready=1; break
+              fi
+            else
+              if [ "$consecutive" -gt 0 ]; then
+                echo "Probe FAILED after $consecutive success(es) - propagation not settled; counter reset."
+              fi
+              consecutive=0
+            fi
+            sleep 8
+          done
+          if [ "$ready" != "1" ]; then
+            echo "::error::State SA firewall did not settle (3 consecutive probe successes) within ~256s."
+            exit 1
+          fi
+
+      - name: Reset eligible state blobs to canonical empty (Phase 4, ADR-068)
+        env:
+          TEARDOWN_MODE: ${{ inputs.mode }}
+          REMOVE_MG_HIERARCHY: ${{ inputs.remove_mg_hierarchy }}
+          # Per-root Phase 1 destroy job results, so the script can compute per-key
+          # eligibility (ADR-068 decision 4) without any second API call - GITHUB_RUN_ID and
+          # GITHUB_SHA (used for the blob metadata stamp) are already present in every step's
+          # environment by default and are not set here.
+          PHASE1_RESULTS_JSON: ${{ toJSON(needs) }}
+        run: bash scripts/teardown-state-reset.sh
+
+      # Always restore default_action=Deny, even if a prior step failed, so the state SA never
+      # stays publicly reachable past this run.
+      - name: Restore state SA firewall to Deny (ADR-025)
+        if: ${{ always() && env.SA_OPENED == '1' }}
+        run: |
+          set -uo pipefail
+          echo "Restoring default_action=Deny on $STATE_SA_NAME"
+          az storage account update \
+            --name "$STATE_SA_NAME" --resource-group "$STATE_SA_RG" \
+            --default-action Deny --output none || \
+            echo "::warning::Failed to restore Deny on $STATE_SA_NAME - set default_action=Deny manually."
 
   # Scorched earth (OQ-012 = false by default). The SP cannot delete its own OIDC app
   # (needs Entra/Graph rights, not ARM Owner) and the state-backend RG name is
