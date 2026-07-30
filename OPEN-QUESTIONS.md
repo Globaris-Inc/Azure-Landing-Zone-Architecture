@@ -36,12 +36,15 @@
 - **Raised:** 2026-07-29 (diagnosing the platform/security clean-empty-state apply, run 30499221661; ADR-067)
 - **Section:** 6 (Defender for Cloud + Sentinel) / 10 (teardown). Relates to ADR-067, the ADR-054/066 teardown
   workstream, and the "teardown incomplete at subscription scope" finding.
-- **Blocking:** YES until implemented. Updated 2026-07-29: the user's process change (any layer failure = full
+- **Blocking:** ~~YES until implemented.~~ **CLEARED 2026-07-30 - implemented and code-review APPROVED; see
+  the RESOLVED block below.** Updated 2026-07-29: the user's process change (any layer failure = full
   teardown-and-restart from Step 1, no import-and-continue - ADR-067 addendum) makes this blocking, not a
   deferred tax. The restart's Step 3 (platform/security) will reproduce the exact ~11 "already exists" Class 2
   failure UNLESS the teardown purges the soft-deleted Security LAW first. Being RESOLVED by the ADR-066
-  all-layers-green teardown workstream (ADR-066 on `docs/adr-teardown-all-layers-green`, commit 0dac862): the
-  LAW-purge MUST land before the restart reaches Step 3.
+  all-layers-green teardown workstream (ADR-066 on `docs/adr-teardown-all-layers-green`, ~~commit 0dac862~~
+  [corrected 2026-07-30: the rebase onto `origin/banking` rewrote that hash, so it no longer resolves. The
+  ADR-066 doc commit is now `9974efa` on that branch. Cite the branch and the ADR number, not a hash, which
+  any rebase invalidates]): the LAW-purge MUST land before the restart reaches Step 3.
 - **Priority:** High (was Medium; raised because it now gates the restart).
 
 **Question:**
@@ -64,6 +67,118 @@ days - a different constraint that may instead need a recover-on-rebuild path)?
 - C: For the KV specifically, purge protection forbids a hard purge for 90 days; if a rebuild lands inside that
   window the security apply must RECOVER the KV (or the AVM module must be told to recover) rather than create.
   Track whether the current teardown/rebuild path already handles this or needs an explicit recover step.
+
+**RESOLVED 2026-07-30 (design and implementation; live proof carried by OQ-062):** YES, teardown hard-purges
+the Security LAW. Option A is adopted and implemented, in the SAME teardown pass as ADR-066 (the coupling
+OQ-062 asked for), and code-review APPROVED on re-review 2026-07-30 with all five prior BLOCK findings
+verified closed. Option B stays void. The mechanism is two-layer, primary and backstop:
+
+- **PRIMARY (`mode=terraform`, which is the default path at `target=all` after ADR-066):**
+  `platform/security/providers.tf` now sets `features { log_analytics_workspace {
+  permanently_delete_on_destroy = true } }` on the root's DEFAULT `azurerm` provider, which is the instance
+  that creates the `security_law` module (no `providers =` override on that module call). Phase 1's
+  `platform/security` `terraform destroy` therefore PURGES the workspace natively, in the same operation that
+  would otherwise only soft-delete it. The argument is real rather than assumed: verified against the pinned
+  azurerm v4.71.0 features schema when it was written and again at code review. It defaults FALSE, so it had
+  to be set explicitly. This is the systemic fix ADR-067 decision 3 called for, and it makes the purge a
+  property of the OWNING ROOT rather than of a sweep script, which is the durable shape.
+- **BACKSTOP (`mode=az-sweep`, or a `platform/security` state applied before the provider feature landed):**
+  `scripts/teardown-az-sweep.sh` step 7b recovers the soft-deleted workspace into a placeholder RG,
+  force-purges it, then removes the placeholder. It was MOVED from step 3b to step 7b so it runs AFTER
+  `wait_for_rgs_gone`, closing a race in which the security RG's `--no-wait` delete had not yet landed the
+  workspace in soft-delete, so the step printed "nothing to do" and exited clean on a workspace that then
+  soft-deleted minutes later. Idempotent by design: a workspace that is not in soft-delete (already purged
+  natively, or purged by a prior run) is success, not an error.
+
+**Limb C (the Security Key Vault) is answered, and the answer is that no separate recover step is needed.**
+ADR-066's F2 verdict item 1 read the pinned provider source: with `purge_protection_enabled = true`
+(`platform/security/main.tf`) azurerm does NOT attempt the purge on destroy. It logs that Azure will purge
+automatically and returns success. So the vault soft-deletes as a SUCCESSFUL destroy and the 90-day retention
+is respected rather than fought. A rebuild inside that window RECOVERS the vault instead of colliding on the
+name, through the azurerm `key_vault` feature defaults (`recover_soft_deleted_key_vaults` and
+`purge_soft_delete_on_destroy` both default true). Adding the `log_analytics_workspace` sub-block does not
+disturb that: each `features` sub-block carries its own defaults, so omitting `key_vault` still yields the
+documented defaults. The KV is therefore a post-destroy REPORT item (VERIFY 5, informational), not a
+teardown-completeness gap, and limb C needs no further work.
+
+**What this resolution does NOT claim.** It is not live-proven. Neither the native purge nor the step-7b
+backstop has yet run against a real soft-deleted workspace. That proof obligation is carried by OQ-062, item
+(e) of its 2026-07-30 update, and is deliberately NOT duplicated here so one test has one owner. If that run
+shows the Security LAW still sitting in soft-delete after a `target=all` teardown, REOPEN this entry: a
+stale-soft-delete survivor is the exact condition it exists to close.
+
+**Operational precondition, which is the real gate and not a design question.** The blocking flag clears on
+MERGE, not on authoring. The branch carrying both mechanisms must be merged into `banking` BEFORE the teardown
+that precedes the rebuild's Step 3 is dispatched. A teardown dispatched from a ref WITHOUT the provider
+feature soft-deletes the workspace again and reproduces the ADR-067 Class 2 failure on the next security
+apply, with no signal at plan time.
+
+**Standing consequence, recorded because it is permanent.** `permanently_delete_on_destroy` is a
+PROVIDER-level (root-wide) feature, not a per-resource argument. Any FUTURE Log Analytics workspace added to
+`platform/security` is therefore also permanently purged on ANY destroy of that root, including an accidental
+wrong-root destroy, with no 14-day recovery window. That is intended for the Security LAW and is the trade
+this resolution makes, but it is a real and permanent widening of that root's destroy blast radius. Anyone
+adding a second workspace to `platform/security` must know it; a workspace that needs the soft-delete safety
+net belongs in a different root.
+
+### OQ-062: All-layers-green teardown (ADR-066) is proven by doc/provider reasoning only - it must be CONFIRMED on the next full `enable_data_platform=true` deploy then teardown, and the Databricks orphan-managed-RG handling chosen
+
+- **Raised:** 2026-07-29 (recorded with ADR-066, which re-derived the teardown model against the user's all-layers-green requirement)
+- **Section:** 10 (Pipeline & Tooling) / teardown; extends ADR-066, ADR-054/055/057, ADR-065 (partially superseded)
+- **Blocking:** No for landing ADR-066's design and the teardown.yml change. Yes for calling all-layers-green PROVEN, and for finalising the Databricks belt form (decision 4 preferred vs alternative).
+- **Priority:** Medium (High the moment a full teardown is next dispatched).
+
+**Question:**
+
+The estate is EMPTY right now, so ADR-066's central claim - that all 11 per-layer `terraform destroy` jobs RUN and go green in reverse-dependency order, serialized, each with the per-job JIT state-SA firewall flip - cannot be empirically tested today. ADR-066 is grounded in provider source (azurerm v4.71.0 KV delete skips the purge), module source (the pinned `avm-res-databricks-workspace 0.5.0` issues a PLAIN azapi workspace delete with no `forceDeletion`), and current Microsoft docs (plain workspace delete retains the managed RG; ARM `forceDeletion` exists at api-version 2026-01-01). Those are strong but they are reasoning, not a live run.
+
+What must be proven on the NEXT full deploy (with `enable_data_platform = true`) then teardown:
+- (a) all 11 serialized layer destroys go GREEN end to end within the ADR-055 durable-OIDC envelope, including the slow APIM / AKS / Databricks deletes;
+- (b) whether the orphan Databricks managed RG's deny-assignment survives a plain workspace delete in THIS estate's Unity-Catalog-by-default configuration - this decides whether the ADR-066 decision-4 ALTERNATIVE (`az group delete --force-deletion-types Microsoft.Databricks/workspaces` on the orphan) is needed and actually bypasses the deny-assignment; the PREFERRED form (run the workspace force-cascade as a Phase 0.5 belt while the workspace is still live) sidesteps this and is the recommended default;
+- (c) the 11-in-a-row per-job firewall flip is race-free as a sequence and the state SA reads Deny between jobs (audit `default_action`);
+- (d) a follow-on greenfield apply succeeds with NO Databricks managed-RG name collision.
+
+Exact test: dispatch teardown `target=all` in the new waved mode against a fully deployed estate and require DISARM green, all 11 Phase-1 jobs green in reverse order, one-open-at-a-time firewall audit, the az-sweep belt green (orphan managed RG removed or cascade confirmed), VERIFY green, then a clean greenfield apply.
+
+**Same-pass coupling:** OQ-063 / ADR-067 (purge the soft-deleted Security Log Analytics workspace so rebuilds start clean, ~~tracked on the other branch~~ [corrected 2026-07-30, no longer a separate branch, see the update immediately below]) is ALSO a teardown-completeness item. It should be implemented in the SAME teardown pass as ADR-066 so a single full deploy -> teardown proves both, rather than two separate teardown cycles.
+
+**Update 2026-07-30 (post-rebase; the same-pass coupling above is SATISFIED, and this entry now carries the
+LAW-purge proof too).** ADR-067 / OQ-063 merged into `banking` (PR #53, `d8da413`) and the ADR-066 branch was
+rebased on top, so ADR-065, ADR-066 and ADR-067, and OQ-061, OQ-062 and OQ-063, now live in one tree. The
+"other branch" framing above is dead. More than that, the coupling actually happened rather than merely being
+recommended: the LAW purge landed in the SAME teardown pass as ADR-066, as a native provider feature on
+`platform/security` plus the `scripts/teardown-az-sweep.sh` step-7b backstop (see OQ-063, RESOLVED
+2026-07-30). One full deploy then teardown therefore proves both workstreams, which is what this paragraph
+asked for. Consequently:
+
+- **(e) is added to the exact test above:** the Security LAW must be GONE, not soft-deleted, after the
+  `target=all` teardown. Check `az monitor log-analytics workspace list-deleted-workspaces` on the security
+  subscription and require ZERO rows for the security workspace name. In a `mode=terraform` run this proves
+  the native provider purge; a `mode=az-sweep` run instead proves the step-7b backstop, including that it
+  finds the workspace in soft-delete AFTER `wait_for_rgs_gone` rather than before it (the race the step-3b to
+  step-7b move closed). Ideally exercise the backstop at least once, since the primary path hides it.
+- **(f), the cheap and decisive follow-on:** the greenfield apply in (d) must also show `platform/security`
+  CREATING a fresh workspace with ZERO "already exists / needs import" errors on any
+  `Microsoft.SecurityInsights` child. That single observation closes the ADR-067 Class 2 loop end to end. If
+  those errors reappear, the purge did not happen and OQ-063 REOPENS.
+
+**Carried defect, non-blocking, wording only (found at the 2026-07-30 code re-review, recorded here so it is
+not lost).** `scripts/teardown-databricks-precascade.sh:59` prints, on failure, that Phase 0.5 is "a hard gate
+ahead of Phase 1's bank-data-p1 destroy (ADR-066 decision 4)". The verified wiring is the OPPOSITE and the
+opposite is CORRECT: `bank-data-p1` lists `databricks-precascade` in `needs` for ORDERING only, its `if:`
+never reads `needs.databricks-precascade.result`, so the layer still runs and still goes green if the
+precascade fails, which is what preserves ADR-066 INV-1 (all 11 layers run and go green) and lets a resulting
+orphan managed RG surface as a loud VERIFY 2/3 failure instead of a silently skipped mandatory layer. The
+error text can therefore mislead an operator reading a failed CI log into thinking the teardown stopped when
+it did not. Behaviour is right, the sentence is wrong. Not fixed in this pass (the code on that branch is
+review-APPROVED and frozen); fold the one-line wording fix into the next teardown-script change, and do NOT
+"fix" the workflow to match the sentence.
+
+**Options being considered:**
+- A (recommended): implement ADR-066 with the decision-4 PREFERRED Databricks handling (force-cascade before Phase 1), dispatch the waved teardown on the next full estate, and gate "proven" on the exact test above.
+- B: also have the Cloud Engineer check the Terraform Registry for a newer `avm-res-databricks-workspace` version exposing `delete_query_parameters` / a force-deletion input; if one exists and is pinned, drop the Databricks belt entirely and let terraform destroy cascade the managed RG natively (the cleanest end-state, all-layers pure terraform).
+
+**RESOLVED YYYY-MM-DD:** [pending the next full deploy -> teardown]
 
 ### OQ-061: The CI service principal depends on at least five UNDECLARED out-of-band grants, including tenant-root User Access Administrator - the repo's identity model and the live tenant have drifted apart
 

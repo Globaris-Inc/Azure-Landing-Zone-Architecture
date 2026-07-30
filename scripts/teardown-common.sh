@@ -78,6 +78,19 @@
 # is intentionally OUT OF SCOPE for this fix (a different owner/lane and a different PR). Not
 # silently dropped: it remains open and tracked as its own item in OPEN-QUESTIONS.md (OQ-053,
 # "Recommended default: A now... with B considered if it recurs").
+#
+# AMENDED a seventh time 2026-07-29 (ADR-066, folds in OQ-063): added the SECURITY_LAW_*
+# constants below, consumed by the new Phase 2 step (teardown-az-sweep.sh, "step 3b" as
+# originally added, MOVED to "step 7b" 2026-07-30 - code-review Finding 1, see that script's own
+# header) that purges the soft-deleted Security Log Analytics workspace. Root cause: absent a
+# native purge-on-destroy provider feature, a `platform/security` destroy or RG delete only
+# SOFT-deletes the LAW, so a redeploy within the 14-day soft-delete window RECOVERS the
+# same-named workspace together with its prior Microsoft.SecurityInsights children (Sentinel
+# analytics rules, data connector) - objects the freshly-emptied Terraform state does not know
+# about, producing the "already exists" Class 2 failure OQ-063 diagnoses. See that step's own
+# comment for the full recover-then-purge mechanism, the resource-group-recreation caveat it is
+# built around, and why it is now a BACKSTOP (`platform/security/providers.tf` purges the LAW
+# natively on terraform destroy as of 2026-07-30, Cloud Engineer fix).
 
 # ARM management-plane base URL, used by every direct `az rest` call in teardown-disarm.sh,
 # teardown-az-sweep.sh, teardown-verify.sh, and scripts/teardown-probe-extensions.sh. Promoted
@@ -135,6 +148,21 @@ DEFENDER_PLANS_TO_FREE=(VirtualMachines StorageAccounts AppServices SqlServers \
 # line to empty if OQ-049 lands (moving registration out of the root removes this need
 # entirely, per LESSON 54).
 RP_NAMESPACES_TO_UNREGISTER=(Microsoft.CostManagementExports)
+
+# Security Log Analytics workspace purge (OQ-063, ADR-066) - fixed identifiers,
+# not a naming-pattern match, because this step targets exactly ONE known object by name, not
+# a discovered class. Sourced from platform/security/main.tf's own naming
+# ("law-security-${var.org_prefix}-${var.environment}" / "rg-security-${var.org_prefix}-${var.
+# environment}") and envs/poc.tfvars (org_prefix=globaris, environment=poc) - MUST be kept in
+# lock-step with those two files if either ever renames the security root's workspace or RG
+# (same coupling discipline RG_SWEEP_QUERY and DEFENDER_PLANS_TO_FREE above already carry).
+# api-version matches the REST example in Microsoft's own "Delete and recover an Azure Log
+# Analytics workspace" doc (learn.microsoft.com/en-us/azure/azure-monitor/logs/delete-workspace,
+# ms.date verified live 2026-07-29) - used only for the post-purge confirm-GET below; every
+# CLI command (recover/delete) uses the CLI's own bundled api-version, never this constant.
+SECURITY_LAW_WORKSPACE_NAME="law-security-globaris-poc"
+SECURITY_LAW_RESOURCE_GROUP_NAME="rg-security-globaris-poc"
+SECURITY_LAW_API_VERSION="2025-07-01"
 
 # is_owned_policy_object "<name>" "<policyAssignmentId>" - the ADR-062 decision 2 ownership
 # predicate (docs/teardown-redesign.md section 14.2), shared by Phase 2 sub-step 6d (what gets
@@ -514,6 +542,69 @@ discover_live_rgs() {
   az_run "$__out_var" group list --subscription "$__sub" --query "$RG_SWEEP_QUERY" -o tsv
 }
 
+# databricks_force_delete_cascade <managed_rgs_outvar> <managed_rg_subs_outvar> - lists every
+# Databricks workspace across every estate subscription (teardown_subscriptions) and submits a
+# --no-wait --force-deletion delete for each (architect pre-clearance C1: --force-deletion is
+# what makes the workspace delete itself cascade the RP-managed resource group cleanup instead
+# of retaining it - a plain delete RETAINS the managed RG, per Microsoft's own "Delete a
+# workspace" doc). Appends the managed resource-group name/subscription pair for every
+# successfully-submitted delete onto the two NAMED arrays (bash nameref, `local -n`, bash >=4.3 -
+# ubuntu-latest ships bash 5) so a caller can wait on them later.
+#
+# Shared by TWO call sites (ADR-066 decision 4, ADR-066 Finding 2 code-review follow-up,
+# 2026-07-30): the unchanged Phase 2 az-sweep step 1 below, and the new Phase 0.5
+# `scripts/teardown-databricks-precascade.sh` belt that runs BEFORE Phase 1 so the cascade acts
+# on a still-live workspace - promoted here so the exact az invocation cannot drift between the
+# two call sites, the same discipline already applied to confirm_gone_by_get/discover_live_rgs/
+# is_estate_owned above after each was independently duplicated.
+#
+# List-call failure: a live subscription's own Databricks workspace list can never legitimately
+# fail (section 9.4 design boundary, same as every other subscription-scoped list in this
+# codebase) - FAIL LOUD, return 1 (caller's own ::error:: convention applies; this function
+# prints its own ::error:: before returning, matching az_run-consuming callers elsewhere).
+# Delete-submission failure: classify with is_auth_error - auth-shaped fails loud (return 1);
+# anything else is a warn-and-continue (idempotent retry on next run), matching every other
+# delete in this codebase. Zero workspaces found in any subscription is success (both arrays
+# left empty), not an error.
+databricks_force_delete_cascade() {
+  local -n __dbx_out_rgs="$1"
+  local -n __dbx_out_subs="$2"
+  local sub row ws_name ws_rg managed_rg_id managed_rg_name
+  local dbx_rows_out dbx_del_out
+  local -a dbx_rows
+  for sub in $(teardown_subscriptions); do
+    if ! az_run dbx_rows_out databricks workspace list --subscription "$sub" \
+        --query "[].[name, resourceGroup, managedResourceGroupId]" -o tsv; then
+      echo "::error::Databricks workspace list failed for subscription ${sub} - a failed list is never read as 'no workspaces' (section 9.4): ${AZ_RUN_STDERR}"
+      return 1
+    fi
+    # shellcheck disable=SC2154  # dbx_rows_out is assigned indirectly by az_run's printf -v
+    mapfile -t dbx_rows <<< "$dbx_rows_out"
+    for row in "${dbx_rows[@]:-}"; do
+      [ -z "$row" ] && continue
+      ws_name="$(printf '%s' "$row" | cut -f1)"
+      ws_rg="$(printf '%s' "$row" | cut -f2)"
+      managed_rg_id="$(printf '%s' "$row" | cut -f3)"
+      managed_rg_name="${managed_rg_id##*/}"
+      echo "  Submitting delete for Databricks workspace ${ws_name} (rg ${ws_rg}, sub ${sub}, --no-wait --force-deletion) - cascades managed rg ${managed_rg_name}"
+      if ! dbx_del_out="$(az databricks workspace delete --name "$ws_name" --resource-group "$ws_rg" \
+          --subscription "$sub" --yes --no-wait --force-deletion --output none 2>&1)"; then
+        if is_auth_error "$dbx_del_out"; then
+          echo "::error::Databricks workspace delete submission for ${ws_name} failed with an auth/transport error: ${dbx_del_out}"
+          return 1
+        fi
+        echo "  ::warning::workspace delete submission for ${ws_name} failed or already gone (continuing - idempotent retry on next run): ${dbx_del_out}"
+        continue
+      fi
+      if [ -n "$managed_rg_name" ]; then
+        __dbx_out_rgs+=("$managed_rg_name")
+        __dbx_out_subs+=("$sub")
+      fi
+    done
+  done
+  return 0
+}
+
 # confirm_gone_by_get "<url>" - the confirm-GET pattern VERIFY 9 already established (ARG
 # proposes, ARM disposes: confirm liveness with a direct GET before trusting a list/discovery
 # result), promoted to a shared helper so the probe and FIX-1..FIX-5 do not each re-implement
@@ -567,22 +658,31 @@ confirm_gone_by_get() {
   return 2
 }
 
-# confirm_gone_or_fail_primary "<description>" "<url>" - pattern (a) wrapper. Prints its own
-# ::error:: and returns 1 on anything other than confirmed-gone; prints nothing and returns 0
-# on confirmed-gone. Callers MUST still `exit 1` themselves on a non-zero return (this function
-# never exits the script itself - these are flat top-level scripts, not `set -e`, and every
-# other fail-loud path in them follows the same `if ! fn; then exit 1; fi` shape).
+# confirm_gone_or_fail_primary "<description>" "<url>" ["<no-verify-reason>"] - pattern (a)
+# wrapper. Prints its own ::error:: and returns 1 on anything other than confirmed-gone; prints
+# nothing and returns 0 on confirmed-gone. Callers MUST still `exit 1` themselves on a non-zero
+# return (this function never exits the script itself - these are flat top-level scripts, not
+# `set -e`, and every other fail-loud path in them follows the same `if ! fn; then exit 1; fi`
+# shape).
+#
+# The optional third argument (added 2026-07-30, code-review Finding 4 - dedupe a hand-rolled
+# copy of this exact 4-way branch) overrides WHY this scope has no separate Phase 3 VERIFY
+# step, so a non-MG-scope caller with the same "this confirm-GET is the only completion check"
+# shape can reuse this helper instead of hand-rolling its own copy of the case statement.
+# Defaults to the ORIGINAL MG-scope wording verbatim, so every existing caller (FIX-1's three
+# MG-scope confirm-GETs, teardown-az-sweep.sh) is BYTE-IDENTICAL and unaffected by this change.
 confirm_gone_or_fail_primary() {
   local desc="$1" url="$2"
+  local no_verify_reason="${3:-MG-scoped extension objects are 403-shadowed for this SP once their MG is deleted}"
   confirm_gone_by_get "$url"
   case $? in
     0) return 0 ;;
     1)
-      echo "::error::${desc}: still confirmed LIVE immediately after a successful delete submission. This scope has no separate Phase 3 VERIFY step (MG-scoped extension objects are 403-shadowed for this SP once their MG is deleted), so this confirm-GET is the ONLY completion check this class will ever get - treating a still-live result as a hard remnant, not a warning."
+      echo "::error::${desc}: still confirmed LIVE immediately after a successful delete submission. This scope has no separate Phase 3 VERIFY step (${no_verify_reason}), so this confirm-GET is the ONLY completion check this class will ever get - treating a still-live result as a hard remnant, not a warning."
       return 1
       ;;
     2)
-      echo "::error::${desc}: confirm-GET after delete was indeterminate (neither confirmed gone nor confirmed live) - cannot certify this MG-scope object clean off an ambiguous result, and no separate VERIFY step exists to catch it later: ${CONFIRM_GONE_BY_GET_ERR}"
+      echo "::error::${desc}: confirm-GET after delete was indeterminate (neither confirmed gone nor confirmed live) - cannot certify this object clean off an ambiguous result, and no separate VERIFY step exists to catch it later: ${CONFIRM_GONE_BY_GET_ERR}"
       return 1
       ;;
     3)

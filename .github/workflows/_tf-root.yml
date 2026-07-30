@@ -1,7 +1,7 @@
 # .github/workflows/_tf-root.yml
 # Purpose: Reusable Terraform workflow for a SINGLE root — plan | apply | destroy.
 # Section: 10 — Pipeline & Tooling (ADR-019). Called by deploy.yml and teardown.yml.
-# Last updated: 2026-07-29
+# Last updated: 2026-07-30
 #
 # Auth: OIDC federated credential — no secrets stored for login. Gated callers
 # pass a GitHub Environment via `gh_environment`; an EMPTY string = ungated
@@ -20,7 +20,11 @@
 # + Storage Blob Data RBAC + TLS 1.2 + CMK. The static ip_rules stay untouched. The
 # supported default (manage_runner_ip: false) is to keep the runner CIDR/IP in bootstrap
 # `ip_allow_list` as a documented PREREQUISITE (docs/cicd-deploy-teardown.md §8). See that
-# input's docs — single-root only; the default_action flip races on target=all.
+# input's docs - safe whenever exactly one flip-enabled job can ever be open against the state
+# SA at a time (a single-root run, OR a strictly SERIALIZED chain like teardown.yml's
+# target=all Phase 1, ADR-066, 2026-07-29); the default_action flip races only on CONCURRENT
+# flips against the same state SA (deploy.yml's target=all apply jobs run in parallel and
+# never enable this input at all - ADR-060).
 #
 # Destroy resilience (ADR-054 / docs/teardown-redesign.md, F1 fix): action=destroy runs a
 # `terraform state list` pre-step first and skips the actual destroy (exit 0) when state is
@@ -79,15 +83,23 @@ on:
         # `ip_allow_list` (the documented prerequisite — see the workflow header and
         # docs/cicd-deploy-teardown.md §8).
         #
-        # WARNING (concurrency): on `target=all`, sibling roots run in parallel and would
-        # flip the SAME state SA `default_action` against each other — one job's restore-Deny
-        # can cut another mid-init. Only enable this for SINGLE-root (`target != all`) runs.
-        # deploy.yml gates manage_runner_ip on target != 'all'; teardown.yml (ADR-065,
-        # 2026-07-29) now does the same for its single-root Phase 1 terraform destroy jobs -
-        # previously teardown.yml never wired this input at all, so every Phase 1 job 403'd
-        # at init against the firewalled state SA (root cause, ADR-065 context). teardown.yml
-        # never enables it for target=all (Phase 1 does not run there at all, ADR-065).
-        description: "Flip the state SA default_action to Allow for this run, restored to Deny on exit (single-root runs only)"
+        # WARNING (concurrency): this flip is safe ONLY when exactly one flip-enabled job can
+        # ever be open against the same state SA at a time - it is NOT safe for jobs that run
+        # in PARALLEL against each other (one job's restore-Deny can cut another mid-init).
+        # deploy.yml's target=all apply runs its per-root jobs in parallel and therefore NEVER
+        # enables this input for target=all (deploy.yml gates manage_runner_ip on
+        # target != 'all'; ADR-060 also blocks target=all + action=apply outright).
+        # teardown.yml is different: its single-root Phase 1 destroy always had exactly one job
+        # open (ADR-065, 2026-07-29 - previously teardown.yml never wired this input at all, so
+        # every Phase 1 job 403'd at init against the firewalled state SA, the ADR-065 root
+        # cause), AND its target=all Phase 1 chain (ADR-066, 2026-07-29, supersedes ADR-065
+        # decision 1) now runs all 11 root jobs SERIALIZED in a strictly linear reverse-
+        # dependency `needs` chain specifically so this same single-job-open invariant holds
+        # there too - the firewall races only on CONCURRENT flips (LESSON 31), not sequential
+        # ones, so teardown.yml sets manage_runner_ip: true UNCONDITIONALLY on every Phase 1
+        # job now (single-root or the serialized target=all chain - see teardown.yml's own
+        # comments for the exact chain order).
+        description: "Flip the state SA default_action to Allow for this run, restored to Deny on exit (safe whenever exactly one flip-enabled job is open at a time - single-root runs, or a strictly serialized chain like teardown.yml's target=all Phase 1, ADR-066; never for parallel jobs against the same state SA)"
         required: false
         type: boolean
         default: false
