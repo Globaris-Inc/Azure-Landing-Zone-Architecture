@@ -31,6 +31,53 @@
 
 <!-- Newest at the top. -->
 
+### OQ-064: A 2026-07-29 pre-clearance REFRESH ADDENDUM carrying a GO verdict exists only as gitignored files on one machine, and its repo-state basis is two merges stale
+
+- **Raised:** 2026-07-30 (found uncommitted in a Temp-path worktree during the post-PR-54 sweep; flagged again by the code-reviewer because the rescue location is gitignored)
+- **Section:** 10 (Pipeline & Tooling) / pre-clearance. Relates to the ADR-060 sequential single-target dispatch and the 2026-07-22 full-estate rebuild runbook.
+- **Blocking:** No for any current change. YES for the next full-estate dispatch, which has no valid pre-clearance without a decision here.
+- **Priority:** High the moment a rebuild dispatch is contemplated.
+
+**Question:**
+
+A 225-line REFRESH ADDENDUM to `docs/preclearance/2026-07-22-full-estate-rebuild.md` was written on
+2026-07-29, re-clearing the estate against the confirmed-clean greenfield with a per-root verdict
+table and an overall **GO** for the 14-step dispatch. It was never committed. Its branch,
+`docs/preclearance-2026-07-29-rebuild-refresh`, was merged without it, and the file sat uncommitted
+in a worktree under the Windows Temp tree until the 2026-07-30 sweep found it.
+
+It is currently preserved at `.claude/preserved/` in two forms (the full file and a patch). That
+directory is **gitignored**, so the work still exists on exactly one machine and nothing in git
+carries it. This is the second of the two losses in this class recorded across the repo, after
+ADR-066 (lost outright, re-recorded as `9974efa`); the rescue out of Temp did not close it, because
+a gitignored directory is still outside version control. The count of two matches the wording used
+in `scripts/check-worktrees.sh` and the agent definitions.
+
+Two decisions are needed, and they are independent:
+
+1. **Durability.** Land it in git in some form now, or accept that it lives outside version control
+   until someone decides. Leaving it gitignored is a decision by default, and it is the one that lost
+   ADR-066.
+2. **Validity.** Its repo-state basis is `origin/banking @ b6db5d0`, which is now two merges stale:
+   PR #53 (`3ed8dad`, ADR-067) and PR #54 (`2ca1fc5`, ADR-066). PR #53 changed
+   `platform/security/sentinel.tf`, `platform/security/defender.tf` and the apply parallelism in
+   `.github/workflows/_tf-root.yml` - real apply-behavior changes to a root this document clears as
+   GO. Whether that invalidates the verdict HAS NOT BEEN ASSESSED.
+
+**Options being considered:**
+- A (recommended): architect re-clears the addendum against `2ca1fc5`, specifically re-checking the
+  `platform/security` verdict against ADR-067, and it lands as a normal reviewed commit. Closes both
+  decisions at once.
+- B: commit it as-is with a dated header stating the basis is `b6db5d0` and that it must not be
+  dispatched on without re-clearance. Durable immediately, honest about staleness, but leaves a GO
+  verdict in the tree that is not currently valid.
+- C: leave it preserved and gitignored until a dispatch is actually planned. Cheapest now, and the
+  option with a demonstrated failure history in this repo.
+
+**RESOLVED YYYY-MM-DD:** [pending]
+
+---
+
 ### OQ-063: Teardown soft-deletes the Security LAW rather than purging it, so every rebuild recovers a workspace full of orphaned Sentinel rules that Terraform then hits as "already exists"
 
 - **Raised:** 2026-07-29 (diagnosing the platform/security clean-empty-state apply, run 30499221661; ADR-067)

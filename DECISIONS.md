@@ -2,6 +2,17 @@
 
 > Append-only log of architectural decisions made during the build.
 > Each ADR follows the template below. Once written, an ADR is never edited — if a decision is reversed, write a new ADR that supersedes it.
+>
+> **The `Landed:` field is mandatory from ADR-068 onward** (added 2026-07-30, enforced by
+> `scripts/check-adr-landed.sh` via `preflight.sh`). An Accepted decision with no landing reference
+> is a decision nobody can prove was implemented. ADR-034 sanctioned `-parallelism=1` as its control
+> and it was never wired into the apply step; the gap surfaced 33 ADRs later, in ADR-067, as a live
+> apply failure. Record `NOT IMPLEMENTED` honestly rather than leaving the field off - an ADR openly
+> marked unimplemented is a backlog item, while a silent one is a false belief. Update the field by
+> appending a dated addendum, never by editing the body.
+>
+> ADR-001 through ADR-067 predate the field and are exempt from the check. They are listed as
+> unverifiable by `check-adr-landed.sh --legacy`, which is the honest description of their state.
 
 ---
 
@@ -13,6 +24,7 @@
 - **Date:** YYYY-MM-DD
 - **Section:** [N from PROMPT.md]
 - **Status:** Proposed / Accepted / Superseded by ADR-YYY
+- **Landed:** NOT IMPLEMENTED | <commit-sha> (PR #N) | N/A - decision requires no code
 - **Decision makers:** [user / claude]
 
 **Context:**

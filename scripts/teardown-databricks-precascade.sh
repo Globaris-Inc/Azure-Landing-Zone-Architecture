@@ -34,8 +34,9 @@
 # matches the existing single-root exclusion the rest of the teardown design already accepts,
 # not a new gap this change introduces.
 #
-# Idempotent: `databricks workspace list` returning zero rows (no Databricks deployed,
-# enable_data_platform=false, or already deleted by a prior run) is success, not an error -
+# Idempotent: `databricks workspace list` returning zero rows (already deleted by a prior run,
+# or never deployed) is success, not an error. Note envs/poc.tfvars sets enable_data_platform
+# true, so on a fully deployed estate a zero result here is unexpected and worth checking -
 # matches every other step in this codebase. Shares its core logic with the unchanged Phase 2
 # az-sweep step 1 via `databricks_force_delete_cascade` (teardown-common.sh) so the two call
 # sites cannot drift on the exact az invocation.
@@ -56,12 +57,12 @@ declare -a dbx_managed_rg_subs=()
 
 echo "== Phase 0.5: Databricks workspace precascade (submission only, --no-wait --force-deletion) =="
 if ! databricks_force_delete_cascade dbx_managed_rgs dbx_managed_rg_subs; then
-  echo "::error::Databricks precascade failed - see the error above. This is Phase 0.5, a hard gate ahead of Phase 1's bank-data-p1 destroy (ADR-066 decision 4)."
+  echo "::error::Databricks precascade failed - see the error above. This is Phase 0.5, a load-bearing predecessor of Phase 1's bank-data-p1 destroy (ADR-066 decision 4). NOTE: this is NOT a gate - bank-data-p1 needs this job for ORDERING only and still runs and still goes green (INV-1). A managed resource group left orphaned by this failure surfaces later as a loud VERIFY 2/3 failure, not as a skipped layer."
   exit 1
 fi
 
 if [ "${#dbx_managed_rgs[@]}" -eq 0 ]; then
-  echo "No Databricks workspace found in any estate subscription - nothing to cascade (enable_data_platform=false in this estate's live config, or already torn down by a prior run)."
+  echo "No Databricks workspace found in any estate subscription - nothing to cascade (already torn down by a prior run, or never deployed). NOTE: envs/poc.tfvars sets enable_data_platform = true, so on a fully deployed estate a zero result here is unexpected and worth checking against VERIFY 2/3."
 else
   echo "Submitted force-delete for ${#dbx_managed_rgs[@]} Databricks managed resource group(s): ${dbx_managed_rgs[*]}"
   echo "Not waited on here (submission only) - Phase 1's bank-data-p1 terraform destroy (next in the chain) will find the workspace already gone or already deleting (a 404 on an azapi DELETE of an absent resource is idempotent success) and destroy its own spoke VNet/access connector/RG cleanly. The managed RG's own cascade completes asynchronously; Phase 2's az-sweep step 1 and VERIFY 2's RG naming-pattern scan are the backstops if it lags."
