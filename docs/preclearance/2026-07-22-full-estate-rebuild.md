@@ -788,3 +788,657 @@ bank-app-p1 blocked on an unplannable same-root AKS data source (PC-2S) and bank
 subscription-scoped exemption (PC-1S); sequential single-target ruling (ADR-060) and the cross-root
 Secret determinism contract (ADR-061)
 ```
+
+---
+---
+
+# 2026-07-29 REFRESH ADDENDUM - re-clearance against the confirmed-clean greenfield
+
+> **Provenance note added 2026-07-30 (not part of the 2026-07-29 text below).** This section was
+> written on 2026-07-29 and was never committed. Its branch was merged without it and it survived only
+> as an uncommitted file in a volatile worktree until the 2026-07-30 sweep rescued it (OQ-064). It is
+> recorded here **verbatim**, unedited, as the historical record. Its per-root VERDICT TABLE is
+> **SUPERSEDED** by the 2026-07-30 refresh below, which was computed after the dispatch this section
+> cleared was actually attempted and failed at Step 3. Its sections R1, R2, R3 and R5 are re-verified
+> and carried forward there; R4 and R6 are amended there. Read this section for the reasoning, and the
+> 2026-07-30 section for the verdict.
+
+**Date:** 2026-07-29
+**Author:** cloud-solutions-architect
+**Type:** REFRESH of the gate above, not a re-derivation. The history above is unchanged. This section
+records what still holds, what drifted, and the single verdict for dispatching NOW.
+**Repo state this refresh was computed against:** `origin/banking` @ `b6db5d0` (HEAD of banking, PR #52
+merged), working tree clean. The 2026-07-22 gate above was computed at `d3b9e8c`; the delta between the
+two is enumerated in section R3 and is confined to teardown scripts, one deploy guard, and the PC-2S
+spoke fix.
+
+**Why a refresh is needed and why the gate above did not simply carry:** the 2026-07-22 dispatch was
+attempted on 2026-07-23 and **voided at Step 2**, not on any deploy defect but on a TEARDOWN-completeness
+defect - MG-scoped extension survivors (3 MG-scope budgets plus `diag-aa-to-law`) that the prior teardown
+left behind, which would have collided at the `platform/management-groups` apply. Those survivors, plus
+the completeness mechanism that leaves them, were fixed across ADR-062 / ADR-063 / ADR-064 / ADR-065, a
+fresh teardown was run, and **qa has now independently confirmed a clean greenfield (PASS)**: no estate
+RGs, the `globaris` MG tree gone with all 5 subs re-parented to tenant root, the 2026-07-23 collision
+objects gone, other orphan classes clean, soft-deleted KVs pose no name collision (fresh random
+suffixes), and the bootstrap intact (state SA `stglobaristfstate01` + `tfstate` container + KV + OIDC SP
+`sp-alz-poc-cicd` + federated creds). This refresh re-clears the APPLY against that confirmed state.
+
+---
+
+## VERDICT: GO. Dispatch the 14-step sequence now, from `--ref banking`.
+
+Every root is GO or GO-CONDITIONAL with its condition already satisfied on `banking`. **There is no
+NO-GO and no open code blocker.** The two conditions that gated the 2026-07-22 verdict (PC-2S, PC-1S) are
+both resolved and verified in this refresh (section R2). The only remaining "conditional" items are the
+two-pass roots that were always designed as two passes (identity ADR-055, bank-app-p1 PC-2S Pass 2) and
+one reviewed tfvars flip (B7), none of which block the FIRST dispatch.
+
+| Root | 2026-07-22 verdict | 2026-07-29 refresh verdict | What changed |
+|---|---|---|---|
+| `platform/management-groups` | GO (via b0a) | **GO** | none. Watch-point W3 (MG-budget collision is now provable only at this apply). |
+| `platform/management` | GO (via b0a) | **GO** | none. PC-2X (re-set `PLATFORM_LAW_CUSTOMER_ID`) still applies. |
+| `platform/security` | GO (via b0a) | **GO** | none. Carried-forward b0a PC-2R Defender-Free pre-flight still applies (W2). |
+| `platform/connectivity` | GO | **GO** | none. 696-add plan still authoritative: no connectivity `.tf` changed since `d3b9e8c` (R3). |
+| `landing-zones/corp-a1` | GO-CONDITIONAL | **GO-CONDITIONAL** | unchanged. Condition = post-connectivity zone check (PC-4C), a defined post-apply gate, not a blocker. |
+| `landing-zones/corp-a2` | GO-CONDITIONAL | **GO-CONDITIONAL** | as corp-a1. |
+| `landing-zones/online-p1` | GO-CONDITIONAL | **GO-CONDITIONAL** | as corp-a1. |
+| `landing-zones/bank-data-p1` | GO-CONDITIONAL (blocked on PC-1S) | **GO** | **PC-1S RESOLVED** (R2). The surviving subscription-scoped exemption is gone (CI sweep + qa-confirmed greenfield). Condition removed. |
+| `landing-zones/bank-app-p1` | NO-GO until PC-2S lands | **GO-CONDITIONAL (condition already satisfied on `banking`)** | **PC-2S RESOLVED** (R2). The `enable_acr_kubelet_binding` gate is merged on `banking`; Pass 1 is now plannable. Pass 2 is a reviewed tfvars flip, unchanged. |
+| `platform/identity` | GO (two-pass, ADR-055) | **GO** | none. Pass 1 clean at 26 adds (ADR-059 closed); two-pass override still applies. |
+
+---
+
+## R1. Dispatch ref = `banking`, NOT `main`. CONFIRMED, with a POST-rebuild cleanup flagged.
+
+`main` is behind `banking` and **must not be dispatched**. Verified today by `git log
+origin/main..origin/banking`: PRs **#46, #48, #49, #50, #51, #52** are on `banking` and absent from
+`main`. That delta carries every fix this rebuild depends on: the ADR-055/059/060/061 deploy wiring, the
+PC-2S spoke gate (#45), the operator runbook, and the ADR-062/063/064/065 teardown-completeness fixes.
+`main`'s newest deploy-relevant commit predates all of it. The runbook (`docs/2026-07-22-full-estate-
+rebuild-runbook.md`) already dispatches `-R Globaris-Inc/Azure-Architecture --ref banking` on every
+command and states the rule in its section 2 ("never dispatch from `main`, it lacks the ADR-055/059/060
+wiring this whole day depends on"). No change needed there.
+
+**POST-rebuild cleanup (NOT a pre-req for this apply): promote `banking` -> `main`, or block `main` from
+`deploy.yml` dispatch.** `main` being dispatchable-but-stale is a standing foot-gun (an operator who
+forgets `--ref banking` gets a silently wrong deploy). This is deferred to after the rebuild is green and
+QA'd, consistent with the memory rule that `banking` is the integration branch feeding `main`. It does
+not gate today. Recorded as a watch-item, not a blocker. (Related: OQ-057 already tracks the wider
+`target=all` dispatch-safety question.)
+
+---
+
+## R2. The two prior blockers are TRULY resolved on `banking`. Verified, not assumed.
+
+### PC-2S (bank-app-p1 unplannable same-root AKS data source) - RESOLVED.
+
+Verified in the `origin/banking` tree today (not inferred from a commit subject):
+
+- `landing-zones/bank-app-p1/variables.tf` line 137: `variable "enable_acr_kubelet_binding"` exists,
+  `type = bool`, `default = false`, with the description recording the PC-2S two-pass rationale.
+- `landing-zones/bank-app-p1/acr.tf` line 46: the data source gate reads
+  `for_each = var.enable_kubernetes_platform && var.enable_acr_kubelet_binding ? { main = "main" } : {}`.
+  With the flag false, the map is empty, so the `azurerm_kubernetes_cluster` lookup **does not resolve at
+  plan time** and cannot 404 against the not-yet-created cluster.
+- `landing-zones/bank-app-p1/acr.tf` line 95: the ACR `role_assignments` input is
+  `var.enable_acr_kubelet_binding ? { kubelet_acr_pull = { ... } } : {}` with the map KEY held static
+  (LESSON 5a), so the address identity never moves between passes.
+- `envs/poc.tfvars`: **`enable_acr_kubelet_binding` is NOT present** (grep returns nothing), so it takes
+  its `false` default for Pass 1. This is the correct posture: flipping it early would reproduce the exact
+  PC-2S defect. The `depends_on` anti-pattern was correctly NOT used.
+
+Landed as commit `5cc519b` (merged into `banking` via PR #45). **bank-app-p1 Pass 1 is now plannable on a
+greenfield estate.** The Pass 2 flip (`enable_acr_kubelet_binding = true` in `envs/poc.tfvars`, reviewed
+one-line commit, plan bar exactly 1 add) is unchanged from the gate above and is Step 12, not a Step 9
+pre-req.
+
+### PC-1S (surviving subscription-scoped Databricks policy exemption) - RESOLVED.
+
+Two independent lines of evidence, both post-dating the 2026-07-22 gate:
+
+1. **Removed by the pipeline, not by hand.** ADR-062 sub-step 6d deleted
+   `exempt-dbx-managed-storage-bank-data-p1` during teardown run `29880338547`, and that run's VERIFY 6d
+   plus VERIFY 9 confirmed zero OWNED subscription-scoped policy objects across all 5 subscriptions
+   (documented on `banking` at commits `6a48b4c` / `d8cadfb`; the runbook section 2a already records
+   PC-1S as "ALREADY SATISFIED via CI - no action").
+2. **qa's fresh greenfield PASS** independently confirms no surviving subscription-scoped policy objects
+   and clean orphan classes across the estate.
+
+**bank-data-p1's blocking condition is removed; it is now GO.** PC-1S survives only as a cheap read-only
+re-confirm in the Step 8 pre-flight (`az policy exemption list ... --query "[].name"` -> expect empty),
+which the runbook already carries. If it were somehow present, that pre-flight catches it before the
+apply, as designed.
+
+---
+
+## R3. Config drift on the APPLY path since 2026-07-22: NONE that affects a single-target apply.
+
+The full `.tf` / `.yml` / `.tfvars` / `.hcl` delta between the gate baseline `d3b9e8c` and `banking`
+HEAD `b6db5d0` is six files, itemized:
+
+| File | Change | Effect on the apply path |
+|---|---|---|
+| `landing-zones/bank-app-p1/acr.tf`, `variables.tf` | PC-2S gate | **Intended.** Makes Pass 1 plannable. Covered in R2. |
+| `.github/workflows/deploy.yml` | +`guard-target-all-apply` job (ADR-065 decision 6) | **Inert on single-target.** The guard is a standalone job with `if: inputs.target == 'all' && inputs.action == 'apply'`; no root job `needs:` it. On any single-target dispatch it is simply skipped. It cannot affect Steps 1-14, which are all single-target. It only closes the `target=all + apply` foot-gun ADR-060 already forbade. |
+| `.github/workflows/_tf-root.yml` | 8-line comment update only (documents the ADR-065 teardown `manage_runner_ip` wiring) | **None.** The "Open state SA firewall" / "Restore Deny" steps are byte-unchanged. |
+| `.github/workflows/teardown.yml`, `teardown-probe.yml` | ADR-063/064/065 teardown logic | **None.** Teardown-only; not on the deploy path. |
+
+**Single-target firewall wiring is intact.** All 11 root jobs in `deploy.yml`
+(management-groups, management, connectivity, identity, security, corp-a1, corp-a2, online-p1,
+bank-app-p1, bank-data-p1, synthetic) set `manage_runner_ip: ${{ inputs.target != 'all' }}`, so every
+single-target apply opens the firewalled state SA for its job window and restores Deny on exit
+(`_tf-root.yml` line 238 open, line 433 restore). ADR-060's sequential single-target ruling and ADR-061's
+Secret determinism contract both stand unchanged.
+
+**`envs/poc.tfvars` posture matches the intended rebuild scope** (read from `banking` today):
+`enable_firewall = true`, `enable_kubernetes_platform = true`, `enable_messaging_platform = true`,
+`enable_api_platform = true`, `enable_data_platform = true`, `enable_fabric_capacity = true`,
+`enable_ai_platform = true`, `enable_om_phase1 = false` (correct for the main run, PC-4R; re-landed as
+Steps 13-14), `enable_synthetic_workload = false` (the `synthetic` root is not dispatched),
+`enable_acr_kubelet_binding` absent (false for Pass 1). No drift from the scope the gate above assumed.
+
+**Connectivity 696-add plan is still authoritative:** no file under `platform/connectivity/` changed
+between `d3b9e8c` and `b6db5d0`. The PC-1C bar (EXACTLY 696 to add, 0 change, 0 destroy, exit 0, zero
+`Error:`) stands.
+
+---
+
+## R4. Watch-points (qa's open items, dispositioned as watch-points, NOT blockers).
+
+| ID | Watch-point | Disposition |
+|---|---|---|
+| **W1: RBAC-on-first-job** | qa could not re-confirm the CI SP's role bindings live (an `az`-CLI quirk; the SP `sp-alz-poc-cicd`, its federated creds, and the bootstrap all exist and are intact). | **Not a blocker. The first apply job IS the live confirmation.** Step 1 (`platform/management-groups`) performs an OIDC login and `terraform init` against the firewalled state SA and then writes MG-scope objects; a missing or insufficient binding fails loud there, immediately, before any estate resource is touched. Treat a Step 1 auth failure per matrix U3 (one init retry for a firewall-propagation flap) then, if it recurs as an actual `AuthorizationFailed` on the write, STOP - that is a real RBAC gap, not a wait. Do NOT pre-grant anything speculatively. |
+| **W2: Defender-standard-accepted** | Defender plans `AI`, `Discovery`, `FoundationalCspm` remain `Standard` in the security subscription (OQ-050, accepted). | **Not a blocker.** These three are intentionally NOT reset by teardown and are held at their state values by `platform/security` (ADR-035 pins basic-plan subplans to state values to avoid the ForceNew regress; ADR-040 holds the latent-debt plans). The rebuild re-establishes Defender over them. The DISTINCT carried-forward b0a pre-flight PC-2R (the EIGHT estate-managed plans - `VirtualMachines`, `StorageAccounts`, `AppServices`, `SqlServers`, `SqlServerVirtualMachines`, `Containers`, `OpenSourceRelationalDatabases`, `CloudPosture` - must read `Free` before Step 3) still applies as a cheap read-only check; matrix B2 covers a miss. W2 (the 3 Standard plans) and PC-2R (the 8 Free plans) are different sets; do not conflate them. |
+| **W3: MG-budget-collision-check** | The 3 MG-scope budgets are structurally unverifiable post-deletion (a deleted MG scope is 403-shadowed; ADR-062/063). qa cannot prove their absence by query. | **Not a blocker. The Step 1 `platform/management-groups` apply IS the definitive collision check.** If a budget survived, the create returns a requires-import at that apply (matrix B1: stop, delete the specific survivor per b0a UA-1, rerun - do not import). This is the exact class that voided the 2026-07-23 attempt, and it is now both fixed at source (Phase 0 DISARM MG-scope sweep, ADR-063/064) and re-provable at Step 1. Scan the Step 1 plan for any `already exists`/import-block line. |
+
+---
+
+## R5. The confirmed dispatch sequence (unchanged from the runbook; ref = `banking` throughout).
+
+The 14-step order in the runbook and in section 3 above is correct for this greenfield and is confirmed.
+management-groups first (creates every ancestor scope), then the platform dependency chain, then the
+spokes, then the identity two-pass, then the two deferred second passes. ADR-055 identity two-pass
+(`enable_conditional_access_override` false on Pass 1 / true on Pass 2) and ADR-061 Secret determinism
+(re-set `PLATFORM_LAW_CUSTOMER_ID` after Step 2; verify firewall IPs after Step 4) both still apply.
+
+| # | Dispatch | `action` | Special inputs | In-run gate after |
+|---|---|---|---|---|
+| 1 | `platform/management-groups` | plan then apply | none | PC-3C (DDoS DoNotEnforce at both MGs) before Step 4; scan for W3 budget collision |
+| 2 | `platform/management` | plan then apply | none | **PC-2X: re-set `PLATFORM_LAW_CUSTOMER_ID`** |
+| 3 | `platform/security` | plan then apply | none | (PC-2R Defender-Free pre-flight is BEFORE this step) |
+| 4 | `platform/connectivity` | plan then apply | none | **PC-3X (firewall IPs = .4) + PC-4C (89 zones / 11 lookups)** |
+| 5 | `landing-zones/corp-a1` | plan then apply | none | per-spoke plan-scan (PC-9S shape) |
+| 6 | `landing-zones/corp-a2` | plan then apply | none | per-spoke plan-scan |
+| 7 | `landing-zones/online-p1` | plan then apply | none | per-spoke plan-scan |
+| 8 | `landing-zones/bank-data-p1` | plan then apply | none | Step 8 pre-flight: PC-1S re-confirm (expect empty) |
+| 9 | `landing-zones/bank-app-p1` Pass 1 | plan then apply | none (flag false) | Step 9 pre-flight: PC-4S (APIM soft-delete gone) + PC-5X (gate present) + tfvars-flip-not-early |
+| 10 | `platform/identity` Pass 1 | plan then apply | `enable_conditional_access_override=false` | AADDS create-wait; matrix I1/I2 |
+| 11 | `platform/identity` Pass 2 | plan then apply | `enable_conditional_access_override=true` | 10 pure adds (named location + 8 CA policies) |
+| 12 | `landing-zones/bank-app-p1` Pass 2 | plan then apply | none (after tfvars flip PR merges) | plan bar exactly 1 add |
+| 13 | `platform/management` (B7) | plan then apply | none (after `enable_om_phase1=true` merges) | **PC-2H: confirm `id-amba-prod-001` live** |
+| 14 | `platform/management-groups` (B7) | plan then apply | none | ~200-260 adds; matrix H3 |
+
+Steps 5-9 may be reordered among themselves but never run concurrently (Rule 2 / ADR-060). Steps 5-14 use
+the plain two-line plan-then-apply pattern; only Steps 10 and 11 carry the identity override input.
+
+**STOP conditions are unchanged** and live in the runbook's STOP/rollback matrix (section 3: U1-U6, B1-B7,
+C1-C3, S1-S5, I1-I2, H1-H3). The load-bearing ones for this refresh: **U1** (any `-/+ replace` or
+unexpected destroy anywhere is a hard STOP - every root runs from empty state), **B1** (a budget/export
+requires-import at Step 1 means a survivor is back = W3), **U5** (a second identical failure on one root
+after one clean retry is a HARD STOP - this counts toward the project's 4-failure bar), and **C1** (DDoS
+policy reads `Default` not `DoNotEnforce` before Step 4).
+
+---
+
+## R6. What this refresh did NOT re-verify live (stated honestly, per the pre-clearance discipline).
+
+This refresh is a repo-and-evidence re-clearance. It confirmed code state on `banking`, the drift delta,
+and the two prior blockers directly. It **relied on qa's independent greenfield PASS** for the live estate
+state (no estate RGs, MG tree gone, orphan classes clean, bootstrap intact) rather than re-running those
+queries, because that is qa's just-completed, independently-owned confirmation and re-running it here
+would duplicate it without adding assurance. The live PUT-time gates that no plan can see (policy-collision
+races, firewall-IP determinism, zone presence, Defender-Free pre-flight, RBAC-on-first-job) are NOT
+asserted as pre-cleared here; each is a named in-run gate or watch-point above (W1-W3, PC-2R, PC-3C,
+PC-3X, PC-4C) with a pre-agreed disposition, exactly as the gate above designed them. **A gate nobody can
+check pre-dispatch is not asserted as passed; it is converted to a defined verification moment.**
+
+---
+
+## R7. Decisions / open items from this refresh.
+
+- **No new ADR.** This refresh introduces no new decision; it confirms ADR-060 and ADR-061 still govern
+  and that ADR-063/064/065 are teardown-scoped with no deploy-path effect beyond the inert
+  `guard-target-all-apply`.
+- **Watch-item (not OQ-worthy on its own):** promote `banking` -> `main` (or block `main` from
+  `deploy.yml` dispatch) as a post-rebuild cleanup (R1). Related to the standing OQ-057.
+
+---
+
+## Proposed commit message (refresh)
+
+```
+docs(preclearance): 2026-07-29 refresh - GO to dispatch the full-estate rebuild from banking; PC-2S and
+PC-1S both resolved and verified on banking, no apply-path drift (ADR-065 guard is inert on single-target),
+tfvars scope matches, connectivity 696-add plan still authoritative; watch-points RBAC-on-first-job,
+Defender-standard-accepted, MG-budget-collision-at-step-1
+```
+
+---
+---
+
+# 2026-07-30 REFRESH #2 - re-clearance against `banking` @ `ed3450e`, after the Step-3 failure, ADR-067 and ADR-066
+
+**Date:** 2026-07-30
+**Author:** cloud-solutions-architect
+**Type:** REFRESH of both sections above. Append-only: nothing above this line was edited except the
+dated provenance banner on the 2026-07-29 heading.
+**Repo state this refresh was computed against:** `banking` @ `ed3450e` (the PR #55 merge, tip of
+`banking` when this was written), working tree clean. Written on branch
+`docs/preclearance-refresh-2026-07-30`, cut off `banking` at `ed3450e`.
+**Supersedes:** the per-root verdict table in the 2026-07-29 addendum.
+**Closes:** OQ-064, both limbs (durability by landing this file in git, validity by the table in S0).
+
+---
+
+## Why refresh #2 exists
+
+Four things happened after the 2026-07-29 addendum was written, and the addendum can see none of them:
+
+1. **The dispatch it cleared was attempted and FAILED at Step 3.** `platform/security` run
+   `30499221661` was the first apply of that root from a genuinely empty state, and it failed on three
+   interacting classes (ADR-067). The addendum's GO for `platform/security` was therefore falsified by
+   the run itself, not by any later code change. That alone makes a carry-forward inadmissible.
+2. **ADR-067 (PR #53, `3ed8dad`) changed that root's apply behaviour**: `depends_on` on both Sentinel
+   automation rules, a corrected pricing comment, and `-parallelism=1` appended to the
+   `platform/security` apply step in `_tf-root.yml`.
+3. **ADR-066 (PR #54, `2ca1fc5`) rebuilt the teardown** and, on the apply path, added a `features`
+   block to `platform/security/providers.tf`.
+4. **The addendum was never committed** and nearly went the way of ADR-066 (OQ-064). Landing it here,
+   verbatim, with this refresh on top, is the durability half of that resolution.
+
+---
+
+## S0. VERDICT
+
+**Whole-run verdict: GO-CONDITIONAL. There is no NO-GO and no open code blocker. There are two hard
+pre-flight conditions that cannot be checked from the repository and MUST be proved live before any
+dispatch: PC-1Y (estate is actually greenfield) and PC-1SEC (the Security LAW is not in soft delete).**
+
+Every per-root verdict below is stated **conditional on PC-1Y passing**. PC-1Y is a whole-run gate: if
+it fails, no root is GO and the disposition is a teardown, not a dispatch.
+
+| # | Root | 2026-07-29 verdict | 2026-07-30 verdict | Gating condition |
+|---|---|---|---|---|
+| 1 | `platform/management-groups` | GO | **GO** | PC-1Y. Watch W3 (MG-budget collision is provable only at this apply) carried unchanged. |
+| 2 | `platform/management` | GO | **GO** | PC-1Y. PC-2X (re-set `PLATFORM_LAW_CUSTOMER_ID` after apply) carried unchanged. |
+| 3 | `platform/security` | GO | **GO-CONDITIONAL** | PC-1Y **and PC-1SEC** (soft-deleted Security LAW proved ABSENT, purged via CI if present) **and PC-2R** (the 8 estate-managed Defender plans read `Free`). **Fresh judgement, see S3.** |
+| 4 | `platform/connectivity` | GO | **GO** | PC-1Y. 696-add bar re-verified as still authoritative (S2). |
+| 5 | `landing-zones/corp-a1` | GO-CONDITIONAL | **GO-CONDITIONAL** | PC-1Y, then PC-4C (11 zones present) after Step 4. Unchanged. |
+| 6 | `landing-zones/corp-a2` | GO-CONDITIONAL | **GO-CONDITIONAL** | as corp-a1. |
+| 7 | `landing-zones/online-p1` | GO-CONDITIONAL | **GO-CONDITIONAL** | as corp-a1. |
+| 8 | `landing-zones/bank-data-p1` | GO | **GO-CONDITIONAL** | PC-1Y, then the Step-8 PC-1S re-confirm (expect zero subscription-scoped policy exemptions). Tightened from GO because the 2026-07-29 GO rested on a qa greenfield PASS that now predates a failed rebuild attempt; the re-confirm is already in the runbook and costs one query. |
+| 9 | `landing-zones/bank-app-p1` Pass 1 | GO-CONDITIONAL | **GO-CONDITIONAL** | PC-1Y, PC-4S (APIM soft-delete gone), PC-5X (the `enable_acr_kubelet_binding` gate present on the dispatched ref), tfvars-flip-not-early. Unchanged. |
+| 10 | `platform/identity` Pass 1 | GO | **GO** | PC-1Y. ADR-055 two-pass unchanged. No `platform/identity` file has changed since `d3b9e8c` (S2). |
+| 11 | `platform/identity` Pass 2 | GO | **GO** | as Pass 1, `enable_conditional_access_override=true`. |
+| 12 | `landing-zones/bank-app-p1` Pass 2 | GO-CONDITIONAL | **GO-CONDITIONAL** | the reviewed one-line `envs/poc.tfvars` flip merged AFTER Step 9 is green. Unchanged. |
+| 13 | `platform/management` (B7) | GO-CONDITIONAL | **GO-CONDITIONAL** | PC-1H (reviewed `enable_om_phase1 = true` flip, merged only after Step 12). Unchanged. |
+| 14 | `platform/management-groups` (B7) | GO-CONDITIONAL | **GO-CONDITIONAL** | PC-1H plus PC-2H (`id-amba-prod-001` confirmed live before dispatch). Unchanged. |
+
+The single substantive verdict movement is `platform/security`, GO -> GO-CONDITIONAL, and the reason is
+not ADR-067's code (which is correct and helps) but what ADR-067's code deliberately does **not** cover.
+
+---
+
+## S1. What the 2026-07-29 addendum still carries, and what it does not
+
+| Section | Status at 2026-07-30 | Basis |
+|---|---|---|
+| **R1** dispatch ref = `banking`, never `main` | **CARRIED, re-verified.** `banking` is still ahead of `main` and still carries every fix this rebuild depends on, now including PRs #53, #54 and #55. | `git log origin/main..banking` |
+| **R2** PC-2S and PC-1S resolved | **CARRIED.** PC-2S is code state and is unchanged since `b6db5d0` (`landing-zones/bank-app-p1/acr.tf` and `variables.tf` are not in the `b6db5d0..ed3450e` delta). PC-1S is live state and is folded into PC-1Y plus the Step-8 re-confirm. | S2 delta, this document |
+| **R3** no apply-path drift | **AMENDED.** There IS apply-path drift now, confined to four files, all in or adjacent to `platform/security`. Fully enumerated and dispositioned in S2. | S2 |
+| **R4** watch-points W1/W2/W3 | **CARRIED unchanged.** W1 RBAC-on-first-job (Step 1 is the live confirmation), W2 Defender-standard-accepted (AI, Discovery, FoundationalCspm stay Standard; distinct from PC-2R's eight), W3 MG-budget-collision (Step 1 is the definitive check). Nothing since 2026-07-29 touches any of them. | S4, S5 |
+| **R5** the 14-step dispatch sequence | **CARRIED, with three amendments.** Order and gates unchanged; a Step 0 is prepended, Step 3's duration expectation is revised, and two STOP-matrix rows are corrected. See S6. | S6 |
+| **R6** what was not re-verified live | **REPLACED by S5.** R6 leaned on a qa greenfield PASS that now predates a failed rebuild attempt, so it can no longer stand as the live-state basis. | S5 |
+| Verdict table | **SUPERSEDED by S0.** | S0 |
+
+---
+
+## S2. Apply-path drift since the 2026-07-29 basis `b6db5d0`: FOUR files, all dispositioned
+
+Full `.tf` / `.tfvars` / `.hcl` / deploy-workflow delta for `b6db5d0..ed3450e`. Everything else in that
+range is teardown scripts, `teardown.yml`, docs, agent definitions and new preflight scripts, none of
+which is on the deploy path.
+
+| File | Change | Effect on the apply |
+|---|---|---|
+| `platform/security/sentinel.tf` | `depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.this]` added to `azurerm_sentinel_automation_rule.auto_assign` and `.ti_enrichment_tag` | **Beneficial, zero plan-shape change.** `depends_on` is a meta-argument: it adds graph edges, creates no address, changes no attribute, and produces no diff. The Step-3 plan address set is byte-identical to the pre-ADR-067 one. At apply it removes the ADR-067 Class 3 race. See S3a. |
+| `platform/security/defender.tf` | comment rewrite only on `azurerm_security_center_subscription_pricing.extended` | **Inert.** The `depends_on` line itself is unchanged. |
+| `platform/security/providers.tf` | `features { log_analytics_workspace { permanently_delete_on_destroy = true } }` on the default provider | **Inert at apply.** See S3c. |
+| `.github/workflows/_tf-root.yml` | comment rewrite (header + `manage_runner_ip` description) plus `-parallelism=1` appended to the **apply** step when `inputs.root == 'platform/security'` | **Behaviour change, confined to Step 3's apply.** Plan and destroy steps untouched. See S3b. |
+
+**Not in the delta, and each absence matters:**
+
+- `envs/poc.tfvars` is **unchanged since `d3b9e8c`**, the original 2026-07-22 gate basis. The whole
+  flag posture that gate assumed (`enable_firewall`, `enable_kubernetes_platform`,
+  `enable_messaging_platform`, `enable_api_platform`, `enable_data_platform`,
+  `enable_fabric_capacity`, `enable_ai_platform` all true; `enable_om_phase1` false;
+  `enable_synthetic_workload` false; `enable_acr_kubelet_binding` absent) still holds byte for byte.
+- `.github/workflows/deploy.yml` is unchanged since `b6db5d0`. ADR-060's sequential single-target
+  ruling, the per-root `manage_runner_ip: ${{ inputs.target != 'all' }}` wiring on all 11 root jobs,
+  and the inert `guard-target-all-apply` job all stand exactly as the 2026-07-29 addendum described.
+- **Nothing under `platform/connectivity/`, `landing-zones/`, `platform/identity/`,
+  `platform/management/` or `platform/management-groups/` has changed since `d3b9e8c`**, apart from
+  the two PC-2S files in `bank-app-p1`. The PC-1C connectivity bar (**exactly 696 to add, 0 change,
+  0 destroy, exit 0, zero `Error:`**) is therefore still authoritative at `ed3450e`.
+
+---
+
+## S3. `platform/security`: the fresh judgement
+
+ADR-067 diagnosed three classes on run `30499221661`. The repo now fixes two of them on the apply path.
+The third is fixed on the **teardown** path only, and that is the whole verdict.
+
+### S3a. Class 3 (automation rules race the onboarding) - CLOSED on the apply path. No condition.
+
+Both automation rules now carry the same onboarding `depends_on` that the eight sibling Sentinel
+resources in `sentinel.tf` already had. This is the correct fix and the correct shape: the
+automation-rule endpoint gate-checks onboarding even on the existence GET, so an ordering edge is the
+only control that works. ADR-033 saw this exact failure on run `29133588369` and dismissed it as
+transient, which it never was.
+
+**Plan impact: none.** `depends_on` does not appear in a plan diff. Step 3's expected plan is unchanged.
+
+### S3b. Class 1 (CloudPosture 409) - CLOSED on the apply path, with a duration watch-item.
+
+`-parallelism=1` is now appended to the apply command by `_tf-root.yml` itself, keyed on
+`inputs.root == 'platform/security'`. Verified in the repo, not assumed:
+
+- `root: platform/security` appears **twice** in `.github/workflows/`: `deploy.yml:232` (the apply-path
+  `security` job) and `teardown.yml:395` (the ADR-066 Phase-1 `security` destroy job). What is unique is
+  the CONDITIONAL, `inputs.root == 'platform/security'` in `_tf-root.yml:366`, which occurs exactly once.
+  The teardown caller cannot reach it: it passes `action: destroy`, and the append sits on the
+  `Terraform Apply` step, gated `if: inputs.action == 'apply'`. So the destroy path is unaffected for a
+  reason, not by coincidence. (An earlier draft of this bullet, and the 2026-07-29 DevSecOps session
+  entry it came from, both asserted the literal appeared exactly once. It does not. The engineering
+  conclusion survives, the count did not, and it was corrected at the code-review gate on 2026-07-30.)
+- The flag is appended to the **`Terraform Apply`** step only. The `Terraform Plan` and destroy steps
+  are untouched, so the plan-scan bar is unaffected and this cannot mask a plan-shape problem.
+- No other root's `with:` block changes, so no other root is slowed.
+
+Wiring it into the workflow rather than leaving it as an operator-typed argument is the right call and
+directly addresses the ADR-034 failure mode: `-parallelism=1` was named as that ADR's sanctioned
+control, was never wired anywhere, and the gap surfaced 33 ADRs later as a live apply failure.
+
+**No provider-side fix exists.** There is no open azurerm issue proposing serialization inside
+`azurerm_security_center_subscription_pricing`, and the general class (high parallelism against
+single-controller Azure APIs) is a long-standing provider-level limitation. So this is a durable
+control, not a temporary hack, and it should not be removed later on the theory that the provider will
+fix it.
+
+**Watch-item PC-3SEC (not a blocker):** serializing the whole root, not just the pricing set, makes
+Step 3 slower. The runbook says "Duration ~15 min". At `-parallelism=1` across roughly 48 addresses,
+including a Log Analytics workspace create, a Key Vault create, a Standard Event Hub namespace with
+auto-inflate, the Sentinel onboarding, ten scheduled alert rules, eight pricing PUTs and two MG-scope
+policy assignments, **budget 25 to 45 minutes**. This is comfortably inside the ADR-055 durable-OIDC
+envelope (the root re-mints its assertion on every token acquisition) and nowhere near the identity or
+APIM long-apply class. **Do not treat a Step 3 that is still running at minute 20 as hung.** Runbook
+correction handed to DevSecOps in S7.
+
+### S3c. The `providers.tf` features block - INERT AT APPLY. Verified, not assumed.
+
+`permanently_delete_on_destroy` is a real argument of the `log_analytics_workspace` sub-block of the
+azurerm `features` block, it is Optional, it **defaults to `false`**, and it governs one thing only:
+whether the workspace is purged rather than soft-deleted **when the Terraform resource is destroyed**.
+Verified 2026-07-30 against the pinned provider's own documentation at the **v4.71.0** tag, so the
+argument is real at the exact version the lock file resolves, not merely at provider HEAD.
+
+It has no create, read or update path, so it cannot affect Step 3's apply, cannot affect the plan, and
+does not require a provider version bump. **It is correctly placed** on the default provider instance,
+which is the instance `module "security_law"` is created through (that module call carries no
+`providers =` override, and this root declares a single `azurerm` instance).
+
+One standing consequence, already recorded in OQ-063 and the ADR-066 addendum and repeated here because
+it is a permanent widening of that root's destroy blast radius: **any** Log Analytics workspace ever
+added to `platform/security` is now permanently purged by **any** destroy of that root, including an
+accidental wrong-root destroy, with no 14-day recovery window. That is the intended trade. It is not an
+apply-path risk.
+
+### S3d. Class 2 (soft-delete-recovered LAW re-hydrates orphaned Sentinel objects) - NOT closed by anything on the apply path. **This is PC-1SEC and it is the condition.**
+
+This is the finding of this refresh, and it is the one the 2026-07-29 addendum structurally could not
+have made.
+
+The causal chain, restated so the gap is unmissable:
+
+1. ADR-067 Class 2 happened because the AVM LAW module's PUT **recovered** a soft-deleted
+   `law-security-<org>-<env>` instead of creating a fresh one. Recovery restores workspace
+   configuration **and** its `Microsoft.SecurityInsights` children, so roughly eleven analytics rules
+   and the MDC data connector came back as live objects absent from the freshly-emptied state, and the
+   provider's pre-create GET returned `ImportAsExistsError` on each. The workspace itself did not
+   error, because a soft-deleted workspace GETs 404 and the PUT reports success.
+2. The repo's fix for Class 2 is **entirely teardown-side**, in two layers: the native provider purge
+   in S3c (fires only during `terraform destroy` of `platform/security`) and
+   `scripts/teardown-az-sweep.sh` step 7b (fires only inside a Phase 2 az-sweep).
+3. **Neither layer can act on a workspace that is ALREADY in soft delete**, unless a teardown is
+   dispatched from a ref that contains them. Both merged in PR #54 (`2ca1fc5`) on 2026-07-30.
+4. **Nothing on the apply path purges anything.** There is no argument, no flag and no plan-time
+   signal. A plan against a soft-deleted workspace looks like a clean create.
+5. OQ-063 states this precondition in terms, and it is the repo's own words, not mine: a teardown
+   dispatched from a ref without the provider feature "soft-deletes the workspace again and reproduces
+   the ADR-067 Class 2 'already exists' failure on the next security apply, with no signal at plan
+   time. This branch must be merged into `banking` before the teardown that precedes the rebuild's
+   Step 3 is dispatched."
+6. **Every teardown run recorded anywhere in this repository predates `2ca1fc5`.** No committed
+   artefact records a teardown dispatched from `banking` at or after that merge.
+
+**Therefore, on the evidence available to me, `law-security-<org>-<env>` is more likely than not sitting
+in Log Analytics soft delete right now, and dispatching Step 3 against it would reproduce ADR-067
+Class 2 exactly.** I cannot confirm or refute this from the repository, and I am read-only on live
+Azure. It is a live-state question with a one-command answer, so it becomes a hard pre-flight gate
+rather than a guess in either direction.
+
+**PC-1SEC (BLOCKER for Step 3, operator/QA lane, read-only check).** Before dispatching Step 3, prove
+the workspace is not in soft delete:
+
+```bash
+az monitor log-analytics workspace list-deleted-workspaces \
+  --subscription <security-sub> \
+  --query "[?name=='law-security-globaris-poc'].[name,location,id]" -o tsv
+```
+
+**Expect EMPTY output.** A non-empty result is a **STOP**: do not dispatch Step 3.
+
+**Remediation, via CI, not by hand** (the standing rule is that teardown is CI/CD and never manual):
+dispatch `teardown.yml` with `target=all`, `mode=az-sweep`, `include_bootstrap=false`, `confirm=destroy`,
+from `--ref banking` at or after `2ca1fc5`. On that path:
+
+- every Phase 1 per-root `terraform destroy` job is skipped (each is gated on `inputs.mode ==
+  'terraform'`), which is the correct behaviour against an already-empty estate;
+- Phase 0 DISARM plus Phase 2 az-sweep run, and az-sweep **step 7b** recovers the soft-deleted
+  workspace into a placeholder resource group, force-purges it, confirms it gone with a fail-loud GET,
+  then deletes the placeholder;
+- Phase 3 VERIFY runs and **fails the run on any estate remnant**.
+
+Then re-run the PC-1SEC query and require empty before dispatching Step 3.
+
+That one dispatch closes three things at once, which is why it is recommended rather than merely
+tolerated: it satisfies PC-1SEC, it satisfies PC-1Y (VERIFY is the whole-estate remnant check), and it
+exercises the OQ-063 step-7b **backstop**, which OQ-062 item (e) explicitly asks for on the grounds
+that the primary native-purge path otherwise hides the backstop forever.
+
+**Two cautions on that dispatch, both hard:**
+
+- `include_bootstrap` **MUST be false**. True is scorched earth and takes the state backend and OIDC
+  app with it.
+- az-sweep **deletes**; it is not a probe. Against a genuinely empty estate it should be all no-ops plus
+  the LAW purge, but it must not be dispatched casually while anything is in flight, and never
+  concurrently with any other run that flips the state SA firewall (LESSON 31).
+
+**If the PC-1SEC query comes back empty on the first look, there is no remediation to run and Step 3 is
+GO.** The condition is the check, not the teardown.
+
+---
+
+## S4. Lifecycle audit, re-run 2026-07-30 (LESSON 40/41)
+
+The governing audit was run 2026-07-21. That is **9 days old**, inside the 14-day re-audit window, so
+this is a targeted re-check of the highest-risk items rather than a full re-derivation. **Next full
+re-audit due 2026-08-04** if the dispatch has still not happened by then.
+
+### Re-verified TODAY against current Microsoft sources
+
+| Item | Status 2026-07-30 | Consequence |
+|---|---|---|
+| **The eight Defender plans this estate enables** (`VirtualMachines` P2, `StorageAccounts` DefenderForStorageV2, `AppServices`, `SqlServers`, `SqlServerVirtualMachines`, `Containers`, `OpenSourceRelationalDatabases`, `CloudPosture`) | **ALL CURRENT and all enablable.** The five plans Microsoft blocked for NEW enablement through the plan-enablement API on 2026-07-05 are exactly: Defender for **Azure Kubernetes Service**, Defender for **Azure Container Registry**, Defender for **Key Vault**, Defender for **DNS**, Defender for **Azure Resource Manager**. **None of the eight is in that set.** | **PASS.** ADR-040 already removed `KeyVaults` and `Arm`; `Dns` was never enabled; `KubernetesService` and `ContainerRegistry` are superseded by `Containers`, which is exactly what `defender.tf` already uses. Step 3's pricing block is clean. |
+| Foundational CSPM | Moves to an **opt-in** model on **2026-10-27**, no longer default-enabled for new subscriptions | **No effect on this dispatch.** Future-dated by three months. Relevant only to W2 (FoundationalCspm currently Standard and intentionally untouched). Worth revisiting before any rebuild after October. |
+| Microsoft Sentinel | **NOT retired.** Only the **Azure portal experience** is deprecated, redirecting to the Defender portal from 2026-07-01 and retiring 2027-03-31. The `Microsoft.SecurityInsights` ARM surface and every `azurerm_sentinel_*` resource are unaffected | **PASS, with a QA note.** Operators verifying Sentinel objects after Step 3 will be redirected into the Defender portal. That is cosmetic and expected; it is not evidence of a failed apply. |
+| App Gateway WAF (online-p1) | App Gateway **v1 retired 2026-04-28** (estate is v2 only). Separately, the **inline WAF configuration on the WAF_v2 SKU** retires **2027-03-15**, superseded by the separate WAF policy object | **PASS.** Verified in code: `landing-zones/online-p1/main.tf` creates an `azurerm_web_application_firewall_policy` and attaches it via `firewall_policy_id`. The estate is already on the surviving model and uses no inline `waf_configuration`. |
+| Azure Firewall Premium + Firewall Policy Premium | **CURRENT.** No retirement, no new-enablement block | **PASS.** Unchanged from 2026-07-21. |
+| azurerm `features.log_analytics_workspace.permanently_delete_on_destroy` | **Real at the pinned v4.71.0**, Optional, default `false`, destroy-path only | **PASS.** See S3c. |
+
+### Carried forward from the 2026-07-21 audit, NOT re-verified today
+
+VNet flow logs and Traffic Analytics (current; NSG flow logs blocked for new creation since 2025-06-30
+and the estate migrated at wave B0c), Standard SKU public IPs, `gpt-5.4-nano` version `2026-03-17`
+GenerallyAvailable with inference deprecation 2027-03-18, Recovery Services vault, APIM Developer stv2
+(note: APIM trusted-service connectivity retired March 2026, which predates this estate's last green
+APIM apply on 2026-07-18/19, so it is already proven post-retirement), Databricks Premium VNet-injected,
+Fabric F2, AI Search basic, Static Web App Standard, and the flags that are OFF (`enable_vpn_gateway`,
+`enable_dns_resolver`, `enable_bastion`, `enable_ddos_standard`, `enable_sql`, `enable_app_service`,
+`enable_synthetic_workload`). Nine days is short and none of these had a pending deprecation dated
+inside the window; they are listed so the boundary of today's re-check is explicit rather than implied.
+
+### Module and provider pins
+
+All module pins are registry-immutable and unchanged since the versions that applied green between
+2026-07-16 and 2026-07-19. `azurerm` is pinned to **4.71.0** by every root's committed
+`.terraform.lock.hcl` and none of those lock files is in the `d3b9e8c..ed3450e` delta. No re-verification
+beyond the locks is required.
+
+---
+
+## S5. VERIFIED vs ASSUMED (this replaces R6)
+
+### Verified by me, from the repository, at `ed3450e`
+
+The complete apply-path delta and its per-file disposition (S2); that `envs/poc.tfvars` and every root
+except `platform/security` and `bank-app-p1` is unchanged since the original gate basis; that the
+`-parallelism=1` conditional has exactly one match point and touches only the apply step; that the
+`features` argument is real at the pinned provider version and is destroy-only; that `online-p1` uses
+the WAF policy model; that the eight Defender plans are outside the blocked-five set; that az-sweep
+step 7b exists, is unconditional within Phase 2, and is reachable at `target=all mode=az-sweep`; that
+`teardown-probe.yml` is genuinely read-only.
+
+### NOT verified, because it requires live Azure and I am read-only on it
+
+**Everything below is an operator or QA pre-flight item to be proved BEFORE dispatch. None of it is
+asserted here as fact.** The 2026-07-29 addendum leaned on a qa greenfield PASS for this; that PASS now
+predates a failed rebuild attempt and can no longer carry the weight.
+
+| ID | What must be proved live | How | Owner | Blocks |
+|---|---|---|---|---|
+| **PC-1Y** | **The estate is actually greenfield.** The last recorded live event is a FAILED partial apply of `platform/security` (run `30499221661`), and no committed artefact records a teardown after it. Steps 1 and 2 may also have applied before the failure. | Preferred: dispatch `teardown-probe.yml` (read-only, deletes nothing, no `confirm` input) and read the orphan map plus the state-blob inventory. Or accept the Phase 3 VERIFY of the PC-1SEC remediation dispatch, which fails the run on any remnant. Then a qa greenfield confirmation as the standing ADR-058 gate. | qa-engineer / operator | **EVERY root** |
+| **PC-1SEC** | The Security LAW is not in soft delete. See S3d for the query, the STOP, and the CI remediation. | `az monitor log-analytics workspace list-deleted-workspaces` | operator | **Step 3** |
+| **PC-2R** | The 8 estate-managed Defender plans read `Free` in the security subscription | runbook section 2b, PC-2R row | operator | **Step 3** |
+| **PC-1R** | The 12 subscription-scoped teardown survivors are gone (budgets, cost exports, anomaly action, subscription diagnostic setting) | runbook section 2b | operator | Steps 1-2 |
+| **PC-3R** | `Microsoft.CostManagementExports` is `NotRegistered` in the management subscription | runbook section 2b | operator | Step 2 |
+| **PC-4S** | The soft-deleted APIM instance is gone. **Do not assume the auto-purge fired**; the same soft-delete class is what produced PC-1SEC. | runbook section 2a | operator | Step 9 |
+| **PC-1S** | Zero subscription-scoped policy exemptions in the landingzones subscription | Step-8 pre-flight, already in the runbook | operator | Step 8 |
+| **Live policy matrix** | Every ancestor MG scope of every target subscription. **Structurally unreadable today**: there is no management group in the tenant except Tenant Root Group until Step 1 creates them. The matrix in section 4 (PC-3C) and section 5 (PC-8S) above remains DERIVED from pinned content, not live-read, exactly as it was on 2026-07-21. | **PC-3C** after Step 1 and before Step 4: `Enable-DDoS-VNET` must read `DoNotEnforce` at BOTH the connectivity and landingzones MGs. Matrix row C1 if not. | operator | Step 4 |
+| **Tenant prerequisites** | CI SP role bindings at every scope, resource provider registrations in both subscriptions, federated credentials, licensing for the identity root | Not re-readable by me. Carried as **W1**: Step 1 IS the live confirmation and fails loud there before any estate resource is touched. Do not pre-grant speculatively. | operator | Step 1 |
+| **Subscription OFFER caps and quota** | vCPU headroom in eastus2/centralus, and the OFFER restrictions that are distinct from quota (SQL `ProvisioningDisabled`, App Service dedicated-quota-0) | Carried from PC-5S. The two offer-capped tiers are gated OFF by flag (`enable_sql`, `enable_app_service` both false), so an offer cap cannot break a spoke; every spoke remains shippable network-only. Quota headroom was measured 2026-07-21 with large margin and nothing has consumed it since. Re-measure only if PC-1Y shows the estate is not empty. | operator | Steps 5-9 |
+| **GitHub known-issues sweep** | Open azurerm / AVM issues affecting these roots at 4.71.0 | Partially done: I checked the `azurerm_security_center_subscription_pricing` 409 class specifically (no provider-side fix pending, so `-parallelism=1` is durable). **I did not sweep the full issue set for the other nine roots.** Named here rather than implied. | architect / operator, before dispatch | advisory |
+
+---
+
+## S6. The dispatch sequence
+
+**The runbook is `docs/2026-07-22-full-estate-rebuild-runbook.md` and it remains the executable
+document. Do not duplicate it. Its 14-step order, its per-step commands, its plan-scan bars and its
+STOP/rollback matrix all stand.** This refresh changes exactly four things about it.
+
+**Amendment 1 - a Step 0 is prepended.**
+
+```
+STEP 0 (new, this refresh):
+  0a. PC-1Y: dispatch teardown-probe.yml (read-only) and read the orphan map + state-blob inventory.
+  0b. PC-1SEC: az monitor log-analytics workspace list-deleted-workspaces  ->  expect EMPTY.
+  0c. If 0a shows remnants OR 0b returns a row:
+        dispatch teardown.yml  target=all  mode=az-sweep  include_bootstrap=false  confirm=destroy
+        --ref banking  (must be at or after 2ca1fc5).
+        Require Phase 3 VERIFY green. Then re-run 0a and 0b and require clean/empty.
+  0d. qa greenfield confirmation (ADR-058 standing gate).
+  Only then: Step 1.
+```
+
+**Amendment 2 - Step 3's duration expectation.** "Duration ~15 min" becomes **"budget 25-45 min"**
+(PC-3SEC, S3b). The plan-scan bar for Step 3 is UNCHANGED: pure adds, roughly 48, `0 change,
+0 destroy, 0 replace, 0 import`, exactly 8 pricing adds, zero pricing resources named `KeyVaults`,
+`Arm`, `Dns`, `KubernetesService` or `ContainerRegistry`, Key Vault and Event Hub namespace carrying
+NEW random suffixes.
+
+**Amendment 3 - STOP matrix row B6 is WRONG and must be corrected.** It currently reads "Sentinel
+onboarding 409 already onboarded -> config-driven IMPORT of the onboarding resource, then remove the
+import block once adopted." That disposition was superseded on 2026-07-29 by the user's process change
+and by ADR-067: **recovery is a full estate teardown and a restart from Step 1. There is no
+import-and-continue and no partial-state reconciliation.** Corrected disposition: any "already exists /
+needs to be imported" on the onboarding resource **or on any `Microsoft.SecurityInsights` child** means
+**PC-1SEC did not actually hold** and the workspace was recovered from soft delete. **STOP.** Do not
+import. Complete the LAW purge, then restart.
+
+**Amendment 4 - STOP matrix row B7 is now too permissive.** It reads "Sentinel connector or automation
+rule 400 workspace not onboarded -> wait, then exactly one rerun." That was the ADR-033 misdiagnosis
+ADR-067 corrected: for the two automation rules it was never transient, it was a missing `depends_on`,
+and that edge is now in the code. Corrected disposition: with the ADR-067 fix on the dispatched ref, a
+400 "not onboarded" **on either automation rule** is NOT transient. **STOP** and confirm the dispatched
+`headSha` actually carries the `depends_on` (LESSON 33). The "wait then one rerun" disposition still
+applies to the MDC automation and the data connectors, which are a genuine RP-propagation class.
+
+**Unchanged and load-bearing:** ADR-060 sequential single-target dispatch, one run in flight at a time,
+never `target=all` for apply; `--ref banking` on every dispatch; plan then scan then apply per root;
+PC-2X after Step 2; PC-3X and PC-4C after Step 4; the identity two-pass override on Steps 10-11 only;
+U1 (any `-/+` replace or unexpected destroy is a hard STOP) and U5 (a second identical failure on one
+root after one clean retry is a HARD STOP, counting toward the project's 4-failure bar).
+
+---
+
+## S7. Findings handed to other roles (NOT fixed here, docs-only pass)
+
+| # | Finding | Owner | Severity |
+|---|---|---|---|
+| F1 | Runbook STOP-matrix rows **B6** and **B7** carry dispositions superseded by ADR-067. Exact replacement text is in S6 amendments 3 and 4. | devsecops-engineer | **Should land before dispatch.** An operator following B6 today would import into a state ADR-067 says must be rebuilt. |
+| F2 | Runbook Step 3 says "Duration ~15 min", which is wrong after `-parallelism=1`. Replace with "budget 25-45 min" plus a line saying a still-running Step 3 at minute 20 is not hung. | devsecops-engineer | Low, but it invites a wrong cancel. |
+| F3 | **`-parallelism=1` is applied to the apply step only, not the destroy step.** Destroying `azurerm_security_center_subscription_pricing` resets the plan to `Free`, which is the SAME subscription-level pricing write that 409s under concurrency. Eight of them destroy concurrently at the default parallelism of 10 during ADR-066 Phase 1's `security` layer destroy, which has **never been run live** (OQ-062 states all-layers-green is proven by reasoning only). Consider keying the flag on the root for `destroy` as well as `apply`. | devsecops-engineer | Medium. Not a blocker for this apply; a plausible first failure of the ADR-066 teardown. |
+| F4 | **`teardown-probe.yml` has no soft-delete class.** It probes extension resources and state blobs but never queries `list-deleted-workspaces`, APIM `deletedservices`, deleted Key Vaults or deleted Cognitive Services accounts. Every one of those is a proven rebuild-blocker class in this repo (PC-1SEC, PC-4S). Adding them would turn two hand-typed `az` pre-flights into one read-only CI probe. | devsecops-engineer | Medium. Directly addresses the class that produced this refresh's only conditional verdict. |
+| F5 | `DEPLOYMENT.md` section 3 Step 5 still lists `PLATFORM_LAW_CUSTOMER_ID` as a `platform/security` secret; section 3 Step 3 still describes connectivity as creating a VPN Gateway and DNS Private Resolver. Both were identified as false on 2026-07-21 and are still uncorrected. | technical-writer | Low, documentation only. |
+
+---
+
+## S8. Decisions and open items
+
+- **No new ADR.** This refresh introduces no new decision. ADR-060 (sequential single-target) and
+  ADR-061 (Secret determinism) still govern; ADR-066 and ADR-067 are correctly implemented and are
+  confirmed here rather than revised.
+- **ADR-worthy, deliberately NOT written this pass to hold scope:** the generalization behind PC-1SEC,
+  that a **purge-on-destroy mechanism is teardown-side and can never repair a rebuild whose teardown
+  predates it**, so every pre-clearance must carry an explicit soft-delete-recovery sweep across every
+  soft-deleting type in the estate (Log Analytics workspace, Key Vault, API Management, Cognitive
+  Services). Recorded as a follow-up under OQ-064 so it is not lost.
+- **OQ-064 is RESOLVED by this document**, both limbs. See `OPEN-QUESTIONS.md`.
+- **OQ-062 remains open** and this dispatch is part of its proof: item (e) is exercised by the PC-1SEC
+  remediation dispatch if one is needed, and item (f) is closed by a Step 3 that creates a fresh
+  workspace with zero "already exists" on any `Microsoft.SecurityInsights` child.
+- **Watch-item carried unchanged from R1:** promote `banking` to `main`, or block `main` from
+  `deploy.yml` dispatch, as a post-rebuild cleanup. Related to OQ-057.
+
+---
+
+## Proposed commit message (refresh #2)
+
+```
+docs(preclearance): 2026-07-30 refresh #2 - land the rescued 2026-07-29 addendum and re-clear the
+full-estate rebuild against ed3450e; platform/security drops to GO-CONDITIONAL on PC-1SEC (the ADR-067
+Class 2 LAW soft-delete is closed only on the teardown path, and every recorded teardown predates
+2ca1fc5), PC-1Y greenfield re-proof gates every root, ADR-067 parallelism and depends_on verified inert
+on plan, Defender plan set re-audited clean against the blocked-five list; closes OQ-064
+```

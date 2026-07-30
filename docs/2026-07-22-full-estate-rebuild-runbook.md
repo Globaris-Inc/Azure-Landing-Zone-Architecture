@@ -65,20 +65,23 @@ Every dispatch below is sequential (Rule 2), so these durations sum, they do not
 |---|---|---|---|---|
 | 1 | management-groups | plan + apply | ~5 min | 5 min |
 | 2 | management | plan + apply, then PC-2X | ~10 min | 15 min |
-| 3 | security | plan + apply | ~15 min | 30 min |
-| 4 | connectivity | plan + apply, then PC-3X + PC-4C | ~45-70 min | 75 min |
-| 5 | corp-a1 | plan + apply | ~10-15 min | 85 min |
-| 6 | corp-a2 | plan + apply | ~10-15 min | 95 min |
-| 7 | online-p1 | plan + apply | ~20-30 min | 115 min |
-| 8 | bank-data-p1 | plan + apply | ~30-45 min | 145 min |
-| 9 | bank-app-p1 Pass 1 | plan + apply | ~60-180 min | 205 min |
-| 10 | identity Pass 1 | plan + apply | ~60-180 min | 265 min |
-| 11 | identity Pass 2 | plan + apply | ~5 min | 270 min |
-| 12 | bank-app-p1 Pass 2 | plan + apply | ~5 min | 275 min |
-| 13 | management (B7 re-land) | plan + apply, then PC-2H | ~5 min | 280 min |
-| 14 | management-groups (B7 re-land) | plan + apply | ~10-20 min | 290-300 min |
+| 3 | security | plan + apply | ~25-45 min (ADR-067 `-parallelism=1`) | 40 min |
+| 4 | connectivity | plan + apply, then PC-3X + PC-4C | ~45-70 min | 85 min |
+| 5 | corp-a1 | plan + apply | ~10-15 min | 95 min |
+| 6 | corp-a2 | plan + apply | ~10-15 min | 105 min |
+| 7 | online-p1 | plan + apply | ~20-30 min | 125 min |
+| 8 | bank-data-p1 | plan + apply | ~30-45 min | 155 min |
+| 9 | bank-app-p1 Pass 1 | plan + apply | ~60-180 min | 215 min |
+| 10 | identity Pass 1 | plan + apply | ~60-180 min | 275 min |
+| 11 | identity Pass 2 | plan + apply | ~5 min | 280 min |
+| 12 | bank-app-p1 Pass 2 | plan + apply | ~5 min | 285 min |
+| 13 | management (B7 re-land) | plan + apply, then PC-2H | ~5 min | 290 min |
+| 14 | management-groups (B7 re-land) | plan + apply | ~10-20 min | 300-310 min |
 
-**Low-end total: about 4h50m. High-end total (every step at its own stated maximum): about 10h.** The
+**Low-end total: about 5h0m. High-end total (every step at its own stated maximum): about 10h30m.**
+(Recomputed 2026-07-30 when Step 3 moved to 25-45 min: the running-total column was not re-added at
+the time and every row below Step 3 was 10 minutes light, with the stated totals 10 and 30 minutes
+short respectively. The column is the LOW end of each range, cumulative.) The
 gate's own "budget 6 to 9 hours" sits between these because it assumes the two long poles land nearer
 their typical case than their worst case, not because the arithmetic is different. Plan the day assuming
 6 to 9 hours is realistic and be mentally ready for a 10th hour if both long poles run long the same day.
@@ -197,8 +200,9 @@ document.
 | B3 | `azurerm_resource_provider_registration` requires-import on `Microsoft.CostManagementExports` | PC-3R did not land. Stop, unregister, wait for `NotRegistered`, rerun. |
 | B4 | Management-groups plan shows a count in the 700s, or any address referencing `rg-amba-monitoring-001` / `id-amba-prod-001` | PC-4R did not actually land (the `globaris-amba` architecture got selected instead of `globaris`). Stop. Confirm `enable_om_phase1 = false` is really on the dispatched ref before retrying. |
 | B5 | MG or subscription-placement eventual-consistency error immediately after MG create | Single rerun of the same root; the module sequences internally and this clears on retry. |
-| B6 | Sentinel onboarding 409 "already onboarded" (security root) | Config-driven IMPORT of the onboarding resource, then remove the import block once adopted. Never blind-retry. |
-| B7 | Sentinel connector or automation rule 400 "workspace not onboarded"; or MDC automation 400 "workspace resource id could not be found" | Eventual-consistency / Defender RP propagation lag against a soft-delete-recovered LAW. Wait, then exactly one rerun. |
+| B6 | Sentinel onboarding 409 "already onboarded" (security root), OR any "already exists / needs to be imported" on **any** `Microsoft.SecurityInsights` child | **STOP. Do not import.** This means PC-1SEC did not actually hold and the workspace came back from soft delete (or was never purged). Complete the LAW purge via a CI teardown, then restart from Step 1. ~~Config-driven IMPORT of the onboarding resource, then remove the import block once adopted.~~ **[CORRECTED 2026-07-30: the import disposition was superseded 2026-07-29 by the full-teardown-and-restart ruling and by ADR-067. There is no import-and-continue and no partial-state reconciliation. An operator following the old text would import into a state ADR-067 says must be rebuilt.]** |
+| B7 | Sentinel **automation rule** 400 "workspace not onboarded" | **STOP. Not transient.** ADR-033 diagnosed this as timing; ADR-067 proved it was a missing `depends_on`, and that edge is now in the code. Confirm the dispatched `headSha` actually carries it (LESSON 33) rather than rerunning. ~~Eventual-consistency / Defender RP propagation lag against a soft-delete-recovered LAW. Wait, then exactly one rerun.~~ **[CORRECTED 2026-07-30: the struck disposition was the ADR-033 misdiagnosis. For the two automation rules it was never transient, and rerunning masked it across multiple rebuilds.]** |
+| B7b | Sentinel **data connector** 400 "workspace not onboarded", or MDC automation 400 "workspace resource id could not be found" | Genuine Defender RP propagation lag. Wait, then exactly one rerun. **[SPLIT from B7 on 2026-07-30: the old single row, struck in B7 above, applied this disposition to the automation rules too, which ADR-067 showed is wrong. It remains correct for these two symptoms.]** |
 
 ### 3c. Step 4 (connectivity)
 
@@ -269,6 +273,61 @@ checklist is the qa-engineer's lane, not devsecops'):
 ---
 
 ## 5. THE RUN
+
+### STEP 0 - prove the estate is actually empty (added 2026-07-30, BLOCKING)
+
+**Do not skip this because a previous session reported greenfield.** On 2026-07-30 this step was added
+precisely because "the estate is greenfield" was believed and was false: the 2026-07-29 dispatch got
+through Steps 1 and 2, failed at Step 3 (run `30499221661`), and was never torn back down. The MG tree
+and three populated resource groups were still live while the record said empty.
+
+- **0a. PC-1Y (whole-run gate).** Dispatch `teardown-probe.yml` (read-only) and read the orphan map and
+  state-blob inventory. Also confirm directly: `az account management-group list` shows only the Tenant
+  Root Group, and no estate resource groups exist in any of the 5 subscriptions.
+- **0b. PC-1SEC (gates Step 3).** Prove the Security LAW is not in soft delete:
+
+```bash
+az monitor log-analytics workspace list-deleted-workspaces --subscription <security-sub> \
+  --query "[?name=='law-security-globaris-poc'].[name,location,id]" -o tsv
+```
+
+  Expect EMPTY. **An empty result is NOT sufficient on its own.** On 2026-07-30 this exact query
+  returned EMPTY while the workspace was sitting LIVE in `rg-security-globaris-poc`, left by the failed
+  Step 3 of the 2026-07-29 dispatch (run `30499221661`), which would have read as a clean PASS. Evidence
+  and the full resource inventory are in the 2026-07-30 QA session entry in `WORKLOG.md`. So also
+  confirm the workspace is not sitting live:
+
+```bash
+az resource list -g rg-security-globaris-poc --subscription <security-sub> -o table
+```
+
+  Expect the resource group not to exist at all. A live `law-security-globaris-poc` collides on create
+  exactly like a recovered one, and the soft-delete query alone reads as a clean PASS.
+- **0c. If 0a shows remnants, or 0b returns a row, or the security RG exists:** dispatch the teardown
+  and require Phase 3 VERIFY green, then re-run 0a and 0b and require clean.
+
+```bash
+gh workflow run teardown.yml -R Globaris-Inc/Azure-Architecture --ref banking \
+  -f target=all -f mode=az-sweep -f include_bootstrap=false \
+  -f remove_mg_hierarchy=true -f confirm=destroy
+```
+
+  The ref must be at or after `2ca1fc5` (the ADR-066 / LAW-purge merge). `mode=az-sweep` is correct
+  when Terraform state is partial: it deletes by API rather than destroying only what state knows about.
+
+  **`remove_mg_hierarchy=true` is NOT optional here, and leaving it off is a silent trap.** It defaults
+  to `false`. At `mode=az-sweep` every Phase 1 per-root `terraform destroy` is skipped, including
+  `platform/management-groups`, so this flag is the ONLY thing that re-parents the 5 subscriptions to
+  tenant root and deletes the `globaris` MG tree. Worse, `scripts/teardown-verify.sh` gates VERIFY 4
+  (the MG-hierarchy-gone check) on this same flag: with it false, VERIFY prints "MG hierarchy check
+  skipped" and **the run still reports green with the whole tree standing**. An operator who trusts that
+  green and proceeds to Step 1 hits the same live-object-versus-empty-state collision at MG scope that
+  Step 0 exists to prevent. Set it explicitly, every time, for a full-estate teardown.
+- **0d. qa greenfield confirmation** (the standing ADR-058 gate).
+
+Only when 0a-0d are all clean: Step 1.
+
+---
 
 ### STEP 1 - `platform/management-groups`
 
@@ -348,12 +407,15 @@ Scan per Rule 1. Expected: **pure adds, 0 change, 0 destroy, 0 replace, 0 import
 Additional checks: zero pricing resources named `KeyVaults`, `Arm`, `Dns`, `KubernetesService`, or
 `ContainerRegistry` (ADR-040); exactly 8 pricing adds; Key Vault and Event Hub namespace both carry NEW
 random suffixes; the `diag-activity-to-security-law` subscription diagnostic setting present as a clean
-add. STOP conditions: matrix U1, B2, B3, B6.
+add. STOP conditions: matrix U1, B2, B3, B6, **B7** (B7 added 2026-07-30 when it was promoted from
+"wait then one rerun" to a hard STOP; B7b remains the retryable connector/MDC class).
 
 ```bash
 gh workflow run deploy.yml -R Globaris-Inc/Azure-Architecture --ref banking -f target="platform/security" -f action="apply"
 ```
-Approve `production`. Duration ~15 min.
+Approve `production`. **Budget 25-45 min** (was "~15 min"; corrected 2026-07-30). ADR-067 wires
+`-parallelism=1` into this root's apply step only, which serialises the graph and lengthens the run by
+design. **A Step 3 still running at minute 20 is NOT hung - do not cancel it.**
 
 ---
 
