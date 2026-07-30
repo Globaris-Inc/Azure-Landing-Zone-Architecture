@@ -31,6 +31,94 @@
 
 <!-- Newest at the top. -->
 
+### OQ-065: Two state-provenance gaps ADR-068 deliberately leaves open - the az-sweep path cannot clean `platform/identity`'s Entra objects (limb A), and the DEPLOY path still has no pre-plan state check at all (limb B)
+
+- **Raised:** 2026-07-30 (architect, while ruling ADR-068 on the stale-state-after-teardown gap)
+- **Section:** 10 (Pipeline & Tooling) / teardown + state backend. Relates to ADR-068 (which creates
+  limb A as an explicit carve-out and defers limb B), ADR-066 / ADR-065 (az-sweep as the state-gone
+  fallback), ADR-062 (VERIFY is ARM-plane discovery), ADR-060 (sequential single-target rebuild with a
+  per-root plan-scan gate), OQ-053 (the mirror-image failure mode).
+- **Blocking:** No for the current rebuild. Limb A has a zero-code workaround that can go in the runbook
+  today. Limb B is the gap that let today's incident happen silently; it blocks nothing, but leaving it
+  open means the same class recurs without warning the next time a teardown is skipped, fails, or is
+  dispatched from a ref without the ADR-068 mechanism.
+- **Priority:** Medium (limb A), Medium-High (limb B - it is a detection gap on the deploy path, which
+  is the path that runs most often).
+
+**Question:**
+
+ADR-068 adds Phase 4 STATE RESET so a verified `target=all` teardown ends with canonical empty state.
+Two things it deliberately does not close, both stated here rather than buried in the ADR so they have
+an owner.
+
+**Limb A. `platform/identity` is never reset in `mode=az-sweep`, so the az-sweep fallback structurally
+cannot deliver a clean identity slate.** That root declares eight `azuread_conditional_access_policy`
+resources, an `azuread_named_location`, `azurerm_pim_eligible_role_assignment` and
+`azurerm_role_management_policy`. The az-sweep deletes by ARM API only and `teardown-verify.sh` has no
+Entra, Graph or PIM check anywhere in VERIFY 0 through 10, so a green VERIFY says nothing about whether
+those objects are live. ADR-068 carve-out A therefore holds identity's state POPULATED after an
+az-sweep teardown - the safe side of the trade, because resetting it on absent evidence would risk
+silent DUPLICATE tenant-wide conditional-access policies (Entra tolerates duplicate display names, so
+the failure is quiet rather than an `ImportAsExistsError`). The cost is that identity keeps a phantom
+state into the next rebuild. How should this be closed?
+
+**Limb B. There is no state-provenance gate anywhere on the DEPLOY path.** `teardown-probe-state.sh`
+exists and is authoritative, but it only runs from a manual `teardown-probe.yml` dispatch that nobody
+is required to run. Today's incident was, reduced to one sentence, a deploy that planned against a
+state nobody had checked: `platform/management-groups` refreshed roughly 537 phantom resources for 25+
+minutes, and `platform/security` was about to be applied over the partial state ADR-067's addendum
+forbids reconciling. Phase 4 fixes this ONLY when a teardown ran and went green. It cannot help when
+teardown was skipped, failed, or was dispatched from a ref without the mechanism. The check that would
+have caught it belongs where the plan happens.
+
+**Options being considered - limb A:**
+- **A1 (RECOMMENDED DEFAULT, zero code):** a runbook step. Before dispatching `target=all
+  mode=az-sweep`, dispatch a single-root `target=platform/identity mode=terraform action=destroy`
+  first. That deletes the Entra objects through the azuread provider and empties identity's state
+  natively, so by the time the az-sweep runs there is nothing for carve-out A to protect. Costs one
+  extra dispatch and no new code, and it is honest about what az-sweep is: the fallback for when the
+  primary path is unavailable, not a replacement for it. Downside: it is a procedural control, so it
+  can be forgotten, and forgetting it is silent.
+- A2: teach `teardown-az-sweep.sh` to delete the Entra objects and `teardown-verify.sh` to check them
+  (a Graph limb in both). Correct and durable, and it would make az-sweep genuinely whole-estate. Real
+  work, and it needs Microsoft Graph application permissions the teardown service principal may not
+  hold - which is its own tenant-permission question of exactly the class LESSON 49 covers, so it must
+  be designed behind a default-false flag rather than assumed available.
+- A3: accept it permanently and document it. Defensible: `mode=terraform` is the ADR-066 primary path
+  and does cover identity properly, so this only bites on the fallback. Rejected as the recommendation
+  because "the fallback silently under-cleans one root" is exactly the kind of quiet boundary that
+  produces a two-week diagnosis later.
+- A4: make the guard job REJECT `mode=az-sweep` unless a prior single-root identity destroy is
+  attested. Rejected: attestation-by-input is unverifiable, and adding an input that the operator can
+  simply set to true is a checkbox, not a control.
+
+**Options being considered - limb B:**
+- **B1 (RECOMMENDED DEFAULT):** add an optional `expected_state` input to `_tf-root.yml` with values
+  `empty` / `populated` / `any`, defaulting to `any` (so nothing changes for existing callers). After
+  `terraform init` and before `plan`, run `terraform state list` and fail loud on a mismatch. The state
+  SA is already open in that job whenever `manage_runner_ip: true`, so this costs one command and no
+  new firewall window. `deploy.yml` then passes `expected_state: empty` for a greenfield rebuild
+  dispatch. This puts the check exactly where the damage happens and makes the operator's INTENT
+  explicit at dispatch time, which is the part no automated check can infer. Open sub-question: whether
+  `expected_state` is a `deploy.yml` dispatch input (operator states intent per run) or is derived from
+  a rebuild-mode input. Recommend the former - one input, stated once per run, visible in the run log.
+- B2: run the full `teardown-probe-state.sh` inventory as a required pre-step of any `deploy.yml`
+  dispatch. More thorough (it sees all 12 keys, not just the target root) but it needs its own firewall
+  window and it answers a whole-estate question when the job is about one root. Better as a scheduled
+  or pre-rebuild check than as a per-apply gate.
+- B3: fold the check into the existing ADR-060 per-root plan-scan gate instead - the plan-scan already
+  reads the plan; a plan carrying a large refresh of phantom resources is visible in it. Rejected as
+  primary: the plan-scan runs AFTER the 25-minute refresh has already been paid, so it detects the
+  condition at the point where detecting it saves nothing.
+- B4: do nothing; rely on Phase 4 (ADR-068) plus operator discipline. Rejected: Phase 4's guarantee is
+  conditional on a teardown having run and gone green, and the incident this OQ exists for happened on
+  a run where exactly that was true for the ESTATE and false for the STATE.
+
+**Recommended default:** A1 now (runbook, today, free), with A2 designed only if an az-sweep teardown
+is ever the primary path rather than the fallback. B1 next, as a small `_tf-root.yml` change on the
+DevSecOps lane once the ADR-068 Phase 4 job has merged - the two touch the same area and batching them
+avoids two reviews of the same file.
+
 ### OQ-064: A 2026-07-29 pre-clearance REFRESH ADDENDUM carrying a GO verdict exists only as gitignored files on one machine, and its repo-state basis is two merges stale
 
 - **Raised:** 2026-07-30 (found uncommitted in a Temp-path worktree during the post-PR-54 sweep; flagged again by the code-reviewer because the rescue location is gitignored)

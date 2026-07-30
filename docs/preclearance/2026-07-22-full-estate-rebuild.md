@@ -1067,6 +1067,37 @@ dispatch: PC-1Y (estate is actually greenfield) and PC-1SEC (the Security LAW is
 Every per-root verdict below is stated **conditional on PC-1Y passing**. PC-1Y is a whole-run gate: if
 it fails, no root is GO and the disposition is a teardown, not a dispatch.
 
+**PC-1Y has TWO halves, and checking only the first is how 2026-07-30 went wrong (added that day).**
+Greenfield means no live Azure resources **and** no Terraform state describing resources that no longer
+exist. Both must be proved. The second half was omitted from this gate until it cost a stalled plan:
+
+```bash
+az storage blob list --account-name stglobaristfstate01 --container-name tfstate \
+  --auth-mode login --query "sort_by([].{name:name,bytes:properties.contentLength}, &name)" -o table
+```
+
+**Every blob must be at the empty baseline, roughly 150-250 bytes** (the observed floor in this
+container is 181). Anything materially larger describes resources and is a **STOP**: reconcile before
+dispatching. Note the asymmetry, because the two failure directions need opposite responses:
+
+| Observed | Class | Meaning | Disposition |
+|---|---|---|---|
+| blob materially larger than the baseline, estate empty | **FM-2** | state describes resources that are gone | STOP. The plan will refresh phantoms, and per ADR-062 the scoped CI principal returns **403, not 404**, on a deleted MG scope, so those refreshes are hard errors rather than a clean "gone". Reset via the teardown (ADR-068 Phase 4), never by hand. |
+| blob ABSENT, or below the 100-byte probe threshold | **FM-1** | state lost while resources may be live | STOP. This is the OQ-053 alarm. A plan would read greenfield and collide at create time (`ImportAsExistsError`). Do NOT reset; investigate provenance first. |
+
+An emptied blob and a lost blob look superficially similar and mean opposite things. Size alone
+distinguishes them: a canonical empty state is well above the 100-byte threshold
+`scripts/teardown-probe-state.sh` uses for FM-1.
+
+**Evidence this belongs in the gate:** on 2026-07-30 the estate was independently qa-confirmed
+greenfield on live Azure and PC-1Y passed, while `platform/management-groups` state still held
+8,959,166 bytes describing ~537 deleted resources. The first Step 1 plan ran 41 minutes without
+completing and had to be cancelled. Nothing in the gate looked at the state backend. Once the three
+stale blobs were reset the same plan completed in 2 minutes 17 seconds at 537 add / 0 change /
+0 destroy. This is OQ-065 limb B, and the check above is its zero-code half: the mechanism that
+prevents the condition is ADR-068 Phase 4, but this gate is what catches it if the mechanism is ever
+skipped, fails, or the teardown is dispatched from a ref that predates it.
+
 | # | Root | 2026-07-29 verdict | 2026-07-30 verdict | Gating condition |
 |---|---|---|---|---|
 | 1 | `platform/management-groups` | GO | **GO** | PC-1Y. Watch W3 (MG-budget collision is provable only at this apply) carried unchanged. |

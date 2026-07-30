@@ -281,9 +281,24 @@ precisely because "the estate is greenfield" was believed and was false: the 202
 through Steps 1 and 2, failed at Step 3 (run `30499221661`), and was never torn back down. The MG tree
 and three populated resource groups were still live while the record said empty.
 
-- **0a. PC-1Y (whole-run gate).** Dispatch `teardown-probe.yml` (read-only) and read the orphan map and
-  state-blob inventory. Also confirm directly: `az account management-group list` shows only the Tenant
-  Root Group, and no estate resource groups exist in any of the 5 subscriptions.
+- **0a. PC-1Y (whole-run gate), BOTH halves.** Dispatch `teardown-probe.yml` (read-only) and read the
+  orphan map and state-blob inventory. Then confirm each half directly, because passing only the first
+  is what stalled the 2026-07-30 dispatch:
+  - **Live Azure is empty:** `az account management-group list` shows only the Tenant Root Group, and
+    no estate resource groups exist in any of the 5 subscriptions.
+  - **The state backend is empty too:**
+
+```bash
+az storage blob list --account-name stglobaristfstate01 --container-name tfstate \
+  --auth-mode login --query "sort_by([].{name:name,bytes:properties.contentLength}, &name)" -o table
+```
+
+  Every blob must sit at the empty baseline, roughly 150-250 bytes (observed floor 181). A materially
+  larger blob against an empty estate is **FM-2** and a STOP: the plan will refresh phantom resources,
+  and per ADR-062 the scoped principal gets 403 rather than 404 on a deleted MG scope, so those
+  refreshes are hard errors. Reset it through the teardown (ADR-068 Phase 4), never by hand. A blob
+  that is ABSENT or under 100 bytes is the opposite class, **FM-1** (OQ-053): state lost while
+  resources may be live. Also a STOP, but do NOT reset it - investigate provenance first.
 - **0b. PC-1SEC (gates Step 3).** Prove the Security LAW is not in soft delete:
 
 ```bash
