@@ -8,6 +8,18 @@
 #      core/provider required_version floors, so a local version below any module's
 #      floor fails here.
 #   4. actionlint on .github/workflows (best-effort; skipped if not installed).
+#   5. check-adr-landed.sh - Accepted ADRs from ADR-068 on must say where they landed.
+#      Catches the ADR-034 class: a sanctioned control that nobody ever wired up.
+#   6. check-worktrees.sh - uncommitted work in a volatile path (Temp/scratchpad) fails.
+#      This repo has lost agent output twice that way; see the script header.
+#
+# NOT wired in: scripts/check-claims.sh. It is useful and it found a real defect nothing
+# else did, but it parses English prose heuristically, and a heuristic has unbounded edge
+# cases. Four review rounds each found another one, in both directions. That is the wrong
+# shape for a check that can block every commit, so it stays a hand-run tool:
+#     bash scripts/check-claims.sh [file ...]
+# Run it when touching prose that asserts a flag value. Do not wire it back into this
+# script without a parser that is exact rather than heuristic.
 #
 # Usage: scripts/preflight.sh [root ...]   (default: all roots with a providers.tf)
 # Exit 0 = PASS, non-zero = FAIL.
@@ -67,6 +79,23 @@ if command -v actionlint >/dev/null 2>&1; then
   if actionlint; then note "OK"; else note "FAIL"; fail=1; fi
 else
   note "SKIP: actionlint not installed (CI still lints workflows)"
+fi
+
+# --- 5. Accepted ADRs record where they landed ---
+hr; echo "[5] check-adr-landed (Accepted ADRs cite a landing)"
+if bash scripts/check-adr-landed.sh > /tmp/pf_adr.log 2>&1; then
+  note "OK: $(tail -2 /tmp/pf_adr.log | head -1)"
+else
+  note "FAIL:"; sed 's/^/    /' /tmp/pf_adr.log; fail=1
+fi
+
+# --- 6. no uncommitted work parked somewhere volatile ---
+hr; echo "[6] check-worktrees (uncommitted work in volatile paths)"
+if bash scripts/check-worktrees.sh > /tmp/pf_wt.log 2>&1; then
+  note "OK: $(tail -1 /tmp/pf_wt.log)"
+  grep '^  WARN' /tmp/pf_wt.log | sed 's/^/  /' || true
+else
+  note "FAIL:"; sed 's/^/    /' /tmp/pf_wt.log; fail=1
 fi
 
 hr
