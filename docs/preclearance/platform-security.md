@@ -259,3 +259,81 @@ and confirms `0 to destroy` and no `-/+` on the three basic plans. Expected post
 destroy. Keep the `-parallelism=1` recommendation for the apply (the 2 remaining pricing creates still contend
 on the sub-level controller). Watch item (non-blocking): pinning DefenderForStorageV2 may surface an in-place
 StorageAccounts `extension` diff; benign, do not block on it.
+
+## Clean-empty-state apply findings - run 30499221661 (greenfield rebuild) and recovery disposition
+
+> Added by: architect. Date: 2026-07-29. Status: PARTIAL state. RECOVERY DISPOSITION SUPERSEDED 2026-07-29 - the IMPORT-AND-CONTINUE ruling in this section was replaced by full teardown-and-restart with the Security LAW purged (OQ-063); see the "Recovery path ruling" section below. See ADR-067.
+> This is the FIRST apply of this root from a genuinely EMPTY state (181-byte reset). Every prior apply
+> (runs 29133-29136xxx, ADR-033/034/035) was incremental over a state that already held the Sentinel
+> onboarding, which masked two defects that only a clean apply exposes.
+
+Three interacting classes failed. Root causes and dispositions (full reasoning in ADR-067):
+
+### Class 2 - the paradox: ~11 Sentinel resources "already exist" while the workspace reads "not onboarded"
+
+The STATE was emptied; AZURE was not. The prior teardown SOFT-DELETED the Security LAW (14-day window) instead
+of purging it. The AVM LAW module PUT RECOVERED the soft-deleted `law-security-globaris-poc` (same name/RG)
+rather than creating fresh (azurerm issue #26644; MS Learn "Delete and recover a Log Analytics workspace").
+Recovery restores workspace config and analytics rules, so the 10 scheduled alert rules + the `dc-mdc` data
+connector came back as live Microsoft.SecurityInsights child objects that are ABSENT from the emptied state ->
+the provider's pre-create GET returns `ImportAsExistsError`. The workspace itself did not error "already
+exists" because a soft-deleted workspace GETs 404 (the PUT recovers it and reports success). In-repo precedent:
+WORKLOG 2026-07-13 (recovered security LAW watch-item, runs 29471713790/29471965746).
+
+DISPOSITION [SUPERSEDED 2026-07-29 - see the "Recovery path ruling" section below; recovery is now full teardown-and-restart with the Security LAW purged (OQ-063), NOT import-and-continue]: the original ruling was to import the recovered orphans (config-driven `import` blocks, interpolated ids) and continue, and NOT tear down security. That path is no longer used.
+
+### Class 3 - automation rules race onboarding (missing depends_on)
+
+`azurerm_sentinel_automation_rule.auto_assign` and `.ti_enrichment_tag` (sentinel.tf 482-529) reference the
+workspace id but lack `depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.this]` (every other
+Sentinel child in the file has it). They ran in parallel with the onboarding PUT; the automation-rule endpoint
+gate-checks onboarding even on the existence GET, so it 400'd "not onboarded" before the racing onboarding
+settled. Same failure ADR-033 saw for `ti_enrichment_tag` on run 29133588369 and wrongly dismissed as
+transient. FIX: add the depends_on to both (Cloud Engineer). On the immediate re-apply this is sufficient
+(onboarding is already in state from the partial apply and re-applies as a no-op).
+
+### Class 1 - CloudPosture 409 (serialization that never serialized)
+
+`azurerm_security_center_subscription_pricing.extended`'s `depends_on = [.servers]` gates the whole extended
+set behind `servers` but does NOT serialize the six extended instances among themselves - they run concurrently
+up to `-parallelism`, and the sub-level pricing controller 409s on concurrent PUTs (CloudPosture lost the
+race). The depends_on(servers) edge was only ever validated on the 2026-07-10 INCREMENTAL apply (2 pending
+pricing writes). A clean state makes all ~8 pricing plans creates, exposing the six-way concurrency. ADR-034's
+real control was `-parallelism=1`, which the single-target rebuild dispatch did not pass. FIX: wire
+`-parallelism=1` into this root's apply step (DevSecOps); correct the false code comment (Cloud Engineer).
+
+### Recovery path ruling: FULL TEARDOWN-AND-RESTART with the Security LAW purged (SUPERSEDES the earlier import-and-continue ruling, 2026-07-29)
+
+> The original ruling here was import-and-continue. It was SUPERSEDED on 2026-07-29 by the user's process
+> change: when ANY layer fails, the estate is FULLY torn down and the rebuild RESTARTS from Step 1. There is no
+> import-and-continue and no partial-state reconciliation. See ADR-067 addendum.
+
+- Recovery is a FULL estate teardown followed by a clean rebuild from Step 1. The security root is NOT
+  import-reconciled and NO import blocks are added.
+- Class 2 (the ~11 "already exists" orphans) is closed by the teardown PURGING the soft-deleted Security LAW
+  BEFORE the restart, so Step 3 of the restart creates a genuinely fresh workspace with no orphans. Tracked as
+  OQ-063 and implemented in the ADR-066 all-layers-green teardown workstream (ADR-066 on branch
+  `docs/adr-teardown-all-layers-green`, commit 0dac862). The LAW-purge MUST land before the restart reaches
+  Step 3, or the Class 2 "already exists" reproduces exactly.
+- The naive "teardown JUST platform/security then re-apply" is still wrong for its own reasons (orphans are not
+  in the partial state, and it traps the purge-protected KV; LESSON 55-57). The full-estate teardown routes
+  around both: the LAW-purge removes the soft-deleted workspace so the orphan-recovery loop cannot occur, and
+  the KV is handled by the teardown workstream.
+
+### Code fixes carried into the rebuild (these STAND; already code-reviewed, preflight-clean)
+
+- Class 3: `depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.this]` added to BOTH automation
+  rules (`auto_assign`, `ti_enrichment_tag`) in sentinel.tf.
+- Class 1: `-parallelism=1` wired into the security root apply step (DevSecOps), and the false
+  "one PUT in flight" serialization comment on `azurerm_security_center_subscription_pricing.extended`
+  corrected (Cloud Engineer).
+
+### Ordered actions
+
+1. Teardown lane (OQ-063 / ADR-066 workstream): the full teardown PURGES the Security LAW (and audits the
+   security KV soft-delete, given purge protection) so the restart's Step 3 starts clean.
+2. Rebuild restarts from Step 1. Step 3 (platform/security) re-applies from a truly empty workspace with the
+   Class 1 + Class 3 code fixes in place. No import blocks, no partial-state ops.
+3. DevSecOps confirms the security apply uses `-parallelism=1` and the pre-apply plan is 0 destroy with no
+   `-/+` replace on any pricing plan; any Sentinel resource showing "already exists" means the LAW purge did
+   not run - STOP and complete the purge before proceeding.

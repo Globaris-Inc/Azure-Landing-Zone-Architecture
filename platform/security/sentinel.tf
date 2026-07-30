@@ -499,6 +499,8 @@ resource "azurerm_sentinel_automation_rule" "auto_assign" {
     owner_id = var.sentinel_owner_group_object_id
     labels   = ["auto-assigned"]
   }
+
+  depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.this]
 }
 
 resource "azurerm_sentinel_automation_rule" "ti_enrichment_tag" {
@@ -526,6 +528,8 @@ resource "azurerm_sentinel_automation_rule" "ti_enrichment_tag" {
     order  = 1
     labels = ["TI-enrichment-needed"]
   }
+
+  depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.this]
 }
 
 # ===========================================================================

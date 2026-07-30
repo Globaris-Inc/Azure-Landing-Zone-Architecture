@@ -31,6 +31,40 @@
 
 <!-- Newest at the top. -->
 
+### OQ-063: Teardown soft-deletes the Security LAW rather than purging it, so every rebuild recovers a workspace full of orphaned Sentinel rules that Terraform then hits as "already exists"
+
+- **Raised:** 2026-07-29 (diagnosing the platform/security clean-empty-state apply, run 30499221661; ADR-067)
+- **Section:** 6 (Defender for Cloud + Sentinel) / 10 (teardown). Relates to ADR-067, the ADR-054/066 teardown
+  workstream, and the "teardown incomplete at subscription scope" finding.
+- **Blocking:** YES until implemented. Updated 2026-07-29: the user's process change (any layer failure = full
+  teardown-and-restart from Step 1, no import-and-continue - ADR-067 addendum) makes this blocking, not a
+  deferred tax. The restart's Step 3 (platform/security) will reproduce the exact ~11 "already exists" Class 2
+  failure UNLESS the teardown purges the soft-deleted Security LAW first. Being RESOLVED by the ADR-066
+  all-layers-green teardown workstream (ADR-066 on `docs/adr-teardown-all-layers-green`, commit 0dac862): the
+  LAW-purge MUST land before the restart reaches Step 3.
+- **Priority:** High (was Medium; raised because it now gates the restart).
+
+**Question:**
+Log Analytics workspaces soft-delete for 14 days. Teardown deletes the Security LAW but does not PURGE it, so a
+rebuild within 14 days re-creates the same-named workspace, which Azure RECOVERS from soft-delete WITH its
+prior Microsoft.SecurityInsights children (analytics rules, data connector). Those come back as live objects
+absent from the freshly-emptied Terraform state, so the security apply fails ~11 "already exists - needs
+import" (ADR-067 class 2). Should teardown hard-purge the Security LAW so rebuilds start truly clean, and does
+the same apply to the Security Key Vault (it has purge_protection_enabled = true, so it CANNOT be purged for 90
+days - a different constraint that may instead need a recover-on-rebuild path)?
+
+**Options being considered:**
+- A: Teardown purges the Security LAW (`az monitor log-analytics workspace delete --force true`, or purge the
+  soft-deleted workspace) as a Phase-2/completeness step. Rebuilds create a fresh workspace, no orphans, no
+  import step. Preferred for the LAW. Must be wired into the teardown CI (no manual deletes), coordinated with
+  the active ADR-066 teardown redesign.
+- B: [NO LONGER APPLICABLE 2026-07-29] Accept the recovery and keep an import step as a standing rebuild
+  procedure. Void now that the process is full teardown-and-restart with no import-and-continue (ADR-067
+  addendum); Option A (purge on teardown) is the only path consistent with the restart model.
+- C: For the KV specifically, purge protection forbids a hard purge for 90 days; if a rebuild lands inside that
+  window the security apply must RECOVER the KV (or the AVM module must be told to recover) rather than create.
+  Track whether the current teardown/rebuild path already handles this or needs an explicit recover step.
+
 ### OQ-061: The CI service principal depends on at least five UNDECLARED out-of-band grants, including tenant-root User Access Administrator - the repo's identity model and the live tenant have drifted apart
 
 - **Raised:** 2026-07-23 (assembled while correcting ADR-063 decision 1; the individual pieces were
