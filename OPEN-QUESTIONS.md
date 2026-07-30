@@ -64,6 +64,32 @@ days - a different constraint that may instead need a recover-on-rebuild path)?
 - C: For the KV specifically, purge protection forbids a hard purge for 90 days; if a rebuild lands inside that
   window the security apply must RECOVER the KV (or the AVM module must be told to recover) rather than create.
   Track whether the current teardown/rebuild path already handles this or needs an explicit recover step.
+### OQ-062: All-layers-green teardown (ADR-066) is proven by doc/provider reasoning only - it must be CONFIRMED on the next full `enable_data_platform=true` deploy then teardown, and the Databricks orphan-managed-RG handling chosen
+
+- **Raised:** 2026-07-29 (recorded with ADR-066, which re-derived the teardown model against the user's all-layers-green requirement)
+- **Section:** 10 (Pipeline & Tooling) / teardown; extends ADR-066, ADR-054/055/057, ADR-065 (partially superseded)
+- **Blocking:** No for landing ADR-066's design and the teardown.yml change. Yes for calling all-layers-green PROVEN, and for finalising the Databricks belt form (decision 4 preferred vs alternative).
+- **Priority:** Medium (High the moment a full teardown is next dispatched).
+
+**Question:**
+
+The estate is EMPTY right now, so ADR-066's central claim - that all 11 per-layer `terraform destroy` jobs RUN and go green in reverse-dependency order, serialized, each with the per-job JIT state-SA firewall flip - cannot be empirically tested today. ADR-066 is grounded in provider source (azurerm v4.71.0 KV delete skips the purge), module source (the pinned `avm-res-databricks-workspace 0.5.0` issues a PLAIN azapi workspace delete with no `forceDeletion`), and current Microsoft docs (plain workspace delete retains the managed RG; ARM `forceDeletion` exists at api-version 2026-01-01). Those are strong but they are reasoning, not a live run.
+
+What must be proven on the NEXT full deploy (with `enable_data_platform = true`) then teardown:
+- (a) all 11 serialized layer destroys go GREEN end to end within the ADR-055 durable-OIDC envelope, including the slow APIM / AKS / Databricks deletes;
+- (b) whether the orphan Databricks managed RG's deny-assignment survives a plain workspace delete in THIS estate's Unity-Catalog-by-default configuration - this decides whether the ADR-066 decision-4 ALTERNATIVE (`az group delete --force-deletion-types Microsoft.Databricks/workspaces` on the orphan) is needed and actually bypasses the deny-assignment; the PREFERRED form (run the workspace force-cascade as a Phase 0.5 belt while the workspace is still live) sidesteps this and is the recommended default;
+- (c) the 11-in-a-row per-job firewall flip is race-free as a sequence and the state SA reads Deny between jobs (audit `default_action`);
+- (d) a follow-on greenfield apply succeeds with NO Databricks managed-RG name collision.
+
+Exact test: dispatch teardown `target=all` in the new waved mode against a fully deployed estate and require DISARM green, all 11 Phase-1 jobs green in reverse order, one-open-at-a-time firewall audit, the az-sweep belt green (orphan managed RG removed or cascade confirmed), VERIFY green, then a clean greenfield apply.
+
+**Same-pass coupling:** OQ-063 / ADR-067 (purge the soft-deleted Security Log Analytics workspace so rebuilds start clean, tracked on the other branch) is ALSO a teardown-completeness item. It should be implemented in the SAME teardown pass as ADR-066 so a single full deploy -> teardown proves both, rather than two separate teardown cycles.
+
+**Options being considered:**
+- A (recommended): implement ADR-066 with the decision-4 PREFERRED Databricks handling (force-cascade before Phase 1), dispatch the waved teardown on the next full estate, and gate "proven" on the exact test above.
+- B: also have the Cloud Engineer check the Terraform Registry for a newer `avm-res-databricks-workspace` version exposing `delete_query_parameters` / a force-deletion input; if one exists and is pinned, drop the Databricks belt entirely and let terraform destroy cascade the managed RG natively (the cleanest end-state, all-layers pure terraform).
+
+**RESOLVED YYYY-MM-DD:** [pending the next full deploy -> teardown]
 
 ### OQ-061: The CI service principal depends on at least five UNDECLARED out-of-band grants, including tenant-root User Access Administrator - the repo's identity model and the live tenant have drifted apart
 
