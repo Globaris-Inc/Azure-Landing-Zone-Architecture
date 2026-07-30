@@ -338,10 +338,20 @@ jobs:
         working-directory: ${{ inputs.root }}
         run: terraform plan -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -no-color
 
+      # ADR-067 decision 1d: platform/security's Defender pricing controller serializes
+      # subscription-level pricing writes. Six azurerm_security_center_subscription_pricing.extended
+      # instances (defender.tf) become ready in the same graph step once `servers` completes and
+      # then run concurrently up to terraform's default parallelism (10), so the controller 409s
+      # on whichever PUT loses the race. The depends_on(servers) edge does not serialize the
+      # extended set among itself - only -parallelism=1 at apply time actually does. This is keyed
+      # on inputs.root, at the workflow level, so it reaches the security apply on every dispatch
+      # that reaches this step, instead of relying on an operator hand-typing the flag (which the
+      # single-target dispatch previously dropped). Only platform/security needs this; every other
+      # root keeps terraform's default parallelism (10) so the rest of the estate is not slowed down.
       - name: Terraform Apply
         if: ${{ inputs.action == 'apply' }}
         working-directory: ${{ inputs.root }}
-        run: terraform apply -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve
+        run: terraform apply -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve ${{ inputs.root == 'platform/security' && '-parallelism=1' || '' }}
 
       # Destroy resilience pre-step (F1 core fix, ADR-054 / docs/teardown-redesign.md
       # section 4). A never-deployed or already-emptied root has no state, so a plain

@@ -68,11 +68,14 @@ resource "azurerm_security_center_subscription_pricing" "extended" {
   tier          = "Standard"
   resource_type = each.value
 
-  # Serialize the remaining pricing PUTs to avoid the 409 concurrency error seen
-  # in the 2nd apply: VirtualMachines (the servers resource) and AppServices
-  # (in this extended set) were the two still needing a PUT. Ordering the whole
-  # extended set after servers keeps only one pricing PUT in flight at a time
-  # (code-side serialization, ref ADR-034).
+  # Gate the whole extended set behind the servers plan so the extended pricing
+  # PUTs start only after the P2 servers write lands. NOTE: this depends_on does
+  # NOT serialize the extended for_each instances among themselves - once servers
+  # completes they all become ready and run concurrently up to -parallelism, and
+  # the subscription-level pricing controller 409s on concurrent PUTs (this is
+  # the CloudPosture 409 on the clean-state apply, ADR-067). Actual serialization
+  # of the pricing writes is achieved by the apply-time -parallelism=1 wired into
+  # this root's security apply step (DevSecOps), NOT by this edge (ref ADR-034/067).
   depends_on = [azurerm_security_center_subscription_pricing.servers]
 }
 
