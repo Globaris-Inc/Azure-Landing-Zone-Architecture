@@ -160,6 +160,33 @@
 # Microsoft's own guidance treats AADDS delete/recreate as slow and disruptive; import is the
 # correct rerun path, not a new delete capability.
 #
+# AMENDED a ninth time 2026-07-29 (ADR-066, folds in OQ-063): teardown.yml now re-enables and
+# SERIALIZES all 11 Phase 1 per-root terraform destroy jobs at target=all (supersedes ADR-065
+# decision 1), so THIS script is now typically a THIN REMNANT-CATCH BELT in the mode=terraform
+# path - the bulk of the estate is already gone by the time this job starts. It remains the
+# PRIMARY, full-coverage whole-estate deleter, UNCHANGED, in the mode=az-sweep state-gone
+# fallback path (ADR-065 decision 4, kept) - nothing in this script's own logic needed to
+# change for that role split; it is a consequence of Phase 1 now running, not a code change
+# here. Two things DID change in this script:
+#   - New step 3b (below, immediately after step 3's Key Vault handling): purges the
+#     soft-deleted Security Log Analytics workspace (OQ-063) - terraform destroy of
+#     platform/security only SOFT-deletes it, and a redeploy inside the 14-day window
+#     recovers it together with its stale Sentinel children, causing the "already exists"
+#     Class 2 failure OQ-063 diagnoses. See that step's own comment for the full mechanism.
+#   - TODO (ADR-066 decision 4, DEFERRED, tracked not fixed): step 1's Databricks workspace
+#     force-delete cascade below now runs STRUCTURALLY TOO LATE to prevent an orphan managed
+#     RG when Databricks is actually deployed (`enable_data_platform = true`) - Phase 1's
+#     bank-data-p1 terraform destroy (chain position 2 of 11, teardown.yml) issues a PLAIN
+#     workspace delete (no force-deletion) BEFORE this Phase 2 step ever runs, so by the time
+#     step 1 below executes the workspace is already gone via a plain delete and its managed
+#     RG has already been retained (not cascaded) - this step's force-delete then has nothing
+#     live left to act on. ADR-066 decision 4's PREFERRED fix is to move this force-delete to
+#     run as a Phase 0.5 belt BEFORE Phase 1 (alongside DISARM in teardown.yml), so it acts
+#     while the workspace is still live. NOT implemented in this change: no Databricks is
+#     deployed in the current estate (bank-data-p1's `enable_data_platform` is not currently
+#     true), so this gap is not yet load-bearing. It MUST land before any future cycle tears
+#     down a deployed bank-data-p1 with Databricks - see WORKLOG.md for the tracked follow-up.
+#
 # Order matters:
 #   1. Databricks: submit the WORKSPACE delete --no-wait --force-deletion (never `az group
 #      delete` the managed RG directly - it still carries an RP deny-assignment, F2, even with
@@ -174,6 +201,12 @@
 #      finds (belt, in case of a race with step 2's --no-wait), then purges non-purge-
 #      protected soft-deleted vaults and records purge-protected ones for the redeploy
 #      runbook (LESSON 56).
+#   3b. Security Log Analytics workspace purge (OQ-063, ADR-066 decision 3d, added
+#      2026-07-29). Recovers-then-force-purges the soft-deleted law-security-<org>-<env>
+#      workspace (terraform destroy of platform/security only soft-deletes it) so the next
+#      redeploy creates a genuinely fresh workspace instead of recovering one with stale
+#      Sentinel children. Idempotent (absent/already-purged is success). See the step's own
+#      comment for the resource-group-recreation mechanism this requires.
 #   4. Management-group hierarchy removal - ONLY if remove_mg_hierarchy=true. Bottom-up:
 #      move each MG's subscriptions to the tenant root, then delete the now-empty MG.
 #      Subscriptions are never deleted, only re-parented (docs/teardown-redesign.md
@@ -243,6 +276,14 @@ fi
 # --- 1. Databricks: submit the workspace delete --no-wait --force-deletion (never wait
 #     in-session, section 9.2a; --force-deletion is required to cascade the managed RG at all,
 #     architect pre-clearance C1 - see the header comment above) ---
+# TODO (ADR-066 decision 4, DEFERRED - see the "AMENDED a ninth time" header note above for the
+# full analysis): this step now runs STRUCTURALLY TOO LATE to prevent an orphan Databricks
+# managed RG when Databricks is actually deployed, because Phase 1's bank-data-p1 terraform
+# destroy (teardown.yml, chain position 2 of 11) now runs BEFORE this Phase 2 step and issues a
+# PLAIN workspace delete with no force-deletion. Not fixed here: no Databricks is deployed in
+# the current estate. Before any future cycle tears down a deployed bank-data-p1 with
+# Databricks, move this force-delete to a Phase 0.5 belt in teardown.yml that runs BEFORE the
+# Phase 1 chain (alongside DISARM), per ADR-066 decision 4's preferred form.
 echo "== Phase 2 step 1: Databricks workspace cascade (submission only, --no-wait --force-deletion) =="
 declare -a dbx_managed_rgs=()
 declare -a dbx_managed_rg_subs=()
@@ -459,6 +500,163 @@ for sub in "${SUBS[@]}"; do
     fi
   done
 done
+
+# --- 3b. Security Log Analytics workspace purge (OQ-063, ADR-066 decision 3d, 2026-07-29).
+#     platform/security's terraform destroy (Phase 1) only SOFT-deletes law-security-<org>-
+#     <env> (the provider `features{}` block carries no
+#     `log_analytics_workspace.permanently_delete_on_destroy` flag today - flagged to the
+#     Cloud Engineer as the cleaner long-term fix: setting that flag on platform/security's
+#     provider block would let terraform destroy purge it NATIVELY, the same pattern this
+#     estate already relies on for the Security Key Vault's `purge_soft_delete_on_destroy`,
+#     and would retire this whole belt step). Left soft-deleted, a redeploy within the 14-day
+#     window RECOVERS the same-named workspace together with its prior
+#     Microsoft.SecurityInsights children (Sentinel analytics rules, data connector) - objects
+#     the freshly-emptied Terraform state does not know about, producing the "already exists"
+#     Class 2 failure OQ-063 diagnoses. This step purges it so every redeploy creates a
+#     genuinely fresh workspace. Idempotent: not-soft-deleted (never destroyed this cycle, or
+#     already purged by a prior run) is success, not an error - matches every other class in
+#     this script.
+#
+#     RESOURCE-GROUP-RECREATION CAVEAT (Microsoft's own documented behaviour, "Delete and
+#     recover an Azure Log Analytics workspace", ms.date verified live 2026-07-29): recovering
+#     an ALREADY soft-deleted workspace is a PUT that recreates the workspace resource inside
+#     its ORIGINAL resource group, and that PUT fails "ResourceGroupNotFound" if the RG no
+#     longer exists. It will not exist here: platform/security's terraform destroy also
+#     destroys azurerm_resource_group.security (that root owns and destroys its own RG,
+#     platform/security/main.tf) as part of the SAME Phase 1 job that soft-deleted the
+#     workspace. So this step recreates a minimal placeholder RG (same name/location as the
+#     original, tracked so it is deleted again ONLY if THIS run created it), recovers the
+#     workspace into it, force-purges the workspace, then deletes the placeholder RG. That
+#     last delete is self-correcting even on failure: VERIFY 2's existing RG_SWEEP_QUERY
+#     naming-pattern scan already covers rg-security-globaris-poc as a remnant class, so an
+#     un-deleted placeholder RG is caught loudly there, not silently left behind.
+#
+#     List-call failure: a SUBSCRIPTION-scoped list can never legitimately be gone (section 9.4
+#     design boundary), so ANY non-zero is FAIL LOUD, matching every discovery list above.
+#     Recover/purge-call failure: classify with is_auth_error - auth-shaped fails loud;
+#     anything else is ALSO fail loud here (NOT warn-and-continue), because there is no
+#     separate Phase 3 VERIFY step for this class (unlike the KV soft-delete step above, which
+#     VERIFY 5 backstops) - this is the FIX-1 MG-scope precedent (teardown-common.sh's
+#     confirm_gone_or_fail_primary), applied here because a silent failure would leave the
+#     exact stale-soft-delete condition OQ-063 exists to close.
+echo "== Phase 2 step 3b: Security Log Analytics workspace purge (OQ-063) =="
+if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
+  echo "::error::SECURITY_SUBSCRIPTION_ID is empty - cannot purge the Security LAW. This is already a VERIFY 0 failure class; failing loud here too rather than silently skipping."
+  exit 1
+fi
+if ! az_run law_deleted_rows_out monitor log-analytics workspace list-deleted-workspaces \
+    --subscription "$SECURITY_SUBSCRIPTION_ID" \
+    --query "[?name=='${SECURITY_LAW_WORKSPACE_NAME}'].[name, location, id]" -o tsv; then
+  echo "::error::list-deleted-workspaces failed for the security subscription - a failed list is never read as 'not soft-deleted' (section 9.4): ${AZ_RUN_STDERR}"
+  exit 1
+fi
+# shellcheck disable=SC2154  # law_deleted_rows_out is assigned indirectly by az_run's printf -v
+mapfile -t law_deleted_rows <<< "$law_deleted_rows_out"
+law_found=0
+for row in "${law_deleted_rows[@]:-}"; do
+  [ -z "$row" ] && continue
+  law_found=1
+  law_name="$(printf '%s' "$row" | cut -f1)"
+  law_loc="$(printf '%s' "$row" | cut -f2)"
+  law_id="$(printf '%s' "$row" | cut -f3)"
+
+  case "$law_id" in
+    /subscriptions/*/resourceGroups/*) ;;
+    *)
+      echo "::error::deleted-workspace id '${law_id}' for ${law_name} does not contain a /resourceGroups/ segment - cannot determine which RG to recreate for recovery. Aborting rather than guessing."
+      exit 1
+      ;;
+  esac
+  law_rg="${law_id#*/resourceGroups/}"
+  law_rg="${law_rg%%/*}"
+  if [ "$law_rg" != "$SECURITY_LAW_RESOURCE_GROUP_NAME" ]; then
+    echo "::error::deleted workspace ${law_name} resolved to RG '${law_rg}', expected '${SECURITY_LAW_RESOURCE_GROUP_NAME}' (platform/security/main.tf naming) - refusing to recreate an unexpected RG name."
+    exit 1
+  fi
+
+  echo "  Found soft-deleted Security LAW ${law_name} (rg ${law_rg}, location ${law_loc}) - recovering to purge"
+  if ! az_run law_rg_exists_out group exists --name "$law_rg" --subscription "$SECURITY_SUBSCRIPTION_ID" -o tsv; then
+    echo "::error::checking existence of ${law_rg} failed - an auth/transport error, not a clean true/false: ${AZ_RUN_STDERR}"
+    exit 1
+  fi
+  law_purge_rg_created=0
+  if [ "$law_rg_exists_out" != "true" ]; then
+    echo "  RG ${law_rg} does not exist (expected - Phase 1 destroyed it) - recreating as a placeholder so the recover PUT has a container"
+    if ! law_rg_create_out="$(az group create --name "$law_rg" --location "$law_loc" \
+        --subscription "$SECURITY_SUBSCRIPTION_ID" --tags "Purpose=teardown-law-purge-scratch" --output none 2>&1)"; then
+      if is_auth_error "$law_rg_create_out"; then
+        echo "::error::creating placeholder RG ${law_rg} failed with an auth/transport error: ${law_rg_create_out}"
+        exit 1
+      fi
+      echo "::error::creating placeholder RG ${law_rg} failed - cannot recover the workspace without it: ${law_rg_create_out}"
+      exit 1
+    fi
+    law_purge_rg_created=1
+  else
+    echo "  RG ${law_rg} already exists - reusing it (not created by this step, will not be deleted after purge)"
+  fi
+
+  if ! law_recover_out="$(az monitor log-analytics workspace recover \
+      --resource-group "$law_rg" --workspace-name "$law_name" \
+      --subscription "$SECURITY_SUBSCRIPTION_ID" --output none 2>&1)"; then
+    if is_auth_error "$law_recover_out"; then
+      echo "::error::recovering ${law_name} (rg ${law_rg}) failed with an auth/transport error: ${law_recover_out}"
+      exit 1
+    fi
+    echo "::error::recovering ${law_name} (rg ${law_rg}) failed - cannot purge without first recovering it (Microsoft's own documented recover-then-purge sequence): ${law_recover_out}"
+    exit 1
+  fi
+
+  echo "  Force-purging (permanent delete, releases the name) ${law_name} (rg ${law_rg})"
+  if ! law_purge_out="$(az monitor log-analytics workspace delete \
+      --resource-group "$law_rg" --workspace-name "$law_name" \
+      --subscription "$SECURITY_SUBSCRIPTION_ID" --force --yes --output none 2>&1)"; then
+    if is_auth_error "$law_purge_out"; then
+      echo "::error::force-purging ${law_name} (rg ${law_rg}) failed with an auth/transport error: ${law_purge_out}"
+      exit 1
+    fi
+    echo "::error::force-purging ${law_name} (rg ${law_rg}) failed - no separate VERIFY step covers this class, so this is the only completion check it will ever get: ${law_purge_out}"
+    exit 1
+  fi
+  # Bespoke PRIMARY-evidence confirm-GET (same fail-loud contract as
+  # confirm_gone_or_fail_primary, teardown-common.sh, but with a message specific to this
+  # class rather than that helper's MG-scope-specific wording) - no separate Phase 3 VERIFY
+  # step exists for the Security LAW purge (this pass deliberately did not add one), so this
+  # confirm-GET is the only completion check this class will ever get.
+  law_purge_url="${ARM_BASE}${law_id}?api-version=${SECURITY_LAW_API_VERSION}"
+  confirm_gone_by_get "$law_purge_url"
+  case $? in
+    0) : ;;
+    1)
+      echo "::error::Security LAW ${law_name} (rg ${law_rg}): still confirmed LIVE immediately after a successful force-purge submission. No separate Phase 3 VERIFY step covers this class, so this confirm-GET is the only completion check it will ever get - treating a still-live result as a hard failure, not a warning."
+      exit 1
+      ;;
+    2)
+      echo "::error::Security LAW ${law_name} (rg ${law_rg}): confirm-GET after force-purge was indeterminate (neither confirmed gone nor confirmed live): ${CONFIRM_GONE_BY_GET_ERR}"
+      exit 1
+      ;;
+    3)
+      echo "::error::Security LAW ${law_name} (rg ${law_rg}): confirm-GET after force-purge failed with an auth/transport error: ${CONFIRM_GONE_BY_GET_ERR}"
+      exit 1
+      ;;
+  esac
+
+  if [ "$law_purge_rg_created" -eq 1 ]; then
+    echo "  Deleting placeholder RG ${law_rg} (created by this step for the recover round-trip)"
+    if ! law_rg_del_out="$(az group delete --name "$law_rg" --subscription "$SECURITY_SUBSCRIPTION_ID" --yes --no-wait --output none 2>&1)"; then
+      if is_auth_error "$law_rg_del_out"; then
+        echo "::error::deleting placeholder RG ${law_rg} failed with an auth/transport error: ${law_rg_del_out}"
+        exit 1
+      fi
+      echo "  ::warning::deleting placeholder RG ${law_rg} failed (continuing - VERIFY 2's RG naming-pattern scan will catch it as a remnant if it survives): ${law_rg_del_out}"
+    fi
+    deleted_rgs+=("$law_rg")
+    deleted_subs+=("$SECURITY_SUBSCRIPTION_ID")
+  fi
+done
+if [ "$law_found" -eq 0 ]; then
+  echo "  ${SECURITY_LAW_WORKSPACE_NAME} is not in a soft-delete state (never deleted this cycle, or already purged by a prior run) - nothing to do."
+fi
 
 # --- 4. MG hierarchy removal, gated on remove_mg_hierarchy. Fast control-plane ops - stay
 #     synchronous, no --no-wait, no reconcile wait needed for MGs (locked decision 9.3).

@@ -19,32 +19,54 @@
 #             Deletes every MG-scope policy ASSIGNMENT across the globaris tree BEFORE any
 #             resource deletion, so DINE remediation cannot re-create resources mid-sweep
 #             (fixes F3 - the rg-amba-monitoring-001 resurrection loop).
-#   Phase 1 - DESTROY  (terraform, per root, incl. synthetic) - mode=terraform only, reverse
-#             order. `needs` is for ORDERING ONLY; every root job's `if:` uses `!cancelled()`
-#             (NOT `!failure()`), so one root's failure never cascade-skips the others
-#             (fixes F1). `synthetic` IS a real root - synthetic/*.tf define real resources
-#             (RGs, red-team ACA jobs, cost-pattern VM/storage) gated behind
+#   Phase 1 - DESTROY  (terraform, per root, incl. synthetic) - mode=terraform only. `needs`
+#             is for ORDERING ONLY; every root job's `if:` uses `!cancelled()` (NOT
+#             `!failure()`), so one root's failure never cascade-skips the others (fixes F1).
+#             `synthetic` IS a real root - synthetic/*.tf define real resources (RGs,
+#             red-team ACA jobs, cost-pattern VM/storage) gated behind
 #             `var.enable_synthetic_workload` (currently false) - it is hardened with the
 #             same `!cancelled()` fix as every other root, not deleted from the graph; the F1
 #             fix is the resilience fix, not root removal. `_tf-root.yml` also gained a
 #             `terraform state list` pre-step that no-ops (exit 0) when state is empty/absent,
 #             so an undeployed/already-emptied root (including a currently-inert synthetic)
 #             can never even attempt a failing destroy.
-#             ADR-065 (2026-07-29): Phase 1 is now restricted to SINGLE-root targets only -
-#             each root job's `if:` requires `inputs.target == '<that-root>'` (the
-#             `inputs.target == 'all'` disjunct was removed). At target=all, every Phase 1
-#             job skips and the run is Phase 0 DISARM + Phase 2 AZ SWEEP + Phase 3 VERIFY
-#             only (the proven-green whole-estate path). Each Phase 1 root job now also
-#             carries `manage_runner_ip: ${{ inputs.target != 'all' }}` (the same
-#             concurrency-safe JIT state-SA firewall flip deploy.yml already uses), so a
-#             single-root terraform teardown can reach the firewalled state SA.
+#             ADR-065 (2026-07-29) restricted Phase 1 to single-root targets only, on the
+#             theory that all-layers-green was unattainable at target=all. ADR-066
+#             (2026-07-29, same day, SUPERSEDES ADR-065 decision 1 on fresh evidence -
+#             KV purge protection and the Databricks deny-assignment do not actually block a
+#             terraform destroy) restores it: at target=all, ALL 11 Phase 1 per-root
+#             terraform destroy jobs now RUN and go GREEN, SERIALIZED in a strictly LINEAR
+#             reverse-dependency `needs` chain (synthetic -> bank-data-p1 -> bank-app-p1 ->
+#             online-p1 -> corp-a2 -> corp-a1 -> security -> connectivity -> identity ->
+#             management -> management-groups) so exactly ONE state-SA-touching job is open
+#             at any instant (the JIT firewall flip races only on CONCURRENT flips, not
+#             sequential ones - LESSON 31). Every Phase 1 root job now carries
+#             `manage_runner_ip: true` UNCONDITIONALLY (ADR-066; previously
+#             `${{ inputs.target != 'all' }}`, ADR-065) - it is only ever reached by a
+#             serialized job now, whether single-root or the target=all chain, so the flip
+#             is always safe. A single-root dispatch is UNAFFECTED by the chain: only that
+#             one root's `if:` evaluates true, every other job in the chain skips, and
+#             `needs` on a skipped predecessor never blocks the targeted job (the same
+#             `!cancelled()` semantics F1 already established).
 #   Phase 2 - AZ SWEEP (scripts/teardown-az-sweep.sh) - az, target=all only, both modes.
-#             Fallback for mode=az-sweep (state gone, fixes F4) AND a remnant-catch pass
-#             after Phase 1 in mode=terraform. Databricks workspace-delete cascade (never
-#             `az group delete` the RP-managed RG directly - deny-assignment, fixes F2),
-#             orphaned-RG naming-pattern sweep, KV soft-delete/purge, and (gated on
-#             `remove_mg_hierarchy`) bottom-up MG-hierarchy removal for a clean redeploy
-#             slate (ADR-054 section 5 - subs are only re-parented to the tenant root, never
+#             Fallback for mode=az-sweep (state gone, fixes F4) - there it remains the
+#             PRIMARY, full-coverage whole-estate deleter, unchanged. In mode=terraform
+#             (ADR-066: now the primary target=all path, Phase 1 runs) it is DEMOTED to a
+#             thin remnant-catch BELT that runs AFTER all 11 Phase 1 jobs, because
+#             terraform-destroy now covers the bulk of the estate natively: (a) Databricks
+#             workspace-delete cascade (never `az group delete` the RP-managed RG directly -
+#             deny-assignment, fixes F2) - DEFERRED WIRING, see the TODO at that step; no
+#             Databricks is deployed in the current estate so this is not yet load-bearing;
+#             (b) orphaned-RG naming-pattern sweep (belt/backstop); (c) KV soft-delete/purge
+#             report; (d) Security Log Analytics workspace purge (OQ-063) - terraform destroy
+#             only SOFT-deletes the LAW, so this step recovers-then-force-purges it so the
+#             next redeploy creates a genuinely fresh workspace instead of recovering one with
+#             stale Sentinel children; (e) the ADR-057 subscription-scope step 6, now a
+#             no-op backstop in the mode=terraform path (platform/management and
+#             platform/security's own terraform destroy clean subscription scope natively) but
+#             still the PRIMARY mechanism in the mode=az-sweep fallback; (f, gated on
+#             `remove_mg_hierarchy`) bottom-up MG-hierarchy removal for a clean redeploy slate
+#             (ADR-054 section 5 - subs are only re-parented to the tenant root, never
 #             deleted).
 #   Phase 3 - VERIFY   (scripts/teardown-verify.sh)   - az, always, last, target=all only.
 #             FAILS LOUDLY (non-zero) if any estate remnant remains. A green Phase 3 IS the
@@ -54,23 +76,32 @@
 #   the bootstrap state backend + OIDC app, so redeploy is immediate. include_bootstrap=true
 #   surfaces a MANUAL scorched-earth runbook (the SP can't delete its own OIDC app, and the
 #   state-backend RG name is non-deterministic - LESSON 18 gap).
-# Scope note (ADR-054, amended ADR-065): Phase 0/2/3 (disarm/az-sweep/verify) only run for
-#   target=all - they are whole-estate operations (MG-scope policy disarm, RG naming-pattern
-#   sweep, MG hierarchy removal) that would be destructive surprises on an ad hoc single-root
-#   destroy. A single-root destroy (target != all) runs ONLY that root's Phase 1
-#   terraform-destroy, unaffected by the new phases - the same behavior as before this
-#   redesign, plus the state-empty resilience fix in `_tf-root.yml` (which applies
-#   universally) and, since ADR-065, the JIT state-SA firewall flip
-#   (`manage_runner_ip: target != 'all'`) so the single-root destroy can reach the firewalled
-#   state SA. A target=all destroy (mode=terraform or mode=az-sweep - ADR-065 made the two
-#   equivalent at this scope) runs NO Phase 1 job at all; the whole-estate teardown is Phase
-#   0 DISARM + Phase 2 AZ SWEEP + Phase 3 VERIFY only, which has zero state-backend
-#   dependency and is the run's proven-green path.
+# Scope note (ADR-054, amended ADR-065, RE-AMENDED ADR-066): Phase 0/2/3 (disarm/az-sweep/
+#   verify) only run for target=all - they are whole-estate operations (MG-scope policy
+#   disarm, remnant-catch sweep, MG hierarchy removal) that would be destructive surprises on
+#   an ad hoc single-root destroy. A single-root destroy (target != all) runs ONLY that
+#   root's Phase 1 terraform-destroy, unaffected by the other phases - unchanged by ADR-066,
+#   plus the state-empty resilience fix in `_tf-root.yml` (which applies universally) and the
+#   JIT state-SA firewall flip (`manage_runner_ip: true`, ADR-066 - previously
+#   `target != 'all'`, ADR-065) so the single-root destroy can reach the firewalled state SA.
+#   A target=all destroy with the default mode=terraform (ADR-066, supersedes ADR-065
+#   decision 1) now RUNS all 11 Phase 1 per-root terraform destroy jobs, SERIALIZED in
+#   reverse-dependency order (one state-SA-touching job open at a time), followed by the
+#   Phase 2 az-sweep THIN BELT and Phase 3 VERIFY - the normal, transparent, state-faithful
+#   Terraform model, mirroring the deploy. A target=all destroy with mode=az-sweep remains
+#   the STATE-GONE FALLBACK (ADR-065 decision 4, kept): every Phase 1 job is skipped (gated
+#   on `inputs.mode == 'terraform'`) and the whole-estate teardown is Phase 0 DISARM +
+#   Phase 2 AZ SWEEP (whole-estate, its original full-coverage role, for this path only) +
+#   Phase 3 VERIFY, which has zero state-backend dependency.
 #
-# Order = reverse of deploy.yml: synthetic -> spokes -> {connectivity,security} ->
-#   management -> management-groups ; identity before management-groups. deploy.yml applies
-#   synthetic LAST (after all 5 spokes, ordering hygiene only - see deploy.yml's comment),
-#   so teardown destroys it FIRST. terraform destroy keeps state consistent for clean re-apply.
+# Order = reverse of deploy.yml, and (ADR-066) now the exact SERIALIZED chain at target=all:
+#   synthetic -> bank-data-p1 -> bank-app-p1 -> online-p1 -> corp-a2 -> corp-a1 -> security ->
+#   connectivity -> identity -> management -> management-groups. deploy.yml applies synthetic
+#   LAST (after all 5 spokes, ordering hygiene only - see deploy.yml's comment), so teardown
+#   destroys it FIRST. terraform destroy keeps state consistent for clean re-apply. Within the
+#   5 spokes and within {connectivity, security}, deploy.yml has no relative ordering
+#   requirement (they applied independently/in parallel) - the linear order chosen here is one
+#   valid reverse-topological sort, not the only one (ADR-066).
 name: Teardown (manual)
 
 on:
@@ -94,7 +125,7 @@ on:
           - landing-zones/bank-data-p1
           - synthetic
       mode:
-        description: "Only affects a single-root dispatch (target != all): terraform = primary reverse-order destroy for that one root (default); az-sweep is rejected for a single root (see guard). At target=all this input has NO effect (ADR-065) - the whole-estate run is always Phase 0 DISARM + Phase 2 AZ SWEEP + Phase 3 VERIFY, with every Phase 1 per-root terraform destroy job skipped by design regardless of mode."
+        description: "terraform (default) = primary path: single-root destroys that one root; at target=all (ADR-066) it runs all 11 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order, then the Phase 2 az-sweep thin belt, then Phase 3 VERIFY. az-sweep = rejected for a single root (see guard); at target=all it is the STATE-GONE FALLBACK (ADR-065 decision 4, kept) - every Phase 1 job is skipped and the whole-estate az-sweep flow (Phase 0 DISARM + Phase 2 AZ SWEEP, whole-estate + Phase 3 VERIFY) runs alone."
         type: choice
         default: terraform
         options:
@@ -145,11 +176,16 @@ jobs:
             echo "::error::mode=az-sweep requires target=all. az-sweep (Phase 2 fallback + Phase 0 disarm + Phase 3 verify) is a whole-estate operation and does not run for a single-root target - dispatching this combination would do nothing and still report green. For a single-root destroy use mode=terraform (the default)."
             exit 1
           fi
-          # NOTICE (ADR-065): at target=all the mode input has no effect - the whole-estate
-          # run is always the firewall-independent az-sweep flow, and every Phase 1 per-root
-          # terraform destroy job is skipped by design (not a failure).
+          # NOTICE (ADR-066, supersedes the ADR-065 notice this replaces): at target=all the
+          # mode input now DOES matter again. mode=terraform (default) runs the full waved
+          # teardown - all 11 Phase 1 per-root terraform destroy jobs, serialized. mode=az-sweep
+          # remains the state-gone fallback (ADR-065 decision 4, kept) - Phase 1 is skipped.
           if [ "$TARGET" = "all" ]; then
-            echo "NOTICE: target=all runs the whole-estate az-sweep flow (Phase 0 DISARM + Phase 2 AZ SWEEP + Phase 3 VERIFY); the per-root Phase 1 terraform destroy is skipped by design, and the mode input does not affect a target=all run."
+            if [ "$MODE" = "terraform" ]; then
+              echo "NOTICE: target=all mode=terraform (default, ADR-066) runs the full waved teardown - Phase 0 DISARM, all 11 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order (one state-SA-touching job open at a time), the Phase 2 az-sweep thin remnant-catch belt, and Phase 3 VERIFY."
+            else
+              echo "NOTICE: target=all mode=az-sweep runs the state-gone FALLBACK path (ADR-065 decision 4, kept) - Phase 0 DISARM + Phase 2 AZ SWEEP (whole-estate, its original full-coverage role for this path only) + Phase 3 VERIFY; every Phase 1 per-root terraform destroy job is skipped (gated on mode=='terraform')."
+            fi
           fi
           echo "Confirmed. target=$TARGET mode=$MODE include_bootstrap=$INCLUDE_BOOTSTRAP remove_mg_hierarchy=$REMOVE_MG_HIERARCHY"
 
@@ -175,8 +211,25 @@ jobs:
       - name: Disarm all MG-scope policy assignments
         run: bash scripts/teardown-disarm.sh
 
-  # Phase 1 - synthetic. A REAL root (synthetic/*.tf define real resources - RGs, red-team
-  # ACA jobs, cost-pattern VM/storage, etc. - gated behind var.enable_synthetic_workload,
+  # Phase 1 (ADR-066): a strictly LINEAR reverse-dependency `needs` chain of 11 jobs -
+  # synthetic -> bank-data-p1 -> bank-app-p1 -> online-p1 -> corp-a2 -> corp-a1 -> security ->
+  # connectivity -> identity -> management -> management-groups. At target=all every job's
+  # `if:` is true (the `inputs.target == 'all'` disjunct, restored - undoes ADR-065 decision
+  # 1) and GitHub Actions' unconditional `needs` dependency edge (independent of any `if:`)
+  # forces them to run ONE AT A TIME in exactly this order, so exactly one state-SA-touching
+  # job is ever open (`manage_runner_ip: true`, unconditional now - see each job below). At a
+  # single-root target only that one job's `if:` is true; every other job in the chain skips,
+  # and `needs` on a skipped predecessor never blocks a downstream job because every `if:`
+  # uses `!cancelled()` (NOT the default implicit success-gating) - the same F1-fix pattern
+  # this workflow already relies on, so single-root behaviour is byte-for-byte unaffected by
+  # this reorder. This order respects every real deploy dependency (spokes before
+  # connectivity/security; connectivity+security before management; management+identity
+  # before management-groups) - `identity` has no real dependency on its neighbours in the
+  # chain (it only ever needed `disarm`), so its linear position is free and was chosen to
+  # sit between connectivity and management per ADR-066's own spec.
+  #
+  # `synthetic` is a REAL root (synthetic/*.tf define real resources - RGs, red-team ACA
+  # jobs, cost-pattern VM/storage, etc. - gated behind var.enable_synthetic_workload,
   # currently false). deploy.yml applies it LAST (needs: the 5 spokes - "ordering hygiene",
   # it does not actually consume their outputs), so teardown destroys it FIRST, mirroring
   # that order. Hardened with the SAME resilience fix as every other root (`!cancelled()` +
@@ -188,145 +241,158 @@ jobs:
   # synthetic's own state drifted - "exists in state, gone in Azure").
   synthetic:
     needs: [guard, disarm]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'synthetic' }}
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'synthetic') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: synthetic
       action: destroy
       backend_rel: "../"
       gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
+      # ADR-066: chain position 1 of 11. manage_runner_ip unconditional - this job is only
+      # ever reached serialized (single-root, or first in the target=all chain).
+      manage_runner_ip: true
     secrets: inherit
 
-  corp-a1:
-    needs: [guard, disarm, synthetic]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'landing-zones/corp-a1' }}
-    uses: ./.github/workflows/_tf-root.yml
-    with:
-      root: landing-zones/corp-a1
-      action: destroy
-      backend_rel: "../../"
-      gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
-    secrets: inherit
-
-  corp-a2:
-    needs: [guard, disarm, synthetic]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'landing-zones/corp-a2' }}
-    uses: ./.github/workflows/_tf-root.yml
-    with:
-      root: landing-zones/corp-a2
-      action: destroy
-      backend_rel: "../../"
-      gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
-    secrets: inherit
-
-  online-p1:
-    needs: [guard, disarm, synthetic]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'landing-zones/online-p1' }}
-    uses: ./.github/workflows/_tf-root.yml
-    with:
-      root: landing-zones/online-p1
-      action: destroy
-      backend_rel: "../../"
-      gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
-    secrets: inherit
-
-  bank-app-p1:
-    needs: [guard, disarm, synthetic]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'landing-zones/bank-app-p1' }}
-    uses: ./.github/workflows/_tf-root.yml
-    with:
-      root: landing-zones/bank-app-p1
-      action: destroy
-      backend_rel: "../../"
-      gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
-    secrets: inherit
-
+  # NOTE (ADR-066 decision 4, DEFERRED - see the TODO on the Databricks step in
+  # scripts/teardown-az-sweep.sh): bank-data-p1's terraform destroy issues a PLAIN delete on
+  # the Databricks workspace when enable_data_platform=true, which retains an orphan managed
+  # RG that Phase 2's Databricks force-cascade (below, unchanged) runs TOO LATE to help with,
+  # because Phase 2 now runs AFTER this job, not before it. No Databricks is deployed in the
+  # current estate, so this gap is not yet load-bearing - tracked, not fixed, in this change.
   bank-data-p1:
     needs: [guard, disarm, synthetic]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'landing-zones/bank-data-p1' }}
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/bank-data-p1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: landing-zones/bank-data-p1
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
+      # ADR-066: chain position 2 of 11.
+      manage_runner_ip: true
     secrets: inherit
 
-  connectivity:
-    needs: [guard, disarm, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'platform/connectivity' }}
+  bank-app-p1:
+    needs: [guard, disarm, bank-data-p1]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/bank-app-p1') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
-      root: platform/connectivity
+      root: landing-zones/bank-app-p1
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
+      # ADR-066: chain position 3 of 11.
+      manage_runner_ip: true
+    secrets: inherit
+
+  online-p1:
+    needs: [guard, disarm, bank-app-p1]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/online-p1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/online-p1
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+      # ADR-066: chain position 4 of 11.
+      manage_runner_ip: true
+    secrets: inherit
+
+  corp-a2:
+    needs: [guard, disarm, online-p1]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a2') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/corp-a2
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+      # ADR-066: chain position 5 of 11.
+      manage_runner_ip: true
+    secrets: inherit
+
+  corp-a1:
+    needs: [guard, disarm, corp-a2]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'landing-zones/corp-a1') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: landing-zones/corp-a1
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+      # ADR-066: chain position 6 of 11.
+      manage_runner_ip: true
     secrets: inherit
 
   security:
-    needs: [guard, disarm, corp-a1, corp-a2, online-p1, bank-app-p1, bank-data-p1]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'platform/security' }}
+    needs: [guard, disarm, corp-a1]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/security') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/security
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
+      # ADR-066: chain position 7 of 11. Its terraform destroy also destroys
+      # azurerm_resource_group.security (this root owns and destroys its own RG) - the
+      # Security LAW is only SOFT-deleted here (provider features{} carries no
+      # log_analytics_workspace.permanently_delete_on_destroy flag today); Phase 2's new
+      # OQ-063 belt step purges it afterward (see scripts/teardown-az-sweep.sh).
+      manage_runner_ip: true
+    secrets: inherit
+
+  connectivity:
+    needs: [guard, disarm, security]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/connectivity') }}
+    uses: ./.github/workflows/_tf-root.yml
+    with:
+      root: platform/connectivity
+      action: destroy
+      backend_rel: "../../"
+      gh_environment: production-destroy
+      # ADR-066: chain position 8 of 11.
+      manage_runner_ip: true
     secrets: inherit
 
   identity:
-    needs: [guard, disarm]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'platform/identity' }}
+    needs: [guard, disarm, connectivity]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/identity') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/identity
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
+      # ADR-066: chain position 9 of 11. No real dependency on connectivity/security - its
+      # linear slot here is free (see the chain-level comment above) and matches ADR-066's
+      # own given order.
+      manage_runner_ip: true
     secrets: inherit
 
   management:
-    needs: [guard, disarm, connectivity, security]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'platform/management' }}
+    needs: [guard, disarm, identity]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/management') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/management
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
+      # ADR-066: chain position 10 of 11.
+      manage_runner_ip: true
     secrets: inherit
 
   management-groups:
-    needs: [guard, disarm, management, identity]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'platform/management-groups' }}
+    needs: [guard, disarm, management]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/management-groups') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/management-groups
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-065: JIT state-SA firewall flip, single-root only (mirrors deploy.yml).
-      manage_runner_ip: ${{ inputs.target != 'all' }}
+      # ADR-066: chain position 11 of 11 (last).
+      manage_runner_ip: true
     secrets: inherit
 
   # Phase 2 - AZ SWEEP (ADR-054). Fallback for mode=az-sweep (state gone) AND a

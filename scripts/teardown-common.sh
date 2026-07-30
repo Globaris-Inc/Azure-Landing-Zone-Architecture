@@ -78,6 +78,17 @@
 # is intentionally OUT OF SCOPE for this fix (a different owner/lane and a different PR). Not
 # silently dropped: it remains open and tracked as its own item in OPEN-QUESTIONS.md (OQ-053,
 # "Recommended default: A now... with B considered if it recurs").
+#
+# AMENDED a seventh time 2026-07-29 (ADR-066, folds in OQ-063): added the SECURITY_LAW_*
+# constants below, consumed by the new Phase 2 step 3b (teardown-az-sweep.sh) that purges the
+# soft-deleted Security Log Analytics workspace. Root cause: platform/security's terraform
+# destroy only SOFT-deletes the LAW (the provider `features{}` block carries no
+# `log_analytics_workspace.permanently_delete_on_destroy` flag), so a redeploy within the
+# 14-day soft-delete window RECOVERS the same-named workspace together with its prior
+# Microsoft.SecurityInsights children (Sentinel analytics rules, data connector) - objects the
+# freshly-emptied Terraform state does not know about, producing the "already exists" Class 2
+# failure OQ-063 diagnoses. See that step's own comment for the full recover-then-purge
+# mechanism and the resource-group-recreation caveat it is built around.
 
 # ARM management-plane base URL, used by every direct `az rest` call in teardown-disarm.sh,
 # teardown-az-sweep.sh, teardown-verify.sh, and scripts/teardown-probe-extensions.sh. Promoted
@@ -135,6 +146,21 @@ DEFENDER_PLANS_TO_FREE=(VirtualMachines StorageAccounts AppServices SqlServers \
 # line to empty if OQ-049 lands (moving registration out of the root removes this need
 # entirely, per LESSON 54).
 RP_NAMESPACES_TO_UNREGISTER=(Microsoft.CostManagementExports)
+
+# Security Log Analytics workspace purge (OQ-063, ADR-066 decision 3d) - fixed identifiers,
+# not a naming-pattern match, because this step targets exactly ONE known object by name, not
+# a discovered class. Sourced from platform/security/main.tf's own naming
+# ("law-security-${var.org_prefix}-${var.environment}" / "rg-security-${var.org_prefix}-${var.
+# environment}") and envs/poc.tfvars (org_prefix=globaris, environment=poc) - MUST be kept in
+# lock-step with those two files if either ever renames the security root's workspace or RG
+# (same coupling discipline RG_SWEEP_QUERY and DEFENDER_PLANS_TO_FREE above already carry).
+# api-version matches the REST example in Microsoft's own "Delete and recover an Azure Log
+# Analytics workspace" doc (learn.microsoft.com/en-us/azure/azure-monitor/logs/delete-workspace,
+# ms.date verified live 2026-07-29) - used only for the post-purge confirm-GET below; every
+# CLI command (recover/delete) uses the CLI's own bundled api-version, never this constant.
+SECURITY_LAW_WORKSPACE_NAME="law-security-globaris-poc"
+SECURITY_LAW_RESOURCE_GROUP_NAME="rg-security-globaris-poc"
+SECURITY_LAW_API_VERSION="2025-07-01"
 
 # is_owned_policy_object "<name>" "<policyAssignmentId>" - the ADR-062 decision 2 ownership
 # predicate (docs/teardown-redesign.md section 14.2), shared by Phase 2 sub-step 6d (what gets
