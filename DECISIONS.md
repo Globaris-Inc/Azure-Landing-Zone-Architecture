@@ -49,6 +49,422 @@
 
 <!-- Newest at the top. -->
 
+### ADR-068: A verified `target=all` teardown ends by RESETTING every eligible Terraform state blob to a canonical, metadata-labelled EMPTY document - never by deleting it. The two mirror-image state failure modes (FM-1 state-missing-while-resources-live, FM-2 state-populated-while-resources-gone) are named, given opposite guards, and reconciled by one ordering gate
+
+- **Date:** 2026-07-30
+- **Section:** 10 (Pipeline & Tooling) / teardown + state backend. SATISFIES the pre-registered
+  state-blob-deletion-ordering invariant in `scripts/teardown-common.sh` (the "FIX-6 note", 2026-07-23)
+  rather than superseding it, and NARROWS it: the invariant gates a DELETE path, and this ADR rules that
+  no delete path may ever exist. Builds on ADR-054 (four-phase teardown shape, VERIFY-is-the-truth-gate),
+  ADR-066 (at `target=all` mode=terraform runs all 11 Phase 1 destroys serialized; mode=az-sweep kept as
+  the state-gone fallback), ADR-065 decision 4 (az-sweep fallback retained), ADR-062 (discovery-based
+  VERIFY, deleted-scope-403), ADR-025 (JIT state-SA firewall flip), ADR-005 (bootstrap uses LOCAL
+  state), ADR-060 (sequential single-target rebuild with a per-root plan-scan gate). Answers the half of
+  OQ-053 that OQ-053 itself did not ask. Enforces ADR-067's addendum (no partial-state reconciliation).
+- **Status:** Accepted (architect ruling; user identified the gap during the 2026-07-30 rebuild).
+  Mechanism handed to DevSecOps, then Code Review. Decision 6 (the immediate disposition) is actionable
+  by the owner today and does NOT wait on the mechanism.
+- **Landed:** NOT IMPLEMENTED. Decisions 1-5 are a written spec for DevSecOps; no code exists yet.
+  Decision 6 is an owner-executed one-time operation whose evidence goes in WORKLOG, not in code.
+  Update this field by dated addendum when the Phase 4 job merges.
+- **Decision makers:** claude (architect); user (raised the gap and the "a greenfield deploy should start
+  from a state backend that behaves as if it had never been used" position).
+
+**Context:**
+
+A `target=all` teardown deletes every Azure resource and never touches the Terraform state blobs.
+`include_bootstrap=false` (the default) deliberately preserves the state Storage Account, and
+`mode=az-sweep` deletes by raw ARM API with Phase 1 skipped entirely, so the state survives fully
+populated. Nothing in this repository has ever emptied a state blob as part of teardown: confirmed by
+the full-repo grep recorded in the `teardown-common.sh` FIX-6 note and by OQ-053's own finding that
+"the three teardown scripts contain zero references to the tfstate container".
+
+Live evidence, 2026-07-30. Teardown run `30576653339` (`target=all mode=az-sweep
+include_bootstrap=false remove_mg_hierarchy=true`) completed GREEN with `VERIFY PASSED - zero estate
+remnants`, and qa-engineer independently confirmed the estate greenfield (no resource groups, only the
+Tenant Root management group, no exemptions, the Security Log Analytics workspace gone by both list and
+direct GET, bootstrap intact). Step 1 of the rebuild was then dispatched and its `terraform plan` ran
+past 25 minutes. Cause, from a listing of the `tfstate` container: `platform/management-groups` holds
+8,959,166 bytes, `platform/management` 123,309 bytes, and `platform/security` 78,870 bytes, while
+`corp-a1`, `corp-a2`, `online-p1`, `connectivity` and `identity` hold 181 bytes each. Three roots carry
+state describing roughly 537 resources that no longer exist, and the plan is refreshing all of them.
+`platform/security`'s 78 KB is the PARTIAL output of failed run `30499221661` - precisely the state
+ADR-067's addendum ruled must be rebuilt rather than reconciled.
+
+The immediate cause is narrower than it looks and is worth stating exactly. ADR-066 restored
+`mode=terraform` as the PRIMARY `target=all` path, and that path runs all 11 per-root `terraform
+destroy` jobs, each of which leaves its own state legitimately empty as a native side effect. The run
+that produced today's condition used `mode=az-sweep`, the state-gone FALLBACK, in which Phase 1 never
+executes. So the estate already has one path that ends with clean state and one that structurally
+cannot. **State-blindness is the defining property of the az-sweep fallback, not an oversight in it.**
+What is missing is the completion step that reconciles the fallback's outcome with the estate's state
+of record, plus a general guarantee that "teardown finished" implies "state is empty" regardless of
+which path ran or how many of its jobs went green.
+
+**The two failure modes, named, because a future reader will otherwise collapse them into one.**
+
+- **FM-1: STATE-MISSING-WHILE-RESOURCES-LIVE.** This is OQ-053. A state blob is absent or truncated
+  while its Azure resources are alive. Terraform reads greenfield, plans a full create against a live
+  estate, and the apply fails with `ImportAsExistsError` ("already exists - needs import"). That is the
+  BENIGN presentation. The malignant one is any object type whose API tolerates duplicate names:
+  `platform/identity` declares eight `azuread_conditional_access_policy` resources and an
+  `azuread_named_location`, and Entra accepts duplicate conditional-access display names, so a
+  create-from-empty-state against live policies yields silent DUPLICATE tenant-wide access controls
+  rather than a loud error. FM-1 also destroys recoverability: a resource that exists in Azure and in
+  no state file can only be reconciled by config-driven import (LESSON 46) or by raw-API deletion.
+  **Guard: nothing may ever delete a state blob, and `scripts/teardown-probe-state.sh` must keep
+  reporting an absent blob as a Class-A lost-state root.**
+- **FM-2: STATE-POPULATED-WHILE-RESOURCES-GONE.** This ADR. State describes resources that no longer
+  exist. The cheap symptom is a plan that spends minutes to tens of minutes refreshing phantom objects.
+  The expensive symptoms are two. First, refresh is only self-healing when the read returns 404: this
+  codebase has already documented (ADR-062) that a scoped service principal reading a DELETED management
+  group scope gets a 403 `AuthorizationFailed`, not a 404, and a 403 on refresh is a hard error, not
+  "the resource is gone" - so a plan can fail outright, or, where a broader grant lets some reads
+  succeed, produce something other than a clean full create while still looking like a normal plan.
+  Second, a PARTIAL state left by a failed apply invites exactly the partial-state reconciliation
+  ADR-067's addendum forbids. **Guard: reset the state to empty after a proven destroy.**
+
+FM-1 and FM-2 are exact mirror images, and the correct response to each is the forbidden response to
+the other. "Never delete state" and "state must be empty after teardown" are only compatible under two
+constraints, which this ADR makes structural rather than procedural: an ORDERING gate (the state is
+emptied strictly after the destroy is proven, so the FM-1 hazard is provably absent at the moment the
+emptying happens) and a REPRESENTATION choice (the state is emptied by overwrite with a labelled
+document, not by deletion, so the absent-blob signal stays reserved for FM-1 alone).
+
+**Decision:**
+
+**1. A verified `target=all` teardown ends with Phase 4 STATE RESET. Reset means OVERWRITE with a
+canonical empty state document. Deleting a state blob is FORBIDDEN, permanently, in any code path.**
+
+The invariant, stated so it can be cited: **INV-STATE.** *Teardown may only ever overwrite a Terraform
+state blob with the canonical empty document. No repository code path may delete a Terraform state
+blob. Blob ABSENCE remains reserved, permanently and exclusively, as the FM-1 out-of-band-loss alarm.*
+
+Reset-to-empty beats delete-the-blob on four counts, and the first is decisive:
+- **It does not spend the alarm.** `teardown-probe-state.sh` classifies an ABSENT blob as Class-A. If
+  teardown routinely deleted blobs, "absent" would become the normal post-teardown state and the FM-1
+  detector would be a detector of nothing. An alarm that fires on the intended state is not an alarm.
+  Deleting would collapse FM-1 and FM-2 into one indistinguishable signature, which is the single
+  outcome this ADR exists to prevent.
+- **It preserves lineage continuity.** A deleted blob re-created by the next `terraform init` gets a
+  FRESH lineage, so the state's version history stops chaining across teardown/rebuild cycles. Reset
+  preserves the existing `lineage`, so one blob's version list remains one auditable timeline.
+- **It carries provenance.** An overwrite can attach blob METADATA saying who emptied it, when, from
+  which run and which ref (decision 3). A deletion can say nothing at all. This is what turns "small
+  blob" from an ambiguous condition into a self-describing one.
+- **There is no compensating upside.** Both are equally reversible and equally effective. Verified
+  today against Microsoft Learn "Blob versioning": with versioning enabled (confirmed on this account by
+  OQ-053's 2026-07-21 inspection of its blob service properties, alongside 14-day blob and container
+  soft delete), an overwrite makes the previous content a previous VERSION that persists and can be
+  promoted back to current by copying that version onto the base blob; a delete likewise leaves previous
+  versions intact with no current version. Reset therefore needs no separate backup step, and every
+  reset is undoable for as long as versions are retained.
+
+**2. The gate. Phase 4 runs only at `target=all`, strictly after Phase 3 VERIFY has PASSED, and it is
+the one job in `teardown.yml` that is HARD-gated on success rather than on `!cancelled()`.**
+
+```
+state-reset:
+  name: "Phase 4 - STATE RESET (canonical empty state)"
+  needs: [guard, verify, synthetic, bank-data-p1, bank-app-p1, online-p1, corp-a2, corp-a1,
+          security, connectivity, identity, management, management-groups]
+  if: ${{ needs.guard.result == 'success' && needs.verify.result == 'success' && inputs.target == 'all' }}
+  runs-on: ubuntu-latest
+  environment: production-destroy
+```
+
+**Reviewer note, written here because it will look like a defect:** every other destructive job in
+`teardown.yml` uses `!cancelled()` so one root's failure cannot cascade-skip the others (the F1 fix).
+Phase 4 deliberately does NOT. Its entire safety argument is that the estate has been PROVEN empty
+first, and `!cancelled()` would let it run after a failed or skipped VERIFY, which is FM-1 manufactured
+on purpose. Do not normalise this job to the file convention.
+
+This satisfies the pre-registered FIX-6 ordering invariant on both of its limbs, without weakening
+either:
+- In `mode=terraform`, limb 1 (`terraform state list` empty from a Phase 1 success) is available
+  per root and is used per root (decision 4).
+- In `mode=az-sweep`, limb 2 (a completed az-sweep with confirm-GET 404 on every class at that root's
+  scopes) is exactly what Phase 3 VERIFY asserts, and asserts more broadly than the sweep deletes
+  (ADR-062: VERIFY is discovery-gated, strictly broader than the enumerated sweep classes).
+- The "strictly after Phase 3 VERIFY has passed for target=all" clause is the `if:` above, literally.
+
+A green whole-estate VERIFY is STRONGER evidence than a per-root empty `terraform state list`, because
+it is an assertion about Azure rather than about a state file. That is why it is the primary gate. It
+is not, however, a COMPLETE oracle for every root, which is what decision 4 is about.
+
+**3. The canonical empty state document, and the metadata label that makes it self-describing.**
+
+For each eligible key, read the existing blob first and write back:
+
+```json
+{"version":4,"terraform_version":"<preserved from the blob>","serial":<existing serial + 1>,
+ "lineage":"<preserved from the blob>","outputs":{},"resources":[],"check_results":null}
+```
+
+Verified: state format `version` 4 is the current format for Terraform 1.x, and `resources: []`,
+`outputs: {}`, `check_results: null` is the documented minimal empty form. `terraform_version` MUST NOT
+exceed the CLI version the pipeline pins (`1.15.6`, `hashicorp/setup-terraform@v3` in `_tf-root.yml`) -
+Terraform refuses to operate on a state stamped by a newer version. Preserving the value read from the
+blob satisfies that automatically, because this same pipeline wrote it. Fall back to `1.15.6` only when
+the blob is absent or carries no readable version. Incrementing `serial` keeps the sequence monotonic;
+`lineage` is preserved so the blob's version history stays one chain (decision 1).
+
+Attach blob metadata on the upload:
+
+```
+--metadata tf_state_reset=true \
+           tf_state_reset_run_id="$GITHUB_RUN_ID" \
+           tf_state_reset_utc="<ISO-8601 UTC>" \
+           tf_state_reset_mode="$TEARDOWN_MODE" \
+           tf_state_reset_ref="$GITHUB_SHA"
+```
+
+Metadata names must be valid C# identifiers (letters, digits, underscore, no leading digit); these are.
+Note the deliberate lifetime: the azurerm backend's own writes do not preserve custom metadata, so the
+label vanishes the first time the root is applied again. That is correct, not a defect - the marker's
+useful life is exactly the window between teardown and the next apply, which is exactly the window in
+which "is this blob empty on purpose?" is a live question.
+
+**4. Which roots. Eligibility is per root and derives from the evidence THIS run actually produced. Two
+carve-outs are permanent, and both exist because VERIFY's coverage is real but bounded.**
+
+Base set: the 11 workload/platform keys already enumerated in `teardown-probe-state.sh`. The bootstrap
+key is NEVER written, in either value of `include_bootstrap` (decision 5).
+
+- **`mode=terraform`:** reset root R only if R's own Phase 1 destroy job result is `success`. A
+  `failure` or `skipped` result excludes R and prints a loud `::warning::` naming it. This is redundant
+  belt over VERIFY, and cheap, and it is limb 1 of the pre-registered invariant honoured literally.
+  Note the resets here are near no-ops: a successful `terraform destroy` already leaves the state
+  empty. Phase 4 in this mode is a NORMALISER, making "post-teardown state is canonical empty" a
+  property of the teardown rather than a property of 11 destroys all having gone green.
+- **`mode=az-sweep`:** Phase 1 never ran, so every root's state is fully populated and eligibility comes
+  from VERIFY plus the two carve-outs. This is the load-bearing case.
+- **CARVE-OUT A (permanent): `platform/identity` is NEVER reset in `mode=az-sweep`.** That root declares
+  eight `azuread_conditional_access_policy` resources, an `azuread_named_location`,
+  `azurerm_pim_eligible_role_assignment` and `azurerm_role_management_policy` (verified in
+  `platform/identity/main.tf` and `pim.tf`). The az-sweep is ARM-only and deletes none of them, and
+  `teardown-verify.sh` contains no Entra, Graph or PIM check at all (verified: VERIFY 0 through 10 are
+  ARM-plane only). So a green VERIFY says NOTHING about whether those objects are still live, and
+  resetting identity's state on that evidence is FM-1 by construction - and lands on precisely the
+  duplicate-tolerant object type that fails silently rather than loudly. In `mode=terraform`, identity
+  IS eligible, because its own `terraform destroy` deletes the Entra objects through the azuread
+  provider and its job result is direct evidence.
+- **CARVE-OUT B (conditional): `platform/management-groups` is reset only when
+  `remove_mg_hierarchy == true`.** When that input is false the management-group tree survives, and with
+  it every MG-scoped policy and set definition that root owns. VERIFY 4 explicitly SKIPS its MG check in
+  that case, and says so. Resetting on a skipped check is resetting on no evidence.
+- Roots already at the empty floor are re-written idempotently. This is not wasted work: it normalises
+  serial, clears any residual `outputs`, and stamps the provenance metadata.
+
+The general rule these carve-outs instantiate, so future roots inherit it rather than needing a new
+ADR: **a root's state may be reset only if that root's ENTIRE resource footprint is covered by the
+evidence this run's mode actually produced.** Any new root that manages objects outside the ARM plane
+(Entra, Graph, a SaaS provider) is ineligible under `mode=az-sweep` until VERIFY can see them.
+
+**5. `include_bootstrap` does not interact with Phase 4, and must not be made to.**
+
+The bootstrap root uses LOCAL state (ADR-005) and has never written to the remote container, so
+`bootstrap/terraform.tfstate` is out of scope at both values of the flag. With
+`include_bootstrap=false` (the default) the state Storage Account survives and Phase 4 is exactly the
+step the estate needs. With `include_bootstrap=true` the account is being scorched by the manual
+runbook anyway, so Phase 4 having already run is harmless. One unconditional behaviour, no branch, no
+input coupling. `mode` is the only input Phase 4 reads besides `remove_mg_hierarchy` and `target`.
+
+**6. DISPOSITION FOR RIGHT NOW (2026-07-30, three stale blobs, rebuild mid-flight at Step 1): option
+(b), a scoped one-time reset, executed by the owner as a bounded and explicitly authorised exception to
+the CI-only rule. Do NOT re-run teardown. Do NOT proceed on stale state.**
+
+*(a) Implement the mechanism, re-run teardown, then rebuild - REJECTED on cost, not on principle.* It
+buys the rebuild nothing that (b) does not. Re-running teardown against an estate already verified
+greenfield is a 30-to-60-minute no-op sweep, and it cannot fix the state at all unless the Phase 4 job
+is merged first, which puts implementation plus code review plus merge on the critical path for an end
+state that is byte-identical to (b). That is most of a working day spent to arrive at the same three
+empty blobs. The mechanism is still REQUIRED; it is simply not required TODAY.
+
+*(c) Proceed on stale state - REJECTED on correctness, not on speed.* Two of the three blobs must be
+emptied whatever one thinks of the refresh cost. `platform/security`'s 78 KB is the partial state
+ADR-067's addendum ruled must be rebuilt rather than reconciled, so applying over it contradicts a
+standing ruling (decision 7). `platform/management-groups`' 8.9 MB is being refreshed against
+management-group scopes that no longer exist, and this codebase has already documented (ADR-062) that
+the scoped CI principal gets a 403 rather than a 404 on a deleted scope - a refresh that 403s is a hard
+error, and where a broader grant lets some reads succeed the resulting plan is not a clean full create
+while still looking like a normal plan. The problem with (c) is not that the plan is slow. It is that
+the plan is untrustworthy, on the root every other root depends on.
+
+*(b) One-time reset - ADOPTED.* Cost is minutes. It is safe for exactly one reason that will not
+generally hold, and that reason must be re-established every time anyone invokes this precedent: **the
+estate is independently verified greenfield right now** - teardown run `30576653339` GREEN with `VERIFY
+PASSED - zero estate remnants`, plus an independent qa-engineer confirmation including a direct GET on
+the Security Log Analytics workspace. FM-1, the hazard that makes hand-editing state dangerous, is
+provably absent at this moment. Without that evidence in hand the exception is void and the answer
+reverts to (a).
+
+Scope of the exception, exactly, and nothing beyond it:
+- Exactly three keys: `platform/management-groups/terraform.tfstate`,
+  `platform/management/terraform.tfstate`, `platform/security/terraform.tfstate`.
+- Overwrite with the decision-3 document, preserving each blob's existing `lineage` and
+  `terraform_version`, `serial` = existing + 1. Never delete.
+- Same metadata as decision 3, plus `tf_state_reset_manual=true` and
+  `tf_state_reset_authority=ADR-068`, so the probe and any later reader can tell a one-time operator
+  reset from a CI reset.
+- Do NOT touch `platform/identity`, `platform/connectivity`, the five spokes or `synthetic`. All are
+  already at 181 bytes; touching them widens the exception for no benefit, and identity is carve-out A.
+- CANCEL the in-flight Step 1 plan run FIRST. The azurerm backend holds a lease on the
+  management-groups blob while that run is open, and the overwrite will fail 412 `LeaseIdMissing`
+  against a leased blob. Cancel, confirm the lease is released, then write.
+- Record it in WORKLOG: the cancelled run ID, the three keys, before and after byte counts, and the
+  version IDs of the superseded versions (`az storage blob list --include v`), so the operation is
+  auditable and individually reversible.
+
+Who executes: the OWNER, from the workstation whose IPv4 already sits in the state SA `ip_rules`
+(`bootstrap/main.tf`), authenticated as a principal holding Storage Blob Data Contributor. This is the
+same route the operator used on 2026-07-29 to reset the security blob to 181 bytes, which is both the
+precedent that the need is real and the instance of manual drift that decisions 1-5 exist to retire. If
+that route is unavailable, the fallback is (a) - land Phase 4, dispatch teardown once more. It is the
+fallback, not the plan.
+
+**Evidence that would change this ruling, stated in advance:**
+1. If the in-flight Step 1 plan has ALREADY completed with exactly the expected shape - 537 add / 0
+   change / 0 destroy, matching the previously qa-PASSed Step 1 - that plan is trustworthy and should
+   be applied rather than discarded. The management-groups reset then becomes unnecessary; `management`
+   and `security` are still reset before Steps 2 and 3.
+2. If the plan log shows ANY `AuthorizationFailed` or 403 on a `Microsoft.Management/managementGroups/`
+   read, the deleted-scope-403 hypothesis is confirmed and the reset moves from preferred to mandatory.
+3. If a `terraform state list` on any of the three roots shows a resource class VERIFY does not cover -
+   an Entra object, a PIM assignment - STOP. That root is FM-1 territory and must be destroyed
+   properly, not reset.
+
+**7. `platform/security` CANNOT be applied from its 78 KB partial state. Reset it to empty before Step
+3.** Three independent reasons, any one sufficient:
+- ADR-067's addendum is a standing ruling from a user process change: any layer failure means a full
+  teardown-and-restart from Step 1, with no import-and-continue and no partial-state reconciliation.
+  Applying over the 78 KB IS partial-state reconciliation.
+- The state is 100% phantom. Every resource it describes was deleted by teardown run `30576653339`, and
+  qa confirmed the Security Log Analytics workspace gone by list AND by direct GET. There is nothing in
+  it worth preserving.
+- It is worse than merely useless. Its Sentinel child addresses point at a workspace resource ID that
+  no longer exists, and its subscription-scope entries (Defender pricing plans, `Microsoft.Security`
+  singletons) are refreshed at scopes whose grants have changed - the FM-2 403 hazard again, on a root
+  that has already cost three fix cycles.
+
+Confirmed on the current `banking` tree so Step 3 runs as a genuine first apply with every ADR-067 and
+OQ-063 fix in place: `platform/security/providers.tf` sets
+`log_analytics_workspace.permanently_delete_on_destroy = true`; `platform/security/sentinel.tf` carries
+`depends_on = [azurerm_sentinel_log_analytics_workspace_onboarding.this]` on both automation rules; and
+`_tf-root.yml` passes `-parallelism=1` for `inputs.root == 'platform/security'`.
+
+**Alternatives considered:**
+
+- **Delete the state blob and let `terraform init` re-create it** - rejected. It destroys the FM-1
+  alarm by making "absent" the intended post-teardown state, breaks lineage continuity, and can carry
+  no provenance. See decision 1 for the full four-count comparison. It has no advantage over overwrite.
+- **Reset unconditionally at teardown dispatch, before any destroy** - rejected outright. That IS FM-1,
+  deliberately manufactured, and it is the exact condition OQ-053 was raised about.
+- **Reset per root inside Phase 1, immediately after each `terraform destroy`** - rejected. It would
+  cover only `mode=terraform`, which is the mode that least needs it (destroy already empties state),
+  and would leave `mode=az-sweep`, the mode that entirely needs it, untouched. It would also empty
+  state before the whole-estate VERIFY had run, forfeiting the stronger evidence for the weaker.
+- **Extend Phase 3 VERIFY to also reset** - rejected. VERIFY is read-only by charter and that is why
+  its output can be trusted as the truth gate (ADR-054). A verifier that mutates cannot be its own
+  oracle. Phase 4 is a separate job precisely so VERIFY's green remains the input to the mutation, not
+  a claim about it.
+- **Make the reset an operator-run script rather than a CI job** - rejected. That is the standing
+  manual step this ADR exists to retire, and the 2026-07-29 security-blob reset is the evidence it does
+  not stay contained. Decision 6 authorises exactly one more instance, bounded and dated.
+- **Give the probe a "post-teardown" mode instead of labelling the blob** - rejected. It would require
+  the probe's caller to already know the answer to the question the probe is asked. Metadata puts the
+  answer on the artefact itself, where any reader finds it without context.
+
+**Consequences:**
+
+- Positive: a `target=all` teardown that goes green now delivers what the user asked for - a state
+  backend that behaves as if it had never been used - and delivers it identically in both modes. FM-2
+  cannot survive a green teardown.
+- Positive: the FM-1 detector is strengthened, not weakened. Absence stays Class-A forever; and a
+  deliberately emptied blob is now positively LABELLED rather than merely being coincidentally above a
+  size threshold.
+- Positive: the probe/reset contradiction the user anticipated does not materialise, and the reason is
+  worth recording. `TINY_BLOB_THRESHOLD_BYTES` is 100, chosen because "a genuinely empty-but-valid
+  Terraform state ... typically 150-250 bytes". The canonical empty document lands in that band (the
+  observed floor in this container is 181 bytes), so it reads as `OK present`, not Class-A. That is the
+  threshold's author having anticipated this exact state. Decision 8 below removes the coincidence.
+- Negative / trade-off: `mode=az-sweep` still cannot deliver a clean `platform/identity` slate, because
+  carve-out A holds its state populated while its Entra objects may be live. That is a smaller, honest
+  gap replacing a larger dishonest one, and it is tracked in OQ-065 limb A with a zero-code workaround.
+- Negative / trade-off: Phase 4 needs its own JIT state-SA firewall flip, so a teardown now opens that
+  account once more per run. Safe by construction (Phase 4 runs after every other state-touching job,
+  so exactly one flip is ever open - LESSON 31), but it is one more window.
+- Negative / trade-off: every reset writes a new blob version, so the state container accumulates
+  versions at one per root per teardown. Negligible at POC volume; worth a lifecycle-management rule if
+  the estate ever runs many teardowns.
+- Negative / trade-off: a failed Phase 4 now fails a teardown run whose estate destruction genuinely
+  succeeded. That is intended - a half-reset state backend is a condition an operator must see - but it
+  means "teardown red" no longer implies "resources remain". The job name and its error text must say
+  so explicitly.
+
+**Follow-ups required (DevSecOps lane; this is the whole implementation spec):**
+
+**8. Couple the reset and the probe in ONE place so they cannot drift.** This is the same discipline
+`is_owned_policy_object` already established for the exemption predicate, and it is the durable answer
+to the contradiction. Promote into `scripts/teardown-common.sh`, consumed by BOTH
+`teardown-probe-state.sh` and the new `teardown-state-reset.sh`:
+- `STATE_KEYS_WORKLOAD` (the 11 keys) and `BOOTSTRAP_STATE_KEY`, moved out of the probe.
+- `TINY_BLOB_THRESHOLD_BYTES`, moved out of the probe.
+- `state_backend_load()` - the `envs/poc.backend.hcl` parse for SA name, RG and container, currently
+  three inline `grep`/`sed` lines in the probe.
+- `canonical_empty_state_json <terraform_version> <serial> <lineage>` - the ONE writer of the document,
+  defined immediately next to the threshold that must accept its output, with a comment binding them.
+- Amend the FIX-6 note: the pre-registered invariant is now SATISFIED, name the job that satisfies each
+  limb, and record INV-STATE (no delete path may ever exist, so the invariant is honoured by there
+  being nothing to gate).
+
+**9. `scripts/teardown-state-reset.sh` (new).** Sources `teardown-common.sh` for `az_run`,
+`is_auth_error` and the decision-8 constants. Reads `TEARDOWN_MODE`, `REMOVE_MG_HIERARCHY` and a
+`PHASE1_RESULTS` JSON map passed as `${{ toJSON(needs) }}` (parsed with `jq`) to compute per-root
+eligibility per decision 4. Per eligible key:
+- `az storage blob show` for `properties.contentLength` and `properties.lease.status`. If the lease is
+  `locked`: bounded retry 3 x 20s, then FAIL LOUD with the exact `az storage blob lease break` command
+  in the error. Do NOT auto-break - by Phase 4 no legitimate holder exists, so a lease is itself the
+  anomaly and must be seen.
+- `az storage blob download` and `jq` out `lineage`, `serial`, `terraform_version`. Absent blob: INFO,
+  write with a fresh UUID lineage and the pinned `1.15.6`. Present but unparseable or missing lineage:
+  `::warning::` naming it as an FM-1-class anomaly found at reset time, then write with a fresh lineage.
+- `az storage blob upload --overwrite --auth-mode login --content-type application/json` plus the
+  decision-3 `--metadata`.
+- CONFIRM READ-BACK, mirroring this codebase's confirm-GET discipline (the delete side never trusts its
+  own success): re-`show` for `contentLength >= TINY_BLOB_THRESHOLD_BYTES`, re-download and assert
+  `jq -e '.resources | length == 0'`. Fail loud on either.
+- Print a summary table: key, action (`RESET` / `SKIPPED-carveout` / `SKIPPED-not-destroyed`), bytes
+  before, bytes after. Exit non-zero if any eligible key failed.
+- Follow the auth-fail-loud pattern throughout: an indeterminate `az` result is never read as a
+  benign outcome (ADR-062, section 9.4).
+
+**10. `.github/workflows/teardown.yml` (amend).** Add the decision-2 `state-reset` job with the
+`production-destroy` environment, OIDC login, the inline JIT firewall open / three-consecutive-probe
+wait / `if: always()` restore-to-Deny pattern copied from `teardown-probe.yml` (which already
+implements it standalone, with no Terraform root context to borrow from), then the script. Amend the
+file header's four-phase description to a five-phase one, and add Phase 4 to the guard job's NOTICE
+text for both modes.
+
+**11. `scripts/teardown-probe-state.sh` (amend).** Read `metadata` in the `blob show`. A blob carrying
+`tf_state_reset=true` reports as `OK (deliberately reset by teardown run <id> at <utc>) - canonical
+post-teardown empty state, NOT a lost-state root`, and is never Class-A regardless of size. An ABSENT
+blob stays Class-A unconditionally. Amend the header to name FM-1 and FM-2 and to state which one this
+probe detects, so the next reader cannot collapse them.
+
+**12. `docs/teardown-redesign.md` and `docs/cicd-deploy-teardown.md` (amend).** Add the Phase 4
+section and the FM-1/FM-2 distinction. Add to the teardown runbook the pre-dispatch step from OQ-065
+limb A: when dispatching `target=all mode=az-sweep`, first run a single-root
+`target=platform/identity mode=terraform action=destroy` so the Entra objects are deleted through the
+azuread provider and identity's state is emptied natively, since carve-out A means the az-sweep path
+cannot do it.
+
+**13. Not in scope here, tracked in OQ-065:** the deploy-side pre-plan state-provenance gate (limb B).
+Phase 4 guarantees state is empty when teardown ran and went green. It cannot help when teardown did
+not run, ran red, or ran from a ref without the mechanism. Today's incident was ultimately a deploy
+that planned against a state nobody had checked, and that check belongs on the deploy path, not the
+teardown path.
+
 ### ADR-067: The clean-empty-state platform/security apply (run 30499221661) fails on three interacting classes - a soft-delete-recovered Security LAW re-hydrates orphaned Sentinel rules ("already exists"), the two Sentinel automation rules lack the onboarding dependency (race "not onboarded"), and the pricing serialization never actually serialized the extended plan set (CloudPosture 409). Diagnosis stands; the recovery ruling was SUPERSEDED 2026-07-29 (see Addendum) - the user's process change makes recovery a FULL estate teardown-and-restart from Step 1 with the Security LAW purged, not import-and-continue.
 
 - **Date:** 2026-07-29
