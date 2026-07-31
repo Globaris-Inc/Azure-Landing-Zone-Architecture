@@ -108,4 +108,21 @@ module "acr" {
   }
 
   tags = local.common_tags
+
+  # ADR-070 decision 2 / LESSON 35: the registry create must not race the two DINE
+  # assignments it overlaps with.
+  #   - Deploy-Private-DNS-Zones member DINE-Private-DNS-Azure-ACR (groupId
+  #     registry) would write a single-zone "deployedByPolicy" group onto
+  #     pe-acr-*. Azure allows only ONE zone group per private endpoint, so that
+  #     group and the module-managed one are mutually exclusive. LIVE race.
+  #   - Deploy-Diag-LogsCat member containerregistry-registries would write a
+  #     second setting named "setByPolicy-LogAnalytics" beside diag-acr-*. That
+  #     is duplicate ingestion and cost, NOT a create blocker (different name,
+  #     five settings allowed per resource, and the azurerm pre-create GET is
+  #     scoped to the exact configured name), and it is dormant while the
+  #     assignment's logAnalytics parameter is the zero-GUID placeholder
+  #     (OQ-021).
+  # Both are exempted in policy_exemptions.tf; this edge waits for that to
+  # propagate.
+  depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }

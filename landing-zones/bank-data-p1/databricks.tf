@@ -126,5 +126,23 @@ module "databricks_workspace" {
 
   # Exemption propagation gate (LESSON 35 / ADR-028 unit): the workspace create
   # must not race the subscription-scoped Waiver in policy_exemptions.tf.
+  #
+  # ADR-070 NOTE - deliberately NOT gated on
+  # time_sleep.wait_dine_ownership_exemptions, and the reason is written down so
+  # the omission is not read as an oversight. There is nothing to exempt:
+  # Deploy-Diag-LogsCat's resourceTypeList has no microsoft.databricks/workspaces
+  # entry and the initiative carries no member for that type, so there is no
+  # reference id (live enumeration 2026-07-31, PC-2DINE). The only Databricks
+  # diagnostics policy above this root is "Resource logs in Azure Databricks
+  # Workspaces should be enabled" (138ff14d-b687-4faa-a81c-898c91a87fa2) inside
+  # Deploy-ASC-Monitoring and Deploy-MCSB2-Monitoring, whose allowedValues are
+  # AuditIfNotExists and Disabled only.
+  #
+  # diag-dbw-* was one of the three "already exists" failures on runs
+  # 30661012325 / 30662610292, and no DINE anywhere can have caused any of the
+  # three - the disproof in policy_exemptions.tf is about NAME SCOPING and holds
+  # for every resource type, not just this one. That leg is OQ-067 item B, its
+  # cause is NOT established, no exemption fixes it, and its recovery is the
+  # runbook B1 delete-then-retry before the next dispatch.
   depends_on = [time_sleep.wait_dbx_storage_exemption]
 }

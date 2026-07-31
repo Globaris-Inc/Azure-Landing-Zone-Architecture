@@ -120,6 +120,36 @@ module "foundry" {
   }
 
   tags = local.common_tags
+
+  # ADR-070 decision 2 / LESSON 35: the account create must not race the two DINE
+  # assignments this module overlaps with.
+  #   - Deploy-Private-DNS-Zones member DINE-Private-DNS-Azure-CognitiveServices
+  #     would write a single-zone "deployedByPolicy" group onto pe-aif-*. Azure
+  #     supports only ONE zone group per private endpoint, so that group and the
+  #     three-zone group below are mutually exclusive, not duplicative. This is a
+  #     LIVE race and it is why this edge exists.
+  #   - Deploy-Diag-LogsCat member cognitiveservices-accounts would write a
+  #     second setting named "setByPolicy-LogAnalytics" alongside diag-aif-*.
+  #     That is a duplicate-ingestion COST and governance concern, not a create
+  #     blocker: it is a different name, Azure allows five settings per resource,
+  #     and the azurerm pre-create GET is scoped to the exact configured name.
+  #     Dormant today anyway - the assignment's logAnalytics parameter is still
+  #     the zero-GUID placeholder (OQ-021), so it cannot write at all.
+  # Both are exempted in policy_exemptions.tf; this edge waits for that exemption
+  # to propagate.
+  #
+  # WHAT THIS DOES NOT FIX, and the caveat an operator needs before the next
+  # dispatch. diag-aif-* was one of the three "already exists" failures on runs
+  # 30661012325 and 30662610292, and NO DINE can have caused it - see the
+  # three-way disproof in policy_exemptions.tf. That failure is OQ-067 item B and
+  # its cause is NOT established (an ARM write that persisted server-side while
+  # the acknowledgement was lost is the working hypothesis, not a finding; note
+  # also the ARM InternalServerError storm and the active Databricks service
+  # incident on this subscription the same evening). This exemption unit does not
+  # remove it. Recovery is the runbook B1 action: delete the specific survivor,
+  # then rerun. Landing this file and dispatching without deleting diag-aif-*,
+  # diag-srch-* and diag-dbw-* first will fail identically a third time.
+  depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }
 
 # ---------------------------------------------------------------------------
@@ -174,6 +204,18 @@ resource "azapi_resource" "foundry_pe_dns_zone_group" {
       ]
     }
   }
+
+  # ADR-070 decision 2 / LESSON 35. This is the single most exposed object in the
+  # root: the module creates pe-aif-* WITHOUT a zone group (see
+  # private_endpoints_manage_dns_zone_group = false above), so between that PUT
+  # and this one the private endpoint sits in exactly the state
+  # DINE-Private-DNS-Azure-CognitiveServices fires on - it carries no
+  # existenceCondition, so "no zone group yet" is a non-compliance it remediates
+  # with a single-zone "deployedByPolicy" group. Only one zone group is allowed
+  # per private endpoint, so losing that race breaks Foundry DNS resolution AND
+  # collides this PUT. The parent_id already orders this after module.foundry;
+  # this edge additionally orders it after the exemption has propagated.
+  depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }
 
 # ---------------------------------------------------------------------------
@@ -251,4 +293,21 @@ module "search" {
   }
 
   tags = local.common_tags
+
+  # ADR-070 decision 2 / LESSON 35: same two-writer overlap as the Foundry
+  # account, and the same split between the two halves.
+  # Deploy-Private-DNS-Zones member DINE-Private-DNS-Azure-CognitiveSearch
+  # (groupId searchService) is the LIVE half - it competes for the single zone
+  # group Azure allows on pe-srch-*, which the module manages here.
+  # Deploy-Diag-LogsCat member search-searchservices is the dormant half: it
+  # would write a differently-named "setByPolicy-LogAnalytics" setting beside
+  # diag-srch-*, which is duplicate ingestion and cost, not a create blocker, and
+  # it cannot write at all while OQ-021 stands. Both exempted in
+  # policy_exemptions.tf.
+  #
+  # SAME CAVEAT AS THE FOUNDRY ACCOUNT ABOVE: diag-srch-* was one of the three
+  # "already exists" failures and no DINE can have caused it. That is OQ-067
+  # item B, this unit does not fix it, and the recovery is the runbook B1 delete
+  # of the survivor before the next dispatch.
+  depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }

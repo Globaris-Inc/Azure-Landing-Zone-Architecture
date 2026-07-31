@@ -122,4 +122,19 @@ module "datalake" {
   }
 
   tags = local.common_tags
+
+  # ADR-070 decision 2 / LESSON 35 - the ZONE-GROUP half only. The two PEs above
+  # are the objects the Deploy-Private-DNS-Zones members
+  # DINE-Private-DNS-Azure-Storage-Blob (groupId blob) and
+  # DINE-Private-DNS-Azure-Storage-DFS (groupId dfs) fire on; both were seen in
+  # the Activity Log ATTEMPTING remediation in this RG during the failed applies.
+  # None of those PolicyDeployments ever succeeded (they retried against ARM 500s
+  # for two hours and were cancelled), so no deployedByPolicy group exists today
+  # - the exemption prevents the race rather than cleaning one up. Both members
+  # are exempted in policy_exemptions.tf and this edge waits for that to
+  # propagate. The diagnostics half does NOT apply to this module: storage
+  # accounts are absent from the Deploy-Diag-LogsCat resourceTypeList, and the
+  # setting above is an azapi resource that PUTs idempotently with no
+  # RequiresImport pre-check.
+  depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }
