@@ -31,6 +31,133 @@
 
 <!-- Newest at the top. -->
 
+### OQ-066: The centralus-primary flip (ADR-069) rests on capacity that is EVIDENCED for a subset and ASSUMED for the rest - plus a teardown that failed and left the estate non-greenfield
+
+- **Raised:** 2026-07-30 (architect, while ruling ADR-069 on the region flip)
+- **Section:** 3 (Multi-Region DR Topology) / 10 (Pipeline & Tooling, dispatch). Relates to ADR-069
+  (this ADR's verification debt), ADR-031 / ADR-032 (the two gates items 6-7 ask about), ADR-057 /
+  ADR-063 / ADR-066 / ADR-068 (item 0, the failed teardown), OQ-043 (the eastus2 vCPU quota
+  increase that does not carry over), OQ-063 (the Security LAW purge), OQ-025 / OQ-026 (the standing
+  re-enable questions for SQL and App Service).
+- **Blocking:** **Item 0 is BLOCKING for dispatch** and is not caused by the flip. Items 1-4 are
+  blocking for Step 1; item 5 is blocking for Steps 5-9. Items 6-8 are non-blocking register items.
+- **Priority:** High (items 0-3), Medium (4-5), Low (6-8).
+
+**Question:**
+
+ADR-069 flips the primary region to centralus. The ruling is correct on the evidence; what follows
+is the evidence it does NOT have, stated so it has an owner rather than being buried in a design
+document. I am read-only on live Azure and assert none of the ASSUMED set below.
+
+**Item 0 (BLOCKING, not caused by the flip). Teardown run `30597640251` FAILED and the estate is
+not greenfield.** Found 2026-07-30 while writing ADR-069, prompted by the operator asking why
+`platform/security` was skipped. Phase 2 AZ SWEEP failed at step 4-pre on an ARM 500 listing MG-scope
+budgets (ADR-063 G-1 fail-loud, working as designed, transient server error); Phase 3 VERIFY failed;
+**Phase 4 STATE RESET was skipped** because it is gated hard on VERIFY success. Consequences:
+
+- All eleven Phase 1 `terraform destroy` jobs were skipped. Not a security-specific skip: `mode=az-sweep`
+  gates every one of them off (`teardown.yml:408` and its ten siblings). ADR-066 made `mode=terraform`
+  the primary `target=all` path; this run used the fallback.
+- az-sweep steps 6, 7 and **7b never ran**. Step 7b is the **Security Log Analytics workspace purge
+  backstop (OQ-063)**, and the primary purge (`platform/security/providers.tf
+  permanently_delete_on_destroy = true`) only fires on that root's own terraform destroy. **Neither
+  ran**, so the Security LAW is soft-deleted rather than purged - the exact ADR-067 Class 2 condition
+  that blocked the 2026-07-29 rebuild.
+- Step 6 never ran, so the ADR-057 subscription-scope survivor class (budgets, cost exports, cost
+  anomaly action, subscription diagnostic settings, Defender pricing, RP registration) is intact and
+  will collide with Step 2.
+- The MG hierarchy is still live (step 4 died in its own pre-gate).
+- Four `kv-sec-globaris-*` Key Vaults are soft-deleted and could not be purged:
+  `Operation 'DeletedVaultPurge' is not allowed` (`MethodNotAllowed`) on each, while the script had
+  classified them "not purge-protected". Either the classification is wrong or the CI SP lacks
+  `Microsoft.KeyVault/locations/deletedVaults/purge/action`. **This is a distinct sub-question worth
+  root-causing rather than retrying.**
+- Every Terraform state blob is still populated, including `platform/connectivity`'s 543 resources
+  from the cancelled Step 4 apply.
+
+That last point is why item 0 blocks the flip specifically: the AVM hub module derives
+`fw-hub-${location}-001` from its location input, so applying the flip against live state
+force-replaces both Premium firewalls, both policies and every hub route table. LESSON 26 and
+runbook Rule 1 make that an unconditional STOP.
+
+**Options for item 0:**
+- **0A (recommended default): re-run teardown at `mode=terraform`.** ADR-066 already designates it
+  the primary `target=all` path, all eleven Phase 1 destroys run serialized, and the security root's
+  NATIVE LAW purge fires as the primary mechanism instead of depending on a backstop that a
+  step-4-pre failure skips. Slower, but it is the path that produces green-per-layer evidence and it
+  closes the OQ-063 exposure at its source.
+- 0B: re-run `mode=az-sweep`. The 500 was transient and ADR-063 treats a failed list as fatal
+  precisely so it can be retried. Faster, but keeps the LAW purge on the backstop and produces no
+  per-layer evidence.
+- 0C: hand-clean the survivors. **Rejected** - violates the CI-only teardown bar the user has ruled
+  on twice.
+
+Gate before any Step 1 dispatch, in order: teardown green -> Phase 3 VERIFY green -> Phase 4 STATE
+RESET **executed, not skipped** -> independent qa-engineer greenfield confirmation (ADR-058) ->
+PC-1SEC re-verified (zero live AND zero soft-deleted `law-security-*`) -> the four Key Vaults
+dispositioned -> the six submitted RG deletes confirmed complete (step 7 never ran, so nothing waited
+on them).
+
+**Items 1-5: the live checks that close the ASSUMED set.** Full commands and pass bars are in
+`docs/region-flip-centralus-primary.md` section 7 as RC-1 through RC-7. Summarised:
+
+1. **Compute vCPU quota in centralus, landingzones subscription (HIGHEST RISK).** AKS needs 6 vCPUs
+   steady (3 x `Standard_D2s_v4`) and 8 on surge. The limit was **10 in eastus2** and the 2026-07-18
+   quota increase (OQ-043) was **filed for eastus2**. Quota is per region per subscription, so it
+   does not carry over. `az vm list-usage --location centralus`. If short: file a centralus increase
+   and set `enable_kubernetes_platform = false` for this rebuild - the spoke still ships network-only
+   (LESSON 42), which is exactly what that pattern exists for.
+2. **Entra Domain Services region support for centralus.**
+   `az provider show --namespace Microsoft.AAD --query "resourceTypes[?resourceType=='domainServices'].locations"`.
+   If centralus is absent this is not an implementation detail: `identity_location` would have to
+   stay eastus2 and ADR-069 needs an explicit carve-out putting the identity pillar in the DR
+   region, which is a real architectural change. AADDS cannot be moved after creation and its create
+   is the 1-3h long pole.
+3. **`gpt-5.4-nano` 2026-03-17 at `DataZoneStandard` in the centralus catalog.**
+   `az cognitiveservices model list --location centralus` (confirmed GA in the CLI reference, page
+   updated 2026-07-07). Model catalogs are per-region and the eastus2 catalog was already showing
+   deprecations when ADR-051 was written (LESSON 40/41 class). ADR-051's recorded fallback is
+   `GlobalStandard`, or the newest current-GA nano-class model in the **centralus** catalog. That is
+   an architect disposition, not an implementer choice.
+4. **`Standard_D2s_v4` zone restrictions in centralus.** AKS pins zones `["1","2","3"]`.
+   `az vm list-skus --location centralus --size Standard_D2s`.
+5. **`NetworkWatcher_centralus` AND `NetworkWatcher_eastus2` both present in `NetworkWatcherRG`,
+   landingzones subscription.** The `data.azurerm_network_watcher` data source resolves at PLAN time,
+   before any VNet exists to trigger auto-creation (LESSON 43), and this has already blocked this
+   estate once: `docs/preclearance/landing-zones.md:117` records `_eastus2` MISSING as a hard
+   BLOCKER for corp-a1 and online-p1. After the flip four spokes need `_centralus` and corp-a2 needs
+   `_eastus2`. Both were live at the 2026-07-22 gate and `NetworkWatcherRG` is explicitly protected
+   from teardown, so this should pass. Verify anyway.
+
+**Item 6 (register, non-blocking). Does the flip lift ADR-031 (SQL)?** ADR-069 decision 7 rules it
+does not: ADR-031 predicted `ProvisioningDisabled` in centralus before testing it, and corp-a2 has
+shipped `enable_sql = false` there since 2026-07-10. **Recommended default: leave `enable_sql = false`
+for this rebuild.** If the operator wants it re-tested, the only reliable probe is an actual
+`az sql server create` in a scratch RG in centralus on the landingzones subscription followed by a
+delete - a logical server with no database is free. That is a write and therefore an operator action,
+not an architect one. Supersedes nothing in OQ-025, which stays the standing re-enable tracker.
+
+**Item 7 (register, non-blocking). Does the flip lift ADR-032 (App Service)?** ADR-069 decision 7
+rules it does not, on stronger grounds than item 6: ADR-032 itself proved with two portal quota
+exports that eastus2 compute quota was healthy and that the failure was therefore an **offer cap** on
+the subscription, not a regional limit (LESSON 42's whole point). Offer caps attach to the
+subscription offer type. **Recommended default: leave `enable_app_service = false`.** Check if
+desired via Portal -> Subscriptions -> Usage + quotas -> provider "App Service" -> region Central US,
+looking at the "Total VMs" limit; a 0 there confirms the cap holds. Supersedes nothing in OQ-026.
+
+**Item 8 (register, non-blocking). The AI Search escape hatch now has nowhere obvious to go.**
+`search_location` was added because eastus2 AI Search returned `InsufficientResourcesAvailable`; its
+fallback target was centralus, which after the flip IS the primary. Nothing in the record establishes
+that eastus2 AI Search capacity has recovered, so if centralus Search capacity is ever exhausted the
+variable points at a region with a known negative history. Not a problem today - centralus is the
+region with the only positive Search evidence - but the mechanism is now single-valued in practice.
+**Recommended default: no action; revisit only if a Search create fails.** If it does, the disposition
+is a third region rather than a return to eastus2.
+
+**RESOLVED:** _(pending)_
+
+---
+
 ### OQ-065: Two state-provenance gaps ADR-068 deliberately leaves open - the az-sweep path cannot clean `platform/identity`'s Entra objects (limb A), and the DEPLOY path still has no pre-plan state check at all (limb B)
 
 - **Raised:** 2026-07-30 (architect, while ruling ADR-068 on the stale-state-after-teardown gap)
@@ -2600,6 +2727,24 @@ requires no DNS verification for the managed-domain name.
 
 **Question:**
 PROMPT.md suggests `eastus2` (primary) + `centralus` or `westus3` (DR). Confirm or override. Note: `westus3` does not yet have all the same services as `eastus2` — verify availability of Azure Firewall Premium, DNS Private Resolver, and Sentinel before locking in.
+
+**RESOLVED 2026-07-30 (user ruling, recorded as ADR-069):** **`centralus` primary, `eastus2`
+secondary/DR.** The pair itself is confirmed (not `westus3`); the roles are the reverse of what
+`PROMPT.md:66` suggested.
+
+**This question sat unanswered for the entire build and that is the finding, not a footnote.** It was
+raised at bootstrap and, uniquely among OQ-001 through OQ-008, never received a `RESOLVED:` line.
+There is no ADR anywhere in `DECISIONS.md` making the region choice. So `PROMPT.md`'s suggestion
+became the configuration by default, and because no decision record existed there was nothing for
+subsequent evidence to be weighed against. Four separate eastus2 capacity constraints were then found
+and each was handled as a local point fix - AI Search relocated to centralus (ADR-051 correction,
+deviation d7), Fabric relocated to centralus (ADR-048, deviation d6), a vCPU quota increase filed
+(OQ-043), SQL and App Service gated off (ADR-031, ADR-032). Two of the four were resolved **by moving
+work to centralus** and nobody asked the obvious question. The generalisable lesson: **a default that
+is never converted into a decision cannot accumulate evidence against itself.**
+
+Full change surface, interaction rulings and dispatch gate: ADR-069 and
+`docs/region-flip-centralus-primary.md`. Residual verification debt: **OQ-066**.
 
 ---
 

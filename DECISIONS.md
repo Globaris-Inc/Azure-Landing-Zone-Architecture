@@ -49,6 +49,239 @@
 
 <!-- Newest at the top. -->
 
+### ADR-069: `centralus` becomes the PRIMARY region and `eastus2` the secondary/DR. The region pair was never actually decided - OQ-004 was raised at bootstrap and never answered, so `PROMPT.md`'s suggestion became the config by default and four separate capacity workarounds accumulated around a primary region that could not serve the estate. Resolves OQ-004.
+
+- **Date:** 2026-07-30
+- **Section:** 3 (Multi-Region DR Topology), with surface in every root. **Resolves OQ-004** (region
+  pair selection, raised at bootstrap, never answered). Does NOT supersede ADR-009 (firewall policy
+  hierarchy - that ruling is about AVM module capability, not geography). Does NOT lift ADR-031 (SQL
+  gate) or ADR-032 (App Service gate) - see decision 5. RETIRES the region half of the ADR-051
+  post-apply correction (AI Search `search_location`) and of the ADR-048 Fabric `fabric_location`
+  deviation, by making both equal to the primary region. Constrained by ADR-060 (sequential
+  single-target rebuild with a per-root plan-scan gate), ADR-066 and ADR-068 (teardown must reach
+  green VERIFY and Phase 4 state reset before this can be dispatched - decision 6). Applies LESSON 26
+  (ForceNew replace on a live resource is a STOP), LESSON 42 (offer caps are a separate axis from
+  quota) and LESSON 43 (regional co-location constraints resolve only at apply).
+- **Status:** Accepted (user ruling on the region; architect ruling on the change surface,
+  the interactions, and the dispatch gate). Implementation handed to cloud-engineer, then
+  devsecops-engineer, then Code Review.
+- **Landed:** NOT IMPLEMENTED. This ADR is a written spec; no `.tf`, `.yml` or `.tfvars` has been
+  edited. The implementation surface is `docs/region-flip-centralus-primary.md` section 9. Update
+  this field by dated addendum when the cloud-engineer PR merges.
+- **Decision makers:** user (ruled the region flip and identified that the accumulation of
+  workarounds was itself the finding); claude (architect - change-surface classification, the
+  load-bearing-versus-cosmetic test, the interaction rulings, the evidence ledger, the dispatch gate).
+
+**Context:**
+
+`envs/poc.tfvars` has read `primary_location = "eastus2"` / `secondary_location = "centralus"` since
+the scaffold. Four independent capacity constraints have been found in eastus2 on this tenant, and
+every one was handled as a point fix rather than as evidence about the region choice:
+
+| Constraint | Response at the time |
+|---|---|
+| AI Search `InsufficientResourcesAvailable` in eastus2 (live capacity shortage, apply `29678062833`, 2026-07-19) | added a `search_location` variable and deployed Search in **centralus**, leaving the private endpoint in the eastus2 spoke as a documented cross-region PE (ADR-051 correction, deviation register d7) |
+| Microsoft Fabric CU quota 0 in eastus2 (portal-verified 2026-07-19) | added a `fabric_location` variable and deployed the F2 capacity in **centralus** (ADR-048, deviation d6) |
+| Total Regional vCPUs limit of 10 in the landingzones subscription, eastus2 | filed a quota increase 2026-07-18 (OQ-043); AKS pinned to 3 x `Standard_D2s_v4` to fit 6 of 10 |
+| Azure SQL `ProvisioningDisabled` and dedicated App Service compute quota 0 | gated both tiers off (ADR-031, ADR-032) |
+
+Two of those four were resolved **by moving the workload to centralus**. Nobody then asked the
+obvious question.
+
+**Why nobody caught it, established from the record rather than assumed.** There is no ADR making
+the region choice. `DECISIONS.md` contains no region-pair decision at all. `PROMPT.md:66` states
+"**Primary region:** `eastus2` - **Secondary/DR region:** `centralus` (or `westus3`)" as a
+suggestion, and `OQ-004: Region pair selection for DR` was raised at bootstrap asking the user to
+"Confirm or override" - and, uniquely among the resolved bootstrap questions OQ-001 through OQ-008,
+**it carries no `RESOLVED:` line**. The suggestion became the configuration by default, and because
+no decision record existed, there was nothing for the four subsequent capacity findings to be
+weighed against. Each one was locally correct and the aggregate was never assessed. **That is the
+generalisable failure: a default that is never converted into a decision cannot accumulate evidence
+against itself.**
+
+**Decision:**
+
+**1. `primary_location = "centralus"`, `secondary_location = "eastus2"`.** The full implementation
+surface, with per-line dispositions, is `docs/region-flip-centralus-primary.md`. OQ-004 is resolved
+by this ADR.
+
+**2. The change is a 3-value functional change plus a 12-file text pass, not a 2-line change and not
+a 12-file change.** There are exactly 16 region literals across 12 files. The test that separates
+them: `_tf-root.yml` passes `-var-file=envs/poc.tfvars` to every deploy root (lines 351/366/397), and
+`plan-on-pr.yml` does the same (line 146), so **a root default is load-bearing if and only if
+`envs/poc.tfvars` does not declare a variable of that exact name.** Twelve of the sixteen are
+therefore cosmetic. Four are load-bearing:
+
+- `platform/identity/variables.tf:223` `identity_location` - **MUST change to centralus.** This is
+  the one that breaks the estate silently: left at eastus2 the plan is clean, the apply is green, and
+  the identity pillar including the Entra DS managed domain lands in the DR region peered
+  cross-region to a centralus hub. AADDS cannot be moved after creation (Microsoft Entra Domain
+  Services FAQ, fetched 2026-07-30), and its create is the 1-3 hour long pole of the estate.
+- `landing-zones/bank-data-p1/variables.tf:168` `search_location` and `:146` `fabric_location` -
+  value already `centralus`, which is correct after the flip; descriptions must be rewritten
+  (decision 4).
+- `bootstrap/variables.tf:44` `primary_location` - **must NOT change** (decision 3).
+
+The twelve cosmetic defaults are still aligned, as zero-plan-delta text: a default that disagrees
+with the tfvars means a local `terraform plan` without `-var-file` silently targets the wrong region,
+which is the same class of defect as `identity_location`.
+
+**3. `envs/poc.tfvars` becomes the SINGLE declaration point for every region-valued input.** It gains
+explicit `identity_location`, `fabric_location` and `search_location` entries alongside the two
+flipped lines. This is the governance half of the ruling and it is not optional: the reason this ADR
+exists is that a load-bearing region input lived where nobody looked while the file people do read
+appeared to declare the whole region surface and did not. No new risk - `envs/poc.tfvars` already
+carries many variables most roots do not declare, and Terraform warns rather than errors on an
+undeclared variable in a `-var-file`.
+
+**4. The bootstrap state backend STAYS in eastus2. The `eus2` name token becomes cosmetically stale
+and that is accepted, with a written reason.** `rg-tfstate-mgmt-eus2-001` and
+`id-tfstate-mgmt-eus2-001` are literal names; `envs/poc.backend.hcl:24` hardcodes the RG. Reasons, in
+order of force: (a) `azurerm_key_vault.tfstate` is `purge_protection_enabled = true` with 90-day
+soft-delete retention, so a purge-protected vault **cannot be purged** and the name
+`kv-globaris-tfstate-01` would be blocked for 90 days after a delete - a LESSON 57 class failure that
+no retry recovers; (b) state is a management-plane dependency with no data-plane coupling, no
+latency requirement, no policy scope and no role in the DR story, reached from a GitHub-hosted runner
+over the public internet through the ADR-025 JIT firewall flip; (c) **anti-correlation is the better
+posture, not merely a tolerable one** - keeping the state backend out of the primary workload region
+means a centralus regional event still leaves state readable, so the estate can be planned and
+applied during the incident; (d) the move means destroying the state SA, the CMK vault and the UAMI,
+rewriting the backend config, and `-migrate-state` across eleven roots, on the one layer deliberately
+excluded from teardown. A note goes in `bootstrap/main.tf` and `envs/poc.backend.hcl` recording that
+the name is historical and the placement deliberate. A stale name with a written reason is
+documentation; without one it is rot.
+
+**5. The AI Search and Fabric carve-outs become REDUNDANT, not inverted. Keep the mechanism, keep
+the value, rewrite the description.** After the flip `search_location` and `fabric_location` both
+equal `primary_location`, so the AI Search private endpoint stops being cross-region (the PE NIC and
+the service are both in centralus) and deviations d6/d7 are retired by construction. Specifically:
+**keep both variables** (they are the proven capacity escape hatch, and deleting a mechanism the
+moment its trigger stops firing is how a lesson gets un-learned); **keep the PE's
+`location = var.primary_location` override**, which is now numerically a no-op but is the line that
+pins the NIC to the subnet region and whose removal re-arms the exact module-default collision that
+failed apply `29678062833`; **rewrite both descriptions**, which currently assert a cross-region PE
+that will not exist and cite eastus2 as capacity-short for services that will no longer be deployed
+there. A false description on a load-bearing variable is worse than none.
+
+**6. BLOCKING GATE: the flip is authored and merged now, and is NOT dispatched until a teardown has
+genuinely completed.** Teardown run `30597640251` **FAILED** (found 2026-07-30 while writing this
+ADR, prompted by the operator asking why `platform/security` was skipped). Phase 2 AZ SWEEP failed
+at step 4-pre on an ARM 500 listing MG-scope budgets, Phase 3 VERIFY failed, and **Phase 4 STATE
+RESET was skipped**, so every state blob is still populated - including `platform/connectivity`'s
+543 resources from the cancelled Step 4 apply. The eleven Phase 1 `terraform destroy` jobs were
+skipped because `mode=az-sweep` gates them off (`teardown.yml:408` and its ten siblings); security
+was not singled out. Because az-sweep died at step 4-pre, steps 6, 7 and **7b never ran**, and 7b is
+the Security LAW purge backstop - while the primary purge
+(`platform/security/providers.tf permanently_delete_on_destroy = true`) only fires on that root's own
+terraform destroy. **Neither purge ran, so the estate now sits in exactly the ADR-067 Class 2 /
+OQ-063 condition that blocked the 2026-07-29 rebuild.** The MG hierarchy is still live and the
+subscription-scope survivor class (ADR-057) was never swept.
+
+This matters to the flip specifically because the flip's safety rests on the estate being greenfield:
+the AVM hub module derives `fw-hub-${location}-001` from its location input, so on a LIVE estate the
+flip force-replaces both firewalls, both policies and every hub route table - the unconditional STOP
+of LESSON 26 and Rule 1. Gate G-1 through G-6 are specified in
+`docs/region-flip-centralus-primary.md` section 8.0; the short form is: re-run teardown to green
+(preferring `mode=terraform` per ADR-066 so the native LAW purge fires), Phase 4 must EXECUTE not
+skip, independent qa greenfield confirmation, PC-1SEC re-verified, the four unpurgeable
+`kv-sec-globaris-*` vaults dispositioned, and the six submitted RG deletes confirmed complete. None
+of this is caused by the flip; it is pre-existing teardown debt the flip must not be dispatched on
+top of.
+
+**7. ADR-031 and ADR-032 are NOT lifted. Both gates stay `false`.** Their justification survives the
+flip, and the reasoning is the axis distinction LESSON 42 codifies. ADR-032 established with two
+portal quota exports that eastus2 IaaS/compute quota was **healthy** and that the App Service failure
+was therefore "an **offer cap** on dedicated App Service (Basic and above)" attaching to the
+subscription's offer type, generalising to "the `landingzones` subscription is compute-restricted for
+dedicated / reserved resources". ADR-031 predicted SQL `ProvisioningDisabled` in centralus before
+testing it, and corp-a2 has shipped `enable_sql = false` in centralus on that basis since
+2026-07-10. **Changing the region does not change the subscription.** Any re-enable is a separate
+decision requiring a live probe, registered as OQ-066 items 6 and 7 with a recommended default of
+"leave both false for this rebuild".
+
+**8. ADR-009 is unaffected and is not superseded.** Its ruling (independent Firewall Policy per hub,
+no shared parent) turns on the AVM hub module not exposing `base_policy_id` - module capability, not
+geography. The three rule collection groups still attach to the PRIMARY policy only, and the spoke
+UDRs still point at `10.0.0.4`, which is pinned by `hub_primary_address_space = 10.0.0.0/16`
+regardless of which region "primary" names, so the ADR-042 firewall-IP contract and PC-3X are
+unchanged. Only the word `eastus2` in the three justification comments becomes `centralus`.
+
+**9. The 14-step order does not change; the four plan bars are expected to hold BY CONSTRUCTION but
+are NO LONGER VERIFIED and must be re-measured.** No resource in the estate is conditional on region,
+and the five region-templated private DNS zones are RENAMED rather than added or removed (the AVM
+module substitutes `{regionName}`/`{regionCode}`; centralus geo code `cus`), so the 89-zone PC-4C
+count and the 537 / 36 / 48 / 696 counts should be identical. But 696 is worded in the runbook as
+"EXACTLY 696... not an estimate, it is today's verified dry-plan", and that precedent was measured
+under eastus2-primary. **Rule: plan every root before its apply (already mandatory under ADR-060);
+an identical count is recorded as re-verified under centralus-primary; a count differing by even one
+is a STOP requiring an architect disposition, never a silent bar update** - a delta means something
+region-conditional exists that this analysis did not find, which is the exact information the bar
+exists to surface.
+
+**10. What must be verified live before dispatch, because it is ASSUMED rather than evidenced.** The
+evidence base is asymmetric: almost everything on record shows eastus2 is SHORT, not that centralus
+is LONG. Centralus is EVIDENCED by this estate's own green applies for VNet/NSG/route
+tables/peering, Azure Firewall Premium and policy, GeoRedundant RSV, storage, `NetworkWatcher_centralus`,
+Fabric F2 and AI Search basic; and by vendor documentation (fetched 2026-07-30) for availability
+zones, pairing with East US 2 (symmetric, so geo-redundancy survives the flip), non-restricted
+status, and Static Web Apps support. It is **ASSUMED** for: compute vCPU quota (the 2026-07-18
+increase was filed for eastus2 and quota is per-region - **highest risk of the flip**, AKS needs 6
+vCPUs steady and 8 on surge against a limit that was 10 in eastus2), Entra Domain Services
+availability, the `gpt-5.4-nano` DataZoneStandard model catalog, `Standard_D2s_v4` zone
+restrictions, APIM stv2, Databricks, Service Bus Premium, Event Hubs, App Gateway WAF_v2 and Log
+Analytics. Checks RC-1 through RC-7 in `docs/region-flip-centralus-primary.md` section 7 are the
+disposition; RC-1 to RC-4 block Step 1, RC-5 (`NetworkWatcher_centralus` and `_eastus2` both present
+in `NetworkWatcherRG`, landingzones sub) blocks Steps 5 to 9 and has already blocked this estate once.
+**I am read-only on live Azure and assert none of the ASSUMED set.**
+
+**Alternatives considered:**
+
+- **Keep eastus2 primary and continue per-service carve-outs** - rejected. This is the status quo and
+  it is the thing being corrected. Two of four constraints were already resolved by moving workloads
+  to centralus; a third (vCPU) is an open quota request; the design was accreting exceptions around a
+  region that could not serve it.
+- **Move the bootstrap state backend to centralus for consistency** - rejected, decision 4. Purge
+  protection makes it a 90-day name lock, and co-locating state with the primary workload region is
+  worse posture, not better.
+- **Delete `search_location` and `fabric_location` now that they equal `primary_location`** -
+  rejected, decision 5. Both are proven capacity escape hatches; removing the mechanism when the
+  trigger stops firing is how the lesson is lost. The redundant-looking PE `location` override is
+  load-bearing.
+- **Re-enable `enable_sql` / `enable_app_service` on the strength of the flip** - rejected, decision
+  7. The caps are subscription-offer caps, not regional quota, and ADR-031 predicted centralus would
+  behave the same. Silently re-enabling on a region change would be a guess dressed as an inference.
+- **Make the flip a workflow input rather than a tfvars value** - rejected, not designed. The estate
+  has ONE environment and ADR-044 established reviewed-commit flag supply as the pattern. A dispatch
+  input for a region would make the deployed region invisible to `plan-on-pr` and drift checks.
+- **Dispatch the flip against the current partially-torn-down estate** - rejected, decision 6. It
+  produces a ForceNew replace plan on live firewalls.
+- **`westus3` as secondary** (the `PROMPT.md:66` alternative) - not evaluated. Out of scope; the
+  user's ruling was a swap of the existing pair, and eastus2/centralus is a genuine symmetric Azure
+  region pair, which `westus3` (paired with East US) is not relative to centralus.
+
+**Consequences:**
+
+- Positive: the estate's primary region becomes the one with the only positive capacity evidence on
+  this tenant. Deviations d6 and d7 retire by construction rather than needing a B-R action. The
+  AI Search cross-region private endpoint stops existing. The region surface becomes visible in one
+  file. A region choice that was never a decision becomes one, with a record.
+- Positive: the topology proves out its own role-based naming. Every resource name except the
+  bootstrap and three module-derived families uses `primary`/`secondary` tokens, which is why a
+  region flip is a data change. That is worth stating in `ARCHITECTURE.md`.
+- Negative / trade-offs: the four plan bars lose verified status and must be re-measured. The
+  bootstrap keeps a name token (`eus2`) that no longer describes the primary region. Roughly 30
+  comments and descriptions across 12 files need inverting, and a missed one is a future operator
+  misled. The highest-risk unknown (centralus compute quota) is unresolved at ADR time and could
+  force `enable_kubernetes_platform = false` for this rebuild - which the design already tolerates,
+  since every spoke is shippable network-only (LESSON 42).
+- Negative: this ADR cannot be dispatched until unrelated teardown debt clears (decision 6).
+- Follow-ups required: **OQ-066** (the live verification set RC-1..RC-7, plus the teardown gate and
+  the two gate-re-enable questions). **OQ-004** resolved. `docs/b-restoration-design.md` deviations
+  d6/d7 marked retired by this ADR. `ARCHITECTURE.md` region narrative updated by whoever lands the
+  implementation.
+
+---
+
 ### ADR-068: A verified `target=all` teardown ends by RESETTING every eligible Terraform state blob to a canonical, metadata-labelled EMPTY document - never by deleting it. The two mirror-image state failure modes (FM-1 state-missing-while-resources-live, FM-2 state-populated-while-resources-gone) are named, given opposite guards, and reconciled by one ordering gate
 
 - **Date:** 2026-07-30
