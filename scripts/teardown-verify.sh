@@ -74,6 +74,18 @@
 # that gap for every MG still present in the Phase 3 snapshot, and explicitly PRINTS (rather than
 # silently passing) that a since-deleted MG is unverifiable here by design, with completion for
 # that MG already gated at Phase 0 and step 4-pre instead.
+#
+# AMENDED a sixth time 2026-07-30 (transient-list-failure fix round - see teardown-common.sh's
+# "AMENDED an eighth time" header note and teardown-az-sweep.sh's "AMENDED an eleventh time" for
+# the full incident and mechanism). VERIFY is the authoritative completion gate for every
+# teardown run (design principle 5) - a single transient ARM 5xx/429 on any list call below used
+# to BLOCK a genuinely clean teardown from ever certifying green, with zero retry. Every LIST/GET
+# call below that used `az_run` now uses `az_run_retry` (teardown-common.sh) instead - same
+# signature, bounded retry (3 attempts, ~10s apart by default) ONLY for a transient 5xx/429 that
+# is not also auth-shaped. VERIFY stays an IMMEDIATE, unwaited assertion otherwise (locked
+# decision 9.3, unchanged) - a bounded retry on a read is not the wait this file's own header
+# already says never belongs here; it only gives one genuine ARM hiccup a chance to clear before
+# the fail-loud rule (unchanged) fires.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -154,7 +166,7 @@ else
       echo "  ${mg}: clean (MG gone - VERIFY 4 owns the gone-assertion)."
       continue
     fi
-    if az_run remaining policy assignment list --scope "$scope" --query "length(@)" -o tsv; then
+    if az_run_retry remaining policy assignment list --scope "$scope" --query "length(@)" -o tsv; then
       # shellcheck disable=SC2154  # remaining is assigned indirectly by az_run's printf -v
       if [ "${remaining:-0}" != "0" ]; then
         note_fail "MG ${mg} still has ${remaining} policy assignment(s) - DISARM did not fully complete."
@@ -175,7 +187,7 @@ fi
 echo "== VERIFY 2: workload/platform RGs (naming pattern) =="
 rg_clean=1
 for sub in "${SUBS[@]}"; do
-  if ! az_run rgs_out group list --subscription "$sub" --query "$RG_SWEEP_QUERY" -o tsv; then
+  if ! az_run_retry rgs_out group list --subscription "$sub" --query "$RG_SWEEP_QUERY" -o tsv; then
     # Subscriptions are never deleted (design section 5 - only re-parented), so a failed list
     # here has no legitimate "scope gone" explanation - any non-zero is FAIL LOUD.
     note_fail "RG list failed for subscription ${sub} - a failed list is never read as 'no RGs' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
@@ -195,7 +207,7 @@ done
 # --- 3. Databricks workspaces gone (belt check independent of the RG naming pattern) ---
 echo "== VERIFY 3: Databricks workspaces =="
 for sub in "${SUBS[@]}"; do
-  if az_run count databricks workspace list --subscription "$sub" --query "length(@)" -o tsv; then
+  if az_run_retry count databricks workspace list --subscription "$sub" --query "length(@)" -o tsv; then
     # shellcheck disable=SC2154  # count is assigned indirectly by az_run's printf -v
     if [ "${count:-0}" != "0" ]; then
       note_fail "${count} Databricks workspace(s) still present in subscription ${sub}."
@@ -236,7 +248,7 @@ fi
 #     of a successful list (vaults found or not) stays informational, never itself a remnant. ---
 echo "== VERIFY 5: soft-deleted Key Vaults - redeploy recover list (informational content; list-call failures still fail loud) =="
 for sub in "${SUBS[@]}"; do
-  if ! az_run deleted_kvs_out keyvault list-deleted --subscription "$sub" \
+  if ! az_run_retry deleted_kvs_out keyvault list-deleted --subscription "$sub" \
       --query "[].[name, properties.purgeProtectionEnabled]" -o tsv; then
     note_fail "Key Vault list-deleted failed for subscription ${sub} - a failed list is never read as 'no soft-deleted vaults' (a dead token here would otherwise silently produce an incomplete redeploy-recover list): ${AZ_RUN_STDERR}"
     continue
@@ -262,7 +274,7 @@ echo "== VERIFY 6: subscription-scoped object classes (budgets, cost exports, co
 # no local declaration here.
 v6_clean=1
 for sub in "${SUBS[@]}"; do
-  if ! az_run budget_names_out consumption budget list --subscription "$sub" \
+  if ! az_run_retry budget_names_out consumption budget list --subscription "$sub" \
       --query "[?contains(name,'globaris')].name" -o tsv; then
     note_fail "consumption budget list failed for subscription ${sub} - a failed list is never read as 'no budgets' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
     v6_clean=0
@@ -276,7 +288,7 @@ for sub in "${SUBS[@]}"; do
     done
   fi
 
-  if ! az_run export_names_csv rest --method get \
+  if ! az_run_retry export_names_csv rest --method get \
       --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/exports?api-version=2025-03-01" \
       --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
     note_fail "cost export list (api-version 2025-03-01) failed for subscription ${sub} - a failed list is never read as 'no exports' (a dead token would otherwise falsely certify this subscription clean; an older API version would also falsely read these as absent, which is exactly the 2026-07-16 false negative - 2025-03-01 is mandatory here): ${AZ_RUN_STDERR}"
@@ -291,7 +303,7 @@ for sub in "${SUBS[@]}"; do
     done
   fi
 
-  if ! az_run scheduled_action_names_csv rest --method get \
+  if ! az_run_retry scheduled_action_names_csv rest --method get \
       --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/scheduledActions?api-version=2023-11-01" \
       --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
     note_fail "cost anomaly scheduled action list failed for subscription ${sub} - a failed list is never read as 'no scheduled actions' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
@@ -306,7 +318,7 @@ for sub in "${SUBS[@]}"; do
     done
   fi
 
-  if ! az_run diag_names_out monitor diagnostic-settings subscription list --subscription "$sub" \
+  if ! az_run_retry diag_names_out monitor diagnostic-settings subscription list --subscription "$sub" \
       --query "value[].name" -o tsv; then
     note_fail "subscription diagnostic-settings list failed for subscription ${sub} - a failed list is never read as 'no diagnostic settings' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
     v6_clean=0
@@ -342,7 +354,7 @@ done
 echo "== VERIFY 6d: subscription-scoped policy exemptions (exact scope, OWNED predicate) =="
 v6d_clean=1
 for sub in "${SUBS[@]}"; do
-  if ! az_run exemption_rows_out rest --method get \
+  if ! az_run_retry exemption_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.Authorization/policyExemptions?api-version=2022-07-01-preview&\$filter=atExactScope()" \
       --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
     note_fail "subscription-scoped policy exemption list (api-version 2022-07-01-preview) failed for subscription ${sub} - a failed list is never read as 'no exemptions' (a dead token would otherwise falsely certify this subscription clean): ${AZ_RUN_STDERR}"
@@ -370,7 +382,7 @@ done
 echo "== VERIFY 7: Defender for Cloud pricing plans reset to Free (security subscription) =="
 if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
   note_fail "SECURITY_SUBSCRIPTION_ID is empty - cannot certify Defender pricing (already counted by VERIFY 0)."
-elif az_run pricing_rows_out rest --method get \
+elif az_run_retry pricing_rows_out rest --method get \
     --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/pricings?api-version=2024-01-01" \
     --query "value[].[name, properties.pricingTier]" -o tsv; then
   # shellcheck disable=SC2154  # pricing_rows_out is assigned indirectly by az_run's printf -v
@@ -408,7 +420,7 @@ if [ -z "${MANAGEMENT_SUBSCRIPTION_ID:-}" ]; then
   note_fail "MANAGEMENT_SUBSCRIPTION_ID is empty - cannot certify provider registration state (already counted by VERIFY 0)."
 else
   for ns in "${RP_NAMESPACES_TO_UNREGISTER[@]}"; do
-    if az_run reg_state_out provider show --namespace "$ns" --subscription "$MANAGEMENT_SUBSCRIPTION_ID" \
+    if az_run_retry reg_state_out provider show --namespace "$ns" --subscription "$MANAGEMENT_SUBSCRIPTION_ID" \
         --query registrationState -o tsv; then
       # shellcheck disable=SC2154  # reg_state_out is assigned indirectly by az_run's printf -v
       if [ "$reg_state_out" = "Registered" ]; then
@@ -463,7 +475,7 @@ else
   arg_body_file="$(mktemp)"
   jq -n --arg query "$arg_query" --argjson subs "$arg_subs_json" '{subscriptions: $subs, query: $query}' > "$arg_body_file"
 
-  if ! az_run arg_response_out rest --method post \
+  if ! az_run_retry arg_response_out rest --method post \
       --url "${ARM_BASE}/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01" \
       --headers "Content-Type=application/json" --body "@${arg_body_file}" -o json; then
     if is_auth_error "$AZ_RUN_STDERR"; then
@@ -570,7 +582,7 @@ for sub in "${SUBS[@]}"; do
       v6rg_clean=0
       continue
     fi
-    if ! az_run v_rg_budget_names_out rest --method get \
+    if ! az_run_retry v_rg_budget_names_out rest --method get \
         --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
         --query "value[].name" -o tsv; then
       note_fail "RG-scope budget list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'no budgets': ${AZ_RUN_STDERR}"
@@ -606,7 +618,7 @@ for sub in "${SUBS[@]}"; do
   mapfile -t v_rg_names_ex <<< "$v_rg_names_ex_out"
   for rg in "${v_rg_names_ex[@]:-}"; do
     [ -z "$rg" ] && continue
-    if ! az_run v_rg_ex_rows_out rest --method get \
+    if ! az_run_retry v_rg_ex_rows_out rest --method get \
         --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
         --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
       note_fail "RG-scope policy exemption list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'no exemptions': ${AZ_RUN_STDERR}"
@@ -650,7 +662,7 @@ if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
 else
   v6e_clean=1
 
-  if ! az_run v_contact_rows_out rest --method get \
+  if ! az_run_retry v_contact_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/securityContacts?api-version=${SECURITY_CONTACTS_API_VERSION}" \
       --query "value[].name" -o tsv; then
     note_fail "securityContacts list failed for the security subscription: ${AZ_RUN_STDERR}"
@@ -667,7 +679,7 @@ else
     done
   fi
 
-  if ! az_run v_automation_rows_out rest --method get \
+  if ! az_run_retry v_automation_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/automations?api-version=${SECURITY_AUTOMATIONS_API_VERSION}" \
       --query "value[].name" -o tsv; then
     note_fail "Microsoft.Security/automations list failed for the security subscription: ${AZ_RUN_STDERR}"
@@ -684,7 +696,7 @@ else
     done
   fi
 
-  if ! az_run v_autoprov_rows_out rest --method get \
+  if ! az_run_retry v_autoprov_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/autoProvisioningSettings?api-version=${SECURITY_AUTOPROVISIONING_API_VERSION}" \
       --query "value[?properties.autoProvision!='Off'].name" -o tsv; then
     note_fail "autoProvisioningSettings list failed for the security subscription: ${AZ_RUN_STDERR}"
@@ -699,7 +711,7 @@ else
     done
   fi
 
-  if ! az_run v_workspace_rows_out rest --method get \
+  if ! az_run_retry v_workspace_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/workspaceSettings?api-version=${SECURITY_WORKSPACESETTINGS_API_VERSION}" \
       --query "value[].name" -o tsv; then
     note_fail "workspaceSettings list failed for the security subscription: ${AZ_RUN_STDERR}"
@@ -728,7 +740,7 @@ fi
 #     job already failed the run; VERIFY reaching the same auth wall here is expected,
 #     consistent, and still correctly reported as a failure, not silently downgraded.
 echo "== VERIFY 6f: tenant Microsoft.AadIam/diagnosticSettings =="
-if ! az_run v_tenant_diag_rows_out rest --method get \
+if ! az_run_retry v_tenant_diag_rows_out rest --method get \
     --url "${ARM_BASE}/providers/Microsoft.AadIam/diagnosticSettings?api-version=${TENANT_AAD_DIAGNOSTIC_SETTINGS_API_VERSION}" \
     --query "value[].name" -o tsv; then
   if is_auth_error "$AZ_RUN_STDERR"; then
@@ -800,7 +812,7 @@ else
     mg_scope="$(mg_scope_path "$mg")"
 
     # Consumption budgets
-    if ! az_run v10_budget_rows_out rest --method get \
+    if ! az_run_retry v10_budget_rows_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
         --query "value[].name" -o tsv; then
       note_fail "TEARDOWN-VERIFY-MGSCOPE: MG-scope budget list failed for MG ${mg} - a failed list is never read as 'no budgets' (a dead token would otherwise falsely certify this MG clean): ${AZ_RUN_STDERR}"
@@ -823,7 +835,7 @@ else
     # role that can DELETE one at MG scope (ADR-063 decision 1d, OQ-059(b)) - but the LIST is
     # authorised (User Access Administrator's */read) and a row here is still a genuine remnant
     # that must be reported, even though this SP cannot itself clean it up.
-    if ! az_run v10_diag_rows_out rest --method get \
+    if ! az_run_retry v10_diag_rows_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/microsoft.insights/diagnosticSettings?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}" \
         --query "value[].name" -o tsv; then
       note_fail "TEARDOWN-VERIFY-MGSCOPE: MG-scope diagnostic-settings list failed for MG ${mg} - a failed list is never read as 'no diagnostic settings' (a dead token would otherwise falsely certify this MG clean): ${AZ_RUN_STDERR}"
@@ -844,7 +856,7 @@ else
 
     # Policy exemptions (atExactScope, with the same client-side scope-path belt the Phase-0
     # sweep and step 4-pre use - ADR-063 rule 3b).
-    if ! az_run v10_exemption_rows_out rest --method get \
+    if ! az_run_retry v10_exemption_rows_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
         --query "value[].[name, id]" -o tsv; then
       note_fail "TEARDOWN-VERIFY-MGSCOPE: MG-scope policy exemption list failed for MG ${mg} - a failed list is never read as 'no exemptions' (a dead token would otherwise falsely certify this MG clean): ${AZ_RUN_STDERR}"

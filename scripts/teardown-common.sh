@@ -91,6 +91,28 @@
 # comment for the full recover-then-purge mechanism, the resource-group-recreation caveat it is
 # built around, and why it is now a BACKSTOP (`platform/security/providers.tf` purges the LAW
 # natively on terraform destroy as of 2026-07-30, Cloud Engineer fix).
+#
+# AMENDED an eighth time 2026-07-30 (transient-list-failure fix round): added `is_transient_error`
+# and `az_run_retry` below. Root cause: teardown run 30597640251 died at Phase 2 step 4-pre on a
+# single ARM 500 (Internal Server Error) returned for one MG-scope budget LIST call - `az_run` has
+# no retry at all, so a transient server blip failed the whole teardown, the VERIFY pass that would
+# have run after it, and Phase 4. The identical call succeeded on the immediate rerun (30598510031),
+# confirming the failure was transient, not a real finding. The fail-loud rule itself (section 9.4,
+# ADR-063 - a failed list must never be read as "empty/clean") is correct and stays UNCHANGED here;
+# what was missing is a bounded retry BEFORE that fail-loud path fires, and ONLY for a failure shape
+# that is genuinely worth retrying. `az_run_retry` is a drop-in replacement for `az_run` at LIST/GET
+# (read) call sites: same signature, same return contract (non-zero + AZ_RUN_STDERR set on the last
+# attempt), so every existing caller needed nothing beyond the function name changing. See each
+# function's own comment below for the exact classification and retry bounds. Applied at every
+# LIST/GET call site across teardown-disarm.sh, teardown-az-sweep.sh, teardown-verify.sh,
+# teardown-state-reset.sh, and the two probe scripts (see each file's own header note for what
+# changed there) - the ONE exception is `wait_for_rgs_gone`'s own `group exists` call further down
+# this file, deliberately left on plain `az_run`: that call already lives inside a loop that never
+# fails loud on a non-auth error (it reads an indeterminate/transient result as "still pending" and
+# retries on its own next 20s iteration, re-authenticating via `az_relogin` each time) - wrapping it
+# in `az_run_retry` too would just nest one bounded retry inside an already-retrying wait for no
+# behavioural gain. Never wired in at a DELETE/write call site - see `az_run_retry`'s own comment
+# for why.
 
 # ARM management-plane base URL, used by every direct `az rest` call in teardown-disarm.sh,
 # teardown-az-sweep.sh, teardown-verify.sh, and scripts/teardown-probe-extensions.sh. Promoted
@@ -527,19 +549,20 @@ is_globaris_owned() {
 }
 
 # discover_live_rgs <out_var> <sub> - list every currently-live RG in <sub> that matches the
-# SAME RG_SWEEP_QUERY naming-pattern filter step 2's RG sweep already uses, via az_run (stdout/
-# stderr kept separate, Finding #2 discipline). Shared discovery primitive for every NEW
-# RG-scope check this fix adds (FIX-2 budgets, FIX-3 exemptions, the probe's RG-scoped
-# budgets/exemptions/diagnostic-settings sections) - discovery BY LIST, never a hardcoded RG
-# name list, matching the lesson ADR-062 already drew ("enumerated class lists are the wrong
-# mechanism") and step 6a's own stated design ("Discovery is by LIST, never a hardcoded name
-# list, so a renamed or added object is still caught"). Returns az_run's own exit code - callers
-# MUST treat a non-zero return as FAIL LOUD (a live subscription's RG list can never legitimately
-# fail, same section 9.4 boundary as every other subscription-scoped list in this codebase), not
-# as "no RGs".
+# SAME RG_SWEEP_QUERY naming-pattern filter step 2's RG sweep already uses, via az_run_retry
+# (stdout/stderr kept separate, Finding #2 discipline; bounded retry on a transient 5xx/429,
+# 2026-07-30 fix round - see this file's "AMENDED an eighth time" header note). Shared discovery
+# primitive for every NEW RG-scope check this fix adds (FIX-2 budgets, FIX-3 exemptions, the
+# probe's RG-scoped budgets/exemptions/diagnostic-settings sections) - discovery BY LIST, never a
+# hardcoded RG name list, matching the lesson ADR-062 already drew ("enumerated class lists are the
+# wrong mechanism") and step 6a's own stated design ("Discovery is by LIST, never a hardcoded name
+# list, so a renamed or added object is still caught"). Returns az_run_retry's own exit code -
+# callers MUST treat a non-zero return as FAIL LOUD (a live subscription's RG list can never
+# legitimately fail, same section 9.4 boundary as every other subscription-scoped list in this
+# codebase), not as "no RGs".
 discover_live_rgs() {
   local __out_var="$1" __sub="$2"
-  az_run "$__out_var" group list --subscription "$__sub" --query "$RG_SWEEP_QUERY" -o tsv
+  az_run_retry "$__out_var" group list --subscription "$__sub" --query "$RG_SWEEP_QUERY" -o tsv
 }
 
 # databricks_force_delete_cascade <managed_rgs_outvar> <managed_rg_subs_outvar> - lists every
@@ -561,11 +584,13 @@ discover_live_rgs() {
 # List-call failure: a live subscription's own Databricks workspace list can never legitimately
 # fail (section 9.4 design boundary, same as every other subscription-scoped list in this
 # codebase) - FAIL LOUD, return 1 (caller's own ::error:: convention applies; this function
-# prints its own ::error:: before returning, matching az_run-consuming callers elsewhere).
-# Delete-submission failure: classify with is_auth_error - auth-shaped fails loud (return 1);
-# anything else is a warn-and-continue (idempotent retry on next run), matching every other
-# delete in this codebase. Zero workspaces found in any subscription is success (both arrays
-# left empty), not an error.
+# prints its own ::error:: before returning, matching az_run_retry-consuming callers elsewhere).
+# Bounded retry on a transient 5xx/429 before that fail-loud path fires (2026-07-30 fix round -
+# see this file's "AMENDED an eighth time" header note). Delete-submission failure: classify with
+# is_auth_error - auth-shaped fails loud (return 1); anything else is a warn-and-continue
+# (idempotent retry on next run), matching every other delete in this codebase - deletes never go
+# through az_run_retry (see that function's own comment for why). Zero workspaces found in any
+# subscription is success (both arrays left empty), not an error.
 databricks_force_delete_cascade() {
   local -n __dbx_out_rgs="$1"
   local -n __dbx_out_subs="$2"
@@ -573,7 +598,7 @@ databricks_force_delete_cascade() {
   local dbx_rows_out dbx_del_out
   local -a dbx_rows
   for sub in $(teardown_subscriptions); do
-    if ! az_run dbx_rows_out databricks workspace list --subscription "$sub" \
+    if ! az_run_retry dbx_rows_out databricks workspace list --subscription "$sub" \
         --query "[].[name, resourceGroup, managedResourceGroupId]" -o tsv; then
       echo "::error::Databricks workspace list failed for subscription ${sub} - a failed list is never read as 'no workspaces' (section 9.4): ${AZ_RUN_STDERR}"
       return 1
@@ -785,6 +810,37 @@ is_not_found_error() {
   printf '%s' "$text" | grep -qiE 'NotFound|Not Found|404'
 }
 
+# is_transient_error "<text>" - classify captured az stderr as a TRANSIENT server-side failure
+# (HTTP 5xx or 429/throttling), case-insensitive (2026-07-30 transient-list-failure fix round, live
+# evidence: teardown run 30597640251, section 9.4). Returns 0 (true - IS transient) on a match, 1
+# (false) otherwise. Consumed ONLY by `az_run_retry` below to decide whether a failed LIST/GET is
+# worth a bounded retry - never consumed as a substitute for `is_auth_error`'s fail-loud role, and
+# `az_run_retry` always checks `is_auth_error` FIRST (an auth/token failure must never be retried).
+#
+# Matches BOTH textual shapes this codebase's az calls can produce an error in:
+#   - `az rest` renders a non-2xx response as `<Reason Phrase>({...json body...})` - e.g. the live
+#     evidence line, `ERROR: Internal Server Error({"error":{...`. "Too Many Requests" is the
+#     equivalent reason phrase for a 429.
+#   - Every other az CLI command (SDK-wrapped, not raw `az rest`) surfaces an azure-core
+#     HttpResponseError, typically `(<ErrorCode>) <message>` - e.g. `(InternalServerError) ...` /
+#     `(TooManyRequests) ...` - or occasionally the bare reason phrase again
+#     ("Operation returned an invalid status 'Service Unavailable'").
+# Bare status codes (429/500/502/503/504) are ALSO matched, word-boundary anchored
+# (`\b500\b` etc.) - the SAME discipline `is_auth_error` above already established for bare
+# `401`/`403`, so a digit run that merely CONTAINS one of these codes (a GUID segment, a
+# content-length, a resource count) cannot false-match. This is deliberately still broad enough to
+# accept a residual false-positive risk (some other unrelated digit sequence, word-boundary
+# anchored, coincidentally reading as one of these codes) - unlike `is_auth_error`, where a
+# false-positive would incorrectly SUPPRESS a retry (harmless - the caller still fails loud
+# immediately, exactly as `az_run` always did), a false positive HERE only costs one bounded extra
+# retry cycle (~`AZ_RUN_RETRY_SLEEP_SECONDS` seconds) before the SAME fail-loud outcome the codebase
+# already guarantees - it can never turn a real failure into a silent pass, so accepting the wider
+# net here does not weaken section 9.4's invariant.
+is_transient_error() {
+  local text="${1:-}"
+  printf '%s' "$text" | grep -qiE 'Internal Server Error|InternalServerError|Bad Gateway|BadGateway|Service Unavailable|ServiceUnavailable|Gateway Timeout|GatewayTimeout|Too Many Requests|TooManyRequests|RetryableError|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b'
+}
+
 # az_run <out_var> <az subcommand args...> - run `az <args>`, capturing STDOUT ONLY into the
 # named variable and STDERR into the global AZ_RUN_STDERR. Returns az's own exit code
 # unmolested.
@@ -812,6 +868,68 @@ az_run() {
   return "$__az_run_rc"
 }
 
+# az_run_retry <out_var> <az subcommand args...> - drop-in replacement for `az_run` at LIST/GET
+# (read) call sites ONLY (2026-07-30 transient-list-failure fix round - see this file's own
+# "AMENDED an eighth time" header note for the live incident that motivated it). Same signature,
+# same return contract as `az_run` (0 on success with `out_var` populated; non-zero with
+# `AZ_RUN_STDERR` set to the failing attempt's stderr) - every existing caller works unmodified
+# with no change beyond the function name, including the three-way
+# `if az_run ...; then ... elif is_auth_error ...; else ...; fi` form teardown-disarm.sh/
+# teardown-verify.sh use, because a retry that ultimately still fails is observationally identical
+# to `az_run` failing on the first and only attempt.
+#
+# Retries a BOUNDED number of times (AZ_RUN_RETRY_ATTEMPTS total attempts, default 3;
+# AZ_RUN_RETRY_SLEEP_SECONDS apart, default 10) ONLY when BOTH hold on a failed attempt:
+#   - `is_auth_error` does NOT match. An auth/token failure is a real finding, not a server blip,
+#     and MUST stay immediately fail-loud with zero retries - never widen this to "retry anything",
+#     or a genuinely dead token would just burn extra wall-clock time before failing anyway, which
+#     would blur exactly the signal `is_auth_error` exists to surface fast.
+#   - `is_transient_error` DOES match (HTTP 5xx or 429 - see that function's own comment for the
+#     exact text matched and why its residual false-positive risk is safe to accept).
+# `is_auth_error` is checked FIRST and unconditionally wins if it matches, even on text that also
+# happens to look transient - the same "auth is the more severe classification, checked first"
+# convention `is_not_found_error`'s own comment already documents for its relationship to
+# `is_auth_error`.
+#
+# Any OTHER failure shape (non-auth, non-transient - e.g. a genuine 400 this codebase does not
+# expect on a list call at all) returns on the FIRST attempt, unretried, exactly like plain `az_run`
+# always did: retrying a deterministic error only delays the same fail-loud outcome, it does not
+# change it.
+#
+# NEVER use this for a DELETE/write submission. Every delete call site in this codebase captures
+# its own output directly (`az ... 2>&1`, not `az_run`) specifically because a write's error text
+# is only ever inspected on ITS OWN failure branch, never fed to a compare/mapfile as data (the
+# `az_run` Finding #2 discipline above) - retrying a write is a materially different and more
+# dangerous problem (the idempotency of the OPERATION, not just of reading its result) that this
+# helper does not attempt to solve. Do not wire it in at a delete call site.
+AZ_RUN_RETRY_ATTEMPTS="${AZ_RUN_RETRY_ATTEMPTS:-3}"
+AZ_RUN_RETRY_SLEEP_SECONDS="${AZ_RUN_RETRY_SLEEP_SECONDS:-10}"
+az_run_retry() {
+  local __out_var="$1"
+  shift
+  local __attempt=1 __rc
+  while :; do
+    az_run "$__out_var" "$@"
+    __rc=$?
+    if [ "$__rc" -eq 0 ]; then
+      return 0
+    fi
+    if is_auth_error "$AZ_RUN_STDERR"; then
+      return "$__rc"
+    fi
+    if ! is_transient_error "$AZ_RUN_STDERR"; then
+      return "$__rc"
+    fi
+    if [ "$__attempt" -ge "$AZ_RUN_RETRY_ATTEMPTS" ]; then
+      echo "  ::warning::az_run_retry: attempt ${__attempt}/${AZ_RUN_RETRY_ATTEMPTS} of 'az $*' still failed with a transient error (HTTP 5xx/429) - no attempts remain, returning the failure to the caller: ${AZ_RUN_STDERR}"
+      return "$__rc"
+    fi
+    echo "  ::warning::az_run_retry: attempt ${__attempt}/${AZ_RUN_RETRY_ATTEMPTS} of 'az $*' failed with a transient error (HTTP 5xx/429) - retrying in ${AZ_RUN_RETRY_SLEEP_SECONDS}s: ${AZ_RUN_STDERR}"
+    sleep "$AZ_RUN_RETRY_SLEEP_SECONDS"
+    __attempt=$((__attempt + 1))
+  done
+}
+
 # mg_snapshot_load / mg_in_snapshot - the ONE-TIME `az account management-group list` snapshot
 # oracle (docs/teardown-redesign.md section 12 / ADR-054 point 12). REPLACES the per-MG
 # `az account management-group show <name>` existence probe everywhere in the teardown scripts.
@@ -837,12 +955,16 @@ az_run() {
 # always entitled to make, so a failure classifies with `is_auth_error` (or any non-zero) as a
 # genuine dead token / transport error - callers MUST treat a failed mg_snapshot_load as FAIL
 # LOUD and never proceed with a stale/absent snapshot. A SUCCESSFUL list is authoritative ground
-# truth for the rest of the run - a dead token cannot return a clean list.
+# truth for the rest of the run - a dead token cannot return a clean list. Uses az_run_retry (not
+# plain az_run, 2026-07-30 fix round - see this file's "AMENDED an eighth time" header note): this
+# ONE call gates the start of every DISARM/az-sweep/VERIFY run, so a single transient 5xx/429 here
+# would otherwise kill the whole run before any real work started - exactly the failure class this
+# fix round closes.
 declare -gA MG_SNAPSHOT
 mg_snapshot_load() {
   MG_SNAPSHOT=()
   local names_out name
-  if ! az_run names_out account management-group list --query "[].name" -o tsv; then
+  if ! az_run_retry names_out account management-group list --query "[].name" -o tsv; then
     echo "::error::mg_snapshot_load: az account management-group list failed - this is the single call the SP is always entitled to make (Management Group Contributor at the tenant root, never deleted), so a failure here is a genuine dead token / transport error: ${AZ_RUN_STDERR}"
     return 1
   fi
@@ -969,6 +1091,11 @@ wait_for_rgs_gone() {
     local -a still_subs=() still_rgs=()
     local i exists exists_rc
     for i in "${!rgs[@]}"; do
+      # Deliberately plain az_run here, NOT az_run_retry (2026-07-30 fix round) - this call
+      # already lives inside a loop that never fails loud on a non-auth failure (below, a
+      # non-zero/unexpected result is treated as "still pending" and retried on the next 20s
+      # iteration, re-authenticating via az_relogin every time). Wrapping it in az_run_retry too
+      # would nest one bounded retry inside an already-retrying wait for no behavioural gain.
       # az_run is called DIRECTLY here (never inside a `$(...)` subshell) - az_run's
       # AZ_RUN_STDERR global side effect would otherwise be lost the instant a subshell exits.
       # A stderr WARNING banner on an otherwise-clean call must never corrupt the "true"/"false"

@@ -102,6 +102,16 @@
 # sweep is the only one that runs before Phase 2's own remove_mg_hierarchy loop deletes the MGs
 # in THAT mode too) and becomes a harmless remnant-catch no-op on the mode=terraform path (see
 # that script's own comment at the FIX-1 site).
+#
+# AMENDED a fifth time 2026-07-30 (transient-list-failure fix round, teardown run 30597640251 -
+# see teardown-common.sh's "AMENDED an eighth time" header note and teardown-az-sweep.sh's
+# "AMENDED an eleventh time" for the full incident and mechanism). This script gates every
+# Phase 1 destroy job (`needs: disarm`), so a single transient ARM 5xx/429 on any list call here
+# used to kill the entire run before any real work started, with zero retry. Every LIST/GET call
+# below that used `az_run` now uses `az_run_retry` (teardown-common.sh) instead - same signature,
+# bounded retry (3 attempts, ~10s apart by default) ONLY for a transient 5xx/429 that is not also
+# auth-shaped, never for a delete. The fail-loud rule this file already enforces (a dead token or
+# a real permission gap must still abort DISARM) is unchanged.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -263,7 +273,7 @@ for mg in "${MG_SCOPES[@]}"; do
   # not fork on the cause, there is nothing to invert here - `is_auth_error` is used in its normal,
   # unmodified, checked-first role purely to ENRICH the message (matching every other list-call
   # site in this file, e.g. the policy-assignment list below), not to decide the outcome.
-  if ! az_run p0pf_actions_out rest --method get --url "$p0pf_url" --query "value[].actions[]" -o tsv; then
+  if ! az_run_retry p0pf_actions_out rest --method get --url "$p0pf_url" --query "value[].actions[]" -o tsv; then
     if is_auth_error "$AZ_RUN_STDERR"; then
       echo "::error::TEARDOWN-P0-PREFLIGHT-UNAVAILABLE: the effective-permissions read failed for MG ${mg} with an auth/transport error - cannot evaluate the pre-flight for this scope off a dead token. Not treated as capability absent: ${AZ_RUN_STDERR}"
     else
@@ -272,7 +282,7 @@ for mg in "${MG_SCOPES[@]}"; do
     p0pf_fail=1
     continue
   fi
-  if ! az_run p0pf_notactions_out rest --method get --url "$p0pf_url" --query "value[].notActions[]" -o tsv; then
+  if ! az_run_retry p0pf_notactions_out rest --method get --url "$p0pf_url" --query "value[].notActions[]" -o tsv; then
     if is_auth_error "$AZ_RUN_STDERR"; then
       echo "::error::TEARDOWN-P0-PREFLIGHT-UNAVAILABLE: the effective-permissions notActions read failed for MG ${mg} with an auth/transport error - cannot evaluate the pre-flight for this scope without it (a granted action can still be revoked by a notActions entry): ${AZ_RUN_STDERR}"
     else
@@ -321,7 +331,7 @@ for mg in "${MG_SCOPES[@]}"; do
 
   # Capture (name, principalId) for DINE assignments with a system-assigned identity BEFORE
   # deleting the assignment - the identity's role assignment does not vanish with it.
-  if az_run identity_rows_out policy assignment list --scope "$scope" \
+  if az_run_retry identity_rows_out policy assignment list --scope "$scope" \
       --query "[?identity!=null].[name,identity.principalId]" -o tsv; then
     # shellcheck disable=SC2154  # identity_rows_out is assigned indirectly by az_run's printf -v
     mapfile -t identity_rows <<< "$identity_rows_out"
@@ -350,7 +360,7 @@ for mg in "${MG_SCOPES[@]}"; do
     # list` flags, CLI ref ms.date 2026-06-26) instead of --assignee, so a deleted-DINE-identity
     # Microsoft Graph resolution error cannot masquerade as this class and trip the new fail-loud
     # below - both flags bypass the Graph query entirely.
-    if az_run role_ids_out role assignment list --scope "$scope" --assignee-object-id "$principal_id" \
+    if az_run_retry role_ids_out role assignment list --scope "$scope" --assignee-object-id "$principal_id" \
         --fill-principal-name false --query "[].id" -o tsv; then
       # shellcheck disable=SC2154  # role_ids_out is assigned indirectly by az_run's printf -v
       mapfile -t role_ids <<< "$role_ids_out"
@@ -386,7 +396,7 @@ for mg in "${MG_SCOPES[@]}"; do
   done
 
   # Delete every policy assignment at this scope (base ALZ + AMBA). Idempotent.
-  if az_run assignment_names_out policy assignment list --scope "$scope" \
+  if az_run_retry assignment_names_out policy assignment list --scope "$scope" \
       --query "[].name" -o tsv; then
     # shellcheck disable=SC2154  # assignment_names_out is assigned indirectly by az_run's printf -v
     mapfile -t assignment_names <<< "$assignment_names_out"
@@ -475,7 +485,7 @@ for mg in "${MG_SCOPES[@]}"; do
   # delete URL is built from mg_scope + name, NEVER from a returned "id" field - Microsoft's own
   # Budgets List sample returns "id": "subscriptions/.../budgets/TestBudget" with NO leading
   # slash, so ${ARM_BASE}${id} would silently mis-form the URL.
-  if ! az_run p0_budget_names_out rest --method get \
+  if ! az_run_retry p0_budget_names_out rest --method get \
       --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
       --query "value[].name" -o tsv; then
     echo "::error::Phase 0: MG-scope budget list failed for MG ${mg} - a failed list is never read as 'no budgets': ${AZ_RUN_STDERR}"
@@ -548,7 +558,7 @@ for mg in "${MG_SCOPES[@]}"; do
   # Mirrored at the identical site in teardown-az-sweep.sh (step 4-pre) with the SAME function
   # body (defined near the top of THIS file, alongside the 1b(iv) pre-flight helpers) so the two
   # cannot drift.
-  if ! az_run p0_diag_names_out rest --method get \
+  if ! az_run_retry p0_diag_names_out rest --method get \
       --url "${ARM_BASE}${mg_scope}/providers/microsoft.insights/diagnosticSettings?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}" \
       --query "value[].name" -o tsv; then
     echo "::error::Phase 0: MG-scope diagnostic-settings list failed for MG ${mg} - a failed list is never read as 'no diagnostic settings': ${AZ_RUN_STDERR}"
@@ -579,7 +589,7 @@ for mg in "${MG_SCOPES[@]}"; do
   # only live-verified at SUBSCRIPTION scope (ADR-062 6d) - additionally verify client-side that
   # every returned id actually starts with this MG's own scope path, removing any dependence on
   # an unverified MG-scope atExactScope() semantic.
-  if ! az_run p0_exemption_rows_out rest --method get \
+  if ! az_run_retry p0_exemption_rows_out rest --method get \
       --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
       --query "value[].[name, id]" -o tsv; then
     echo "::error::Phase 0: MG-scope policy exemption list failed for MG ${mg} - a failed list is never read as 'no exemptions': ${AZ_RUN_STDERR}"
