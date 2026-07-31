@@ -31,10 +31,22 @@
 # positively labelled, exactly the gap decision 11 exists to close. Both remain open
 # follow-up work, not implemented here.
 #
-# Sources scripts/teardown-common.sh for `az_run` / `is_auth_error` / `is_not_found_error`
-# only - those three predate ADR-068 by months (ADR-054/ADR-062) and are the established
-# auth-fail-loud plumbing every teardown script already uses; sourcing them here adds no diff
-# to that file and does not reintroduce decision 8's promotion.
+# Sources scripts/teardown-common.sh for `az_run_retry` / `is_auth_error` / `is_not_found_error`
+# only - those predate ADR-068 by months (ADR-054/ADR-062, plus `az_run_retry` added 2026-07-30 -
+# see below) and are the established auth-fail-loud plumbing every teardown script already uses;
+# sourcing them here does not reintroduce decision 8's promotion (the state-blob key list, tiny-
+# blob threshold, backend parse and empty-document writer stay local to this script, unchanged).
+#
+# AMENDED 2026-07-30 (transient-list-failure fix round - see teardown-common.sh's "AMENDED an
+# eighth time" header note and teardown-az-sweep.sh's "AMENDED an eleventh time" for the full
+# incident and mechanism). This is a genuinely SEPARATE change from decision 8's promotion the
+# SCOPE NOTE above disclaims - `az_run_retry` and `is_transient_error` are a general-purpose
+# bounded-retry primitive every teardown script now shares, not part of the state-blob-specific
+# constants/helpers decision 8 asks to promote, so adding this diff to teardown-common.sh does not
+# violate that boundary. Every `storage blob show` read below now goes through `az_run_retry`
+# instead of `az_run` - same signature, bounded retry (3 attempts, ~10s apart by default) ONLY
+# for a transient 5xx/429 that is not also auth-shaped, never for the blob upload/download calls
+# (writes, already captured directly with `az ... 2>&1`, unchanged).
 #
 # Reads three inputs from the environment, all set by the calling job
 # (.github/workflows/teardown.yml "state-reset" job):
@@ -291,7 +303,7 @@ _reset_write_and_confirm() {
   # CONFIRM READ-BACK (this codebase's confirm-GET discipline - the write side never trusts
   # its own reported success).
   local confirm_len_out
-  if ! az_run confirm_len_out storage blob show \
+  if ! az_run_retry confirm_len_out storage blob show \
       --account-name "$SA_NAME" --container-name "$CONTAINER" --name "$key" \
       --auth-mode login --query properties.contentLength -o tsv; then
     echo "::error::${key}: confirm read-back (size) failed immediately after the reset upload: ${AZ_RUN_STDERR}"
@@ -338,7 +350,7 @@ reset_one_key() {
   bytes_after="-"
 
   local show_json
-  if ! az_run show_json storage blob show \
+  if ! az_run_retry show_json storage blob show \
       --account-name "$SA_NAME" --container-name "$CONTAINER" --name "$key" \
       --auth-mode login --query "{length:properties.contentLength, lease:properties.lease.status}" -o json; then
     if is_not_found_error "$AZ_RUN_STDERR"; then
@@ -368,7 +380,7 @@ reset_one_key() {
     attempt=$((attempt + 1))
     echo "  ::warning::${key}: lease is LOCKED (retry ${attempt}/3) - sleeping 20s before recheck."
     sleep 20
-    if ! az_run show_json storage blob show \
+    if ! az_run_retry show_json storage blob show \
         --account-name "$SA_NAME" --container-name "$CONTAINER" --name "$key" \
         --auth-mode login --query "{length:properties.contentLength, lease:properties.lease.status}" -o json; then
       echo "::error::${key}: blob show (lease recheck ${attempt}/3) failed: ${AZ_RUN_STDERR}"

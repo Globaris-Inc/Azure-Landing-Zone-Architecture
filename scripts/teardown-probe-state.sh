@@ -38,6 +38,14 @@
 # script still probes for it (defensive - in case someone ever experimented with a remote
 # bootstrap backend) but classifies an absent bootstrap key as INFO, never as Class-A. Every
 # other key IS expected to exist once its root has been applied at least once.
+#
+# AMENDED 2026-07-30 (transient-list-failure fix round - see teardown-common.sh's "AMENDED an
+# eighth time" header note for the full incident and mechanism). Both `storage blob exists` / `az
+# storage blob show` reads below now use `az_run_retry` (teardown-common.sh) instead of `az_run` -
+# same signature, bounded retry (3 attempts, ~10s apart by default) ONLY for a transient HTTP
+# 5xx/429 that is not also auth-shaped. A false Class-A finding from one transient blip here would
+# be a costly false alarm (this probe's whole purpose is to be trusted evidence for whether a
+# root's state is safe to plan/apply against).
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -105,7 +113,7 @@ for key in "${STATE_KEYS[@]}"; do
   # transport error, could be an auth error) - never read as "false" (that would be exactly the
   # false-negative class ADR-062/section 9.4 already closed for other list calls in this
   # codebase). az_run keeps stdout/stderr separate (Finding #2 discipline).
-  if ! az_run exists_out storage blob exists \
+  if ! az_run_retry exists_out storage blob exists \
       --account-name "$SA_NAME" --container-name "$CONTAINER" --name "$key" \
       --auth-mode login --query exists -o tsv; then
     if is_auth_error "$AZ_RUN_STDERR"; then
@@ -131,7 +139,7 @@ for key in "${STATE_KEYS[@]}"; do
   # Present - check contentLength. `az storage blob show` failing here (blob just confirmed to
   # exist) is itself an anomaly - classify and fail loud rather than silently skip the size
   # check (a present-but-unreadable blob is not "fine").
-  if ! az_run length_out storage blob show \
+  if ! az_run_retry length_out storage blob show \
       --account-name "$SA_NAME" --container-name "$CONTAINER" --name "$key" \
       --auth-mode login --query properties.contentLength -o tsv; then
     if is_auth_error "$AZ_RUN_STDERR"; then

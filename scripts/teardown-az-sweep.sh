@@ -198,6 +198,43 @@
 #     Phase 0.5 job already cascaded the workspace + managed RG before Phase 1's bank-data-p1
 #     destroy ever ran) - this is a consequence of the new job, not a change to this step.
 #
+# AMENDED an eleventh time 2026-07-30 (two independent, unrelated fixes proven by live runs the
+# same evening - batched together since both touch this one file):
+#   - Transient-list-failure fix: run 30597640251 died at step 4-pre on a single ARM 500 on an
+#     MG-scope budget LIST call (the identical call succeeded on the immediate rerun,
+#     30598510031, confirming it was transient). Every LIST/GET call in this script that fed
+#     `az_run` now feeds `az_run_retry` instead (teardown-common.sh - see that function's own
+#     comment and this file's "AMENDED an eighth time" analogue in teardown-common.sh for the
+#     full mechanism): a bounded retry (3 attempts, ~10s apart by default) fires ONLY for a
+#     transient HTTP 5xx/429 that is NOT also auth-shaped, and NEVER for a DELETE/write - the
+#     fail-loud rule (section 9.4) is unchanged, this only adds a chance to recover from a
+#     genuine server blip before that rule fires. Same drop-in signature as `az_run`, so no
+#     call-site logic below changed beyond the function name.
+#   - Key Vault purge-protection guard, dead since it was written: step 3's
+#     `properties.purgeProtectionEnabled` TSV field is a ROW value (queried alongside name/
+#     location, not a bare scalar), so Azure CLI's TSV formatter renders it capitalized ("True"),
+#     not lowercase - live-verified against a standalone `knack` TSV-formatter harness this fix
+#     round (a bare scalar boolean DOES render lowercase, e.g. `az group exists -o tsv`
+#     elsewhere in this script and in teardown-common.sh, which is why those sites were never
+#     affected). The `[ "$dkv_pp" = "true" ]` compare therefore never matched, and every
+#     purge-protected vault silently took the "not purge-protected" branch - confirmed live by
+#     QA via raw REST (all four `kv-sec-globaris-*` vaults have `purgeProtectionEnabled: true`)
+#     and by three consecutive teardown runs logging "Purging (not purge-protected)" followed by
+#     `MethodNotAllowed: Operation 'DeletedVaultPurge' is not allowed` for every vault - only
+#     Azure's own server-side enforcement was ever preventing a wrong purge. Fixed by
+#     lowercasing the captured value before the compare (`${dkv_pp,,}`, bash parameter expansion
+#     - ubuntu-latest ships bash 5, same assumption this codebase already makes elsewhere) rather
+#     than switching this call to JSON output: keeps the existing TSV+`cut -f`+`az_run_retry` row
+#     convention every other list in this script already uses, no new parsing shape introduced
+#     for one field. Grepped the rest of this codebase for the same class (an Azure CLI TSV
+#     boolean compared against a lowercase literal) - the two other row-embedded-boolean sites
+#     (teardown-verify.sh VERIFY 5's own `purgeProtectionEnabled` column, and this repo's
+#     `properties.autoProvision` queries) are print-only or a string enum, not a broken compare;
+#     every OTHER lowercase-literal compare in the teardown scripts (`group exists -o tsv`, a
+#     bare scalar) is a `jq`-parsed JSON boolean or a workflow input string, neither of which
+#     goes through the Azure CLI TSV formatter at all - see the WORKLOG entry for this fix round
+#     for the full site-by-site accounting.
+#
 # Order matters:
 #   1. Databricks: submit the WORKSPACE delete --no-wait --force-deletion (never `az group
 #      delete` the managed RG directly - it still carries an RP deny-assignment, F2, even with
@@ -350,7 +387,7 @@ for sub in "${SUBS[@]}"; do
   mapfile -t rg2pre_names <<< "$rg2pre_names_out"
   for rg in "${rg2pre_names[@]:-}"; do
     [ -z "$rg" ] && continue
-    if ! az_run rg2pre_resource_ids_out resource list --resource-group "$rg" --subscription "$sub" --query "[].id" -o tsv; then
+    if ! az_run_retry rg2pre_resource_ids_out resource list --resource-group "$rg" --subscription "$sub" --query "[].id" -o tsv; then
       echo "::error::resource list failed for RG ${rg} (sub ${sub}) while enumerating resources for the resource-scoped diagnostic-settings sweep: ${AZ_RUN_STDERR}"
       exit 1
     fi
@@ -358,7 +395,7 @@ for sub in "${SUBS[@]}"; do
     mapfile -t rg2pre_resource_ids <<< "$rg2pre_resource_ids_out"
     for res_id in "${rg2pre_resource_ids[@]:-}"; do
       [ -z "$res_id" ] && continue
-      if ! az_run rg2pre_diag_names_out rest --method get \
+      if ! az_run_retry rg2pre_diag_names_out rest --method get \
           --url "${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}" \
           --query "value[].name" -o tsv; then
         if is_auth_error "$AZ_RUN_STDERR"; then
@@ -412,7 +449,7 @@ echo "== Phase 2 step 2: RG sweep (naming pattern, --no-wait submission) =="
 declare -a deleted_rgs=()
 declare -a deleted_subs=()
 for sub in "${SUBS[@]}"; do
-  if ! az_run rgs_out group list --subscription "$sub" --query "$RG_SWEEP_QUERY" -o tsv; then
+  if ! az_run_retry rgs_out group list --subscription "$sub" --query "$RG_SWEEP_QUERY" -o tsv; then
     echo "::error::RG list failed for subscription ${sub} - a failed list is never read as 'no RGs' (section 9.4): ${AZ_RUN_STDERR}"
     exit 1
   fi
@@ -452,7 +489,7 @@ done
 echo "== Phase 2 step 3: Key Vault soft-delete / purge =="
 KV_QUERY="[?contains(resourceGroup,'globaris') || contains(resourceGroup,'amba-monitoring')].[name,resourceGroup]"
 for sub in "${SUBS[@]}"; do
-  if ! az_run kv_rows_out keyvault list --subscription "$sub" --query "$KV_QUERY" -o tsv; then
+  if ! az_run_retry kv_rows_out keyvault list --subscription "$sub" --query "$KV_QUERY" -o tsv; then
     echo "::error::Key Vault list failed for subscription ${sub} - a failed list is never read as 'no vaults' (section 9.4): ${AZ_RUN_STDERR}"
     exit 1
   fi
@@ -474,7 +511,7 @@ for sub in "${SUBS[@]}"; do
     fi
   done
 
-  if ! az_run deleted_kvs_out keyvault list-deleted --subscription "$sub" \
+  if ! az_run_retry deleted_kvs_out keyvault list-deleted --subscription "$sub" \
       --query "[].[name, properties.location, properties.purgeProtectionEnabled]" -o tsv; then
     echo "::error::Key Vault list-deleted failed for subscription ${sub} - a failed list is never read as 'no soft-deleted vaults' (section 9.4): ${AZ_RUN_STDERR}"
     exit 1
@@ -485,7 +522,23 @@ for sub in "${SUBS[@]}"; do
     [ -z "$row" ] && continue
     dkv_name="$(printf '%s' "$row" | cut -f1)"
     dkv_loc="$(printf '%s' "$row" | cut -f2)"
+    # Azure CLI's TSV formatter renders a ROW-embedded boolean (this field is queried alongside
+    # name/location, not a bare scalar) capitalized - "True"/"False", Python's own str(bool) -
+    # never lowercase "true"/"false" (2026-07-30 fix round, live-verified against a standalone
+    # `knack` TSV-formatter harness; see this file's "AMENDED an eleventh time" header note for
+    # the full account and the live evidence this was NEVER firing). Lowercase the captured value
+    # before comparing rather than changing the compare's literal, so the fix is visible at the
+    # read site, not buried in a case-insensitive literal a future reader could miss.
+    #
+    # The extraction below is NOT redundant with the lowercasing: an earlier draft of this fix
+    # deleted it and left only the `${dkv_pp,,}` line, which under this script's `set -u`
+    # (line 284) is a fatal unbound-variable abort, not a silent misread. With four
+    # purge-protected vaults currently soft-deleted in the tenant that loop body is guaranteed
+    # to execute, so it would have killed the whole sweep at step 3 - before the MG-scope gate,
+    # the subscription sweep, VERIFY and the ADR-068 Phase 4 state reset. Caught at the
+    # code-review gate. Keep both lines.
     dkv_pp="$(printf '%s' "$row" | cut -f3)"
+    dkv_pp="${dkv_pp,,}"
     if [ "$dkv_pp" = "true" ]; then
       echo "  PURGE-PROTECTED (retention applies, cannot purge): ${dkv_name} (${dkv_loc}, sub ${sub}). Redeploy must set recover_soft_deleted_key_vaults=true (LESSON 56) or use a fresh name."
     else
@@ -586,8 +639,9 @@ else
   #     redundant at best (T1 containment already implies ownership) and were part of what let
   #     securityContacts/default-shaped misclassifications happen elsewhere (ADR-063 decision 7).
   #
-  #     Same list/delete conventions as every other step in this script otherwise: az_run for any
-  #     list whose stdout feeds a compare/mapfile (Finding #2), is_auth_error classification,
+  #     Same list/delete conventions as every other step in this script otherwise: az_run_retry
+  #     for any list whose stdout feeds a compare/mapfile (Finding #2, bounded retry on a
+  #     transient 5xx/429), is_auth_error classification,
   #     confirm_gone_or_fail_primary after every delete (no separate Phase 3 VERIFY step exists
   #     for MG scope - see that function's own comment, teardown-common.sh).
   echo "== Phase 2 step 4-pre: MG-scope extension LAST-CHANCE GATE (budgets, diagnostic settings, policy exemptions) - before any MG delete (FIX-1, demoted by ADR-063 decision 4) =="
@@ -604,7 +658,7 @@ else
 
     # Budgets (Microsoft.Consumption/budgets, BUDGETS_API_VERSION). No server-side name filter
     # (ADR-063 decision 6) - T1(a) containment already owns every row found at this MG.
-    if ! az_run mg_budget_names_out rest --method get \
+    if ! az_run_retry mg_budget_names_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
         --query "value[].name" -o tsv; then
       echo "::error::MG-scope budget list failed for MG ${mg} - a failed list is never read as 'no budgets' (section 9.4): ${AZ_RUN_STDERR}"
@@ -669,7 +723,7 @@ else
     # broad role (NOT loosened), for genuine dead-token/transport failures; a final else covers
     # anything matching neither shape. Mirrored at the identical site in teardown-disarm.sh (Phase
     # 0) with the SAME function body so the two cannot drift.
-    if ! az_run mg_diag_names_out rest --method get \
+    if ! az_run_retry mg_diag_names_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/microsoft.insights/diagnosticSettings?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}" \
         --query "value[].name" -o tsv; then
       echo "::error::MG-scope diagnostic-settings list failed for MG ${mg} - a failed list is never read as 'no diagnostic settings' (section 9.4): ${AZ_RUN_STDERR}"
@@ -700,7 +754,7 @@ else
     # filter (ADR-063 decision 6) - T1(a) containment already owns every row found at this MG;
     # is_owned_policy_object stays the T3 mechanism for scopes that are NOT themselves
     # estate-owned (subscription/tenant scope), not for MG scope.
-    if ! az_run mg_exemption_rows_out rest --method get \
+    if ! az_run_retry mg_exemption_rows_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
         --query "value[].[name, id]" -o tsv; then
       echo "::error::MG-scope policy exemption list failed for MG ${mg} - a failed list is never read as 'no exemptions' (section 9.4): ${AZ_RUN_STDERR}"
@@ -738,7 +792,7 @@ else
     fi
 
     echo "  MG ${mg}: moving any attached subscriptions to the tenant root"
-    if ! az_run mg_subs_out account management-group subscription show-sub-under-mg --name "$mg" \
+    if ! az_run_retry mg_subs_out account management-group subscription show-sub-under-mg --name "$mg" \
         --query "[].name" -o tsv; then
       echo "::error::listing subscriptions under MG ${mg} failed - a non-idempotent failure, not warn-and-continue: ${AZ_RUN_STDERR}"
       exit 1
@@ -771,8 +825,9 @@ fi
 #     unregistration. Runs AFTER step 4 (nothing here races a live MG-scope remediation) and
 #     BEFORE step 7's reconcile (so step 6's own submissions are covered by the existing wait
 #     and by Phase 3 - no new wait is introduced). Inherits every existing convention without
-#     exception: az_run for any call whose stdout is consumed as data (Trap 1), is_auth_error
-#     classification on every non-zero (Trap 2), auth-fail-loud, idempotent-absent-is-success.
+#     exception: az_run_retry for any call whose stdout is consumed as data (Trap 1, bounded
+#     retry on a transient 5xx/429), is_auth_error classification on every non-zero (Trap 2),
+#     auth-fail-loud, idempotent-absent-is-success.
 echo "== Phase 2 step 6: subscription-scope objects (budgets, cost exports, cost anomaly, diagnostic settings, Defender pricing reset, RP unregister) =="
 # ARM_BASE is sourced from teardown-common.sh (see the note near the top of this script).
 
@@ -797,7 +852,7 @@ for sub in "${SUBS[@]}"; do
   # pre-clearance). The LIST call stays on the `az consumption budget list` CLI wrapper
   # (its own internal api-version, not user-pinned) - only the raw-REST DELETE below is
   # explicitly version-pinned.
-  if ! az_run budget_names_out consumption budget list --subscription "$sub" \
+  if ! az_run_retry budget_names_out consumption budget list --subscription "$sub" \
       --query "[?contains(name,'globaris')].name" -o tsv; then
     echo "::error::consumption budget list failed for subscription ${sub} - a failed list is never read as 'no budgets' (section 9.4): ${AZ_RUN_STDERR}"
     exit 1
@@ -846,7 +901,7 @@ for sub in "${SUBS[@]}"; do
       echo "::error::RG-scope budget sweep: RG ${rg} (sub ${sub}) did not classify as estate-owned by is_estate_owned - structurally impossible for a row discover_live_rgs returned (RG_SWEEP_QUERY-filtered). Failing loud rather than silently skipping."
       exit 1
     fi
-    if ! az_run rg_budget_names_out rest --method get \
+    if ! az_run_retry rg_budget_names_out rest --method get \
         --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
         --query "value[].name" -o tsv; then
       echo "::error::RG-scope budget list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'no budgets' (section 9.4): ${AZ_RUN_STDERR}"
@@ -877,7 +932,7 @@ for sub in "${SUBS[@]}"; do
   # Cost exports (Microsoft.CostManagement/exports, api-version 2025-03-01 - LOAD-BEARING, do
   # NOT simplify to a default/older version: an older version reads these as absent, which is
   # exactly the false-negative that happened on 2026-07-16, docs/teardown-redesign.md 12.3).
-  if ! az_run export_names_csv rest --method get \
+  if ! az_run_retry export_names_csv rest --method get \
       --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/exports?api-version=2025-03-01" \
       --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
     echo "::error::cost export list (api-version 2025-03-01) failed for subscription ${sub} - a failed list is never read as 'no exports' (section 9.4): ${AZ_RUN_STDERR}"
@@ -903,7 +958,7 @@ for sub in "${SUBS[@]}"; do
   # 2023-11-01, list/delete BY SCOPE). Only the management subscription carries one today (the
   # InsightAlert cost anomaly alert), but the loop runs across all five so a future wave that
   # adds another is covered without a code change.
-  if ! az_run scheduled_action_names_csv rest --method get \
+  if ! az_run_retry scheduled_action_names_csv rest --method get \
       --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.CostManagement/scheduledActions?api-version=2023-11-01" \
       --query "join(',',value[?contains(name,'globaris')].name)" -o tsv; then
     echo "::error::cost anomaly scheduled action list failed for subscription ${sub} - a failed list is never read as 'no scheduled actions' (section 9.4): ${AZ_RUN_STDERR}"
@@ -929,7 +984,7 @@ for sub in "${SUBS[@]}"; do
   # filter does not apply on its own - the estate name is diag-activity-to-security-law (NOT
   # org-prefixed) - so this lists ALL names unfiltered and applies the ownership test
   # (globaris substring OR the exact estate name) per row below, before deleting anything.
-  if ! az_run diag_names_out monitor diagnostic-settings subscription list --subscription "$sub" \
+  if ! az_run_retry diag_names_out monitor diagnostic-settings subscription list --subscription "$sub" \
       --query "value[].name" -o tsv; then
     echo "::error::subscription diagnostic-settings list failed for subscription ${sub} - a failed list is never read as 'no diagnostic settings' (section 9.4): ${AZ_RUN_STDERR}"
     exit 1
@@ -1009,7 +1064,7 @@ done
 #     in step 7 (that wait is RG-shaped); VERIFY 6d/9 are the completion gate instead.
 echo "-- 6d: subscription-scoped policy exemptions (exact scope only) --"
 for sub in "${SUBS[@]}"; do
-  if ! az_run exemption_rows_out rest --method get \
+  if ! az_run_retry exemption_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.Authorization/policyExemptions?api-version=2022-07-01-preview&\$filter=atExactScope()" \
       --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
     echo "::error::subscription-scoped policy exemption list failed for subscription ${sub} - a failed list is never read as 'no exemptions' (section 9.4): ${AZ_RUN_STDERR}"
@@ -1061,7 +1116,7 @@ for sub in "${SUBS[@]}"; do
   mapfile -t rg6d_names <<< "$rg6d_names_out"
   for rg in "${rg6d_names[@]:-}"; do
     [ -z "$rg" ] && continue
-    if ! az_run rg_exemption_rows_out rest --method get \
+    if ! az_run_retry rg_exemption_rows_out rest --method get \
         --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
         --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
       echo "::error::RG-scope policy exemption list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'no exemptions' (section 9.4): ${AZ_RUN_STDERR}"
@@ -1173,8 +1228,9 @@ done
 #             anything for these lists, so this is a no-op on a clean estate and only acts if
 #             something (manual testing, a prior experiment) actually created one.
 #     Every list/delete follows the same conventions as every other class in this script:
-#     az_run for stdout-as-data, is_auth_error auth-fail-loud on non-zero list (a live
-#     subscription's own-scope list can never legitimately fail), idempotent-absent-is-success
+#     az_run_retry for stdout-as-data (bounded retry on a transient 5xx/429), is_auth_error
+#     auth-fail-loud on non-zero list (a live subscription's own-scope list can never
+#     legitimately fail), idempotent-absent-is-success
 #     on delete.
 echo "-- 6e: Microsoft.Security singletons (security contacts, automations, auto-provisioning, workspace settings) --"
 if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
@@ -1183,7 +1239,7 @@ if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
 fi
 
 # (i) securityContacts - T2 (is_estate_owned --singleton), NOT a name test (ADR-063 decision 7).
-if ! az_run sec_contact_rows_out rest --method get \
+if ! az_run_retry sec_contact_rows_out rest --method get \
     --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/securityContacts?api-version=${SECURITY_CONTACTS_API_VERSION}" \
     --query "value[].name" -o tsv; then
   echo "::error::securityContacts list failed for the security subscription - a failed list is never read as 'no contacts' (section 9.4): ${AZ_RUN_STDERR}"
@@ -1217,7 +1273,7 @@ for name in "${sec_contact_names[@]:-}"; do
 done
 
 # (ii) Microsoft.Security/automations (subscription-wide list; belt check - see comment above)
-if ! az_run sec_automation_rows_out rest --method get \
+if ! az_run_retry sec_automation_rows_out rest --method get \
     --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/automations?api-version=${SECURITY_AUTOMATIONS_API_VERSION}" \
     --query "value[].[name, id]" -o tsv; then
   echo "::error::Microsoft.Security/automations list failed for the security subscription - a failed list is never read as 'no automations' (section 9.4): ${AZ_RUN_STDERR}"
@@ -1259,7 +1315,7 @@ done
 # own comment, teardown-common.sh), so anything found here is by definition not something this
 # estate's IaC created and expects to keep.
 # default (neither is Terraform-managed in this repo - see the comment block above).
-if ! az_run sec_autoprov_rows_out rest --method get \
+if ! az_run_retry sec_autoprov_rows_out rest --method get \
     --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/autoProvisioningSettings?api-version=${SECURITY_AUTOPROVISIONING_API_VERSION}" \
     --query "value[?properties.autoProvision!='Off'].name" -o tsv; then
   echo "::error::autoProvisioningSettings list failed for the security subscription - a failed list is never read as 'nothing to revert' (section 9.4): ${AZ_RUN_STDERR}"
@@ -1281,7 +1337,7 @@ for name in "${sec_autoprov_names[@]:-}"; do
   fi
 done
 
-if ! az_run sec_workspace_rows_out rest --method get \
+if ! az_run_retry sec_workspace_rows_out rest --method get \
     --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/workspaceSettings?api-version=${SECURITY_WORKSPACESETTINGS_API_VERSION}" \
     --query "value[].name" -o tsv; then
   echo "::error::workspaceSettings list failed for the security subscription - a failed list is never read as 'nothing to revert' (section 9.4): ${AZ_RUN_STDERR}"
@@ -1329,7 +1385,7 @@ done
 #     applied; the SP's Security Administrator grant is the variable that determines whether
 #     this delete can succeed, not this script's own gating.
 echo "-- 6f: tenant Microsoft.AadIam/diagnosticSettings (security_law AAD diag) --"
-if ! az_run tenant_aad_diag_rows_out rest --method get \
+if ! az_run_retry tenant_aad_diag_rows_out rest --method get \
     --url "${ARM_BASE}/providers/Microsoft.AadIam/diagnosticSettings?api-version=${TENANT_AAD_DIAGNOSTIC_SETTINGS_API_VERSION}" \
     --query "value[].name" -o tsv; then
   if is_auth_error "$AZ_RUN_STDERR"; then
@@ -1472,7 +1528,7 @@ if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
   echo "::error::SECURITY_SUBSCRIPTION_ID is empty - cannot purge the Security LAW. This is already a VERIFY 0 failure class; failing loud here too rather than silently skipping."
   exit 1
 fi
-if ! az_run law_deleted_rows_out monitor log-analytics workspace list-deleted-workspaces \
+if ! az_run_retry law_deleted_rows_out monitor log-analytics workspace list-deleted-workspaces \
     --subscription "$SECURITY_SUBSCRIPTION_ID" \
     --query "[?name=='${SECURITY_LAW_WORKSPACE_NAME}'].[name, location, id]" -o tsv; then
   echo "::error::list-deleted-workspaces failed for the security subscription - a failed list is never read as 'not soft-deleted' (section 9.4): ${AZ_RUN_STDERR}"
@@ -1503,7 +1559,7 @@ for row in "${law_deleted_rows[@]:-}"; do
   fi
 
   echo "  Found soft-deleted Security LAW ${law_name} (rg ${law_rg}, location ${law_loc}) - recovering to purge"
-  if ! az_run law_rg_exists_out group exists --name "$law_rg" --subscription "$SECURITY_SUBSCRIPTION_ID" -o tsv; then
+  if ! az_run_retry law_rg_exists_out group exists --name "$law_rg" --subscription "$SECURITY_SUBSCRIPTION_ID" -o tsv; then
     echo "::error::checking existence of ${law_rg} failed - an auth/transport error, not a clean true/false: ${AZ_RUN_STDERR}"
     exit 1
   fi

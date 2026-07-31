@@ -29,6 +29,13 @@
 # gated) - see that section's own comment for why a 401/403 there is reported as a named
 # finding rather than aborting the whole probe (the probe's job is to report the FULL map in one
 # pass, including "this class could not be checked" as its own finding).
+#
+# AMENDED 2026-07-30 (transient-list-failure fix round - see teardown-common.sh's "AMENDED an
+# eighth time" header note for the full incident and mechanism). Every LIST/GET call below now
+# uses `az_run_retry` (teardown-common.sh) instead of `az_run` - same signature, bounded retry
+# (3 attempts, ~10s apart by default) ONLY for a transient HTTP 5xx/429 that is not also
+# auth-shaped. This probe is report-only (no deletes to protect from retry), so the change is
+# purely about not letting one ARM hiccup fail an otherwise-successful diagnostic pass.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,7 +93,7 @@ else
       continue
     fi
     mg_scope="$(mg_scope_path "$mg")"
-    if ! az_run p_mg_budget_rows_out rest --method get \
+    if ! az_run_retry p_mg_budget_rows_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
         --query "value[].name" -o tsv; then
       if is_auth_error "$AZ_RUN_STDERR"; then
@@ -109,7 +116,7 @@ else
 fi
 
 for sub in "${SUBS[@]}"; do
-  if ! az_run p_sub_budget_rows_out consumption budget list --subscription "$sub" --query "[].name" -o tsv; then
+  if ! az_run_retry p_sub_budget_rows_out consumption budget list --subscription "$sub" --query "[].name" -o tsv; then
     echo "::error::subscription-scope budget list failed for sub ${sub}: ${AZ_RUN_STDERR}"
     fail=1
   else
@@ -132,7 +139,7 @@ for sub in "${SUBS[@]}"; do
   mapfile -t p_rg_names_budgets <<< "$p_rg_names_budgets_out"
   for rg in "${p_rg_names_budgets[@]:-}"; do
     [ -z "$rg" ] && continue
-    if ! az_run p_rg_budget_rows_out rest --method get \
+    if ! az_run_retry p_rg_budget_rows_out rest --method get \
         --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Consumption/budgets?api-version=${BUDGETS_API_VERSION}" \
         --query "value[].name" -o tsv; then
       echo "::error::RG-scope budget list failed for RG ${rg} (sub ${sub}): ${AZ_RUN_STDERR}"
@@ -169,7 +176,7 @@ else
       continue
     fi
     mg_scope="$(mg_scope_path "$mg")"
-    if ! az_run p_mg_diag_rows_out rest --method get \
+    if ! az_run_retry p_mg_diag_rows_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/microsoft.insights/diagnosticSettings?api-version=${MG_DIAGNOSTIC_SETTINGS_API_VERSION}" \
         --query "value[].name" -o tsv; then
       if is_auth_error "$AZ_RUN_STDERR"; then
@@ -192,7 +199,7 @@ else
 fi
 
 for sub in "${SUBS[@]}"; do
-  if ! az_run p_sub_diag_rows_out monitor diagnostic-settings subscription list --subscription "$sub" --query "value[].name" -o tsv; then
+  if ! az_run_retry p_sub_diag_rows_out monitor diagnostic-settings subscription list --subscription "$sub" --query "value[].name" -o tsv; then
     echo "::error::subscription-scope diagnostic-settings list failed for sub ${sub}: ${AZ_RUN_STDERR}"
     fail=1
     continue
@@ -218,7 +225,7 @@ for sub in "${SUBS[@]}"; do
   mapfile -t p_rg_names_diag <<< "$p_rg_names_diag_out"
   for rg in "${p_rg_names_diag[@]:-}"; do
     [ -z "$rg" ] && continue
-    if ! az_run p_rg_resource_ids_out resource list --resource-group "$rg" --subscription "$sub" --query "[].id" -o tsv; then
+    if ! az_run_retry p_rg_resource_ids_out resource list --resource-group "$rg" --subscription "$sub" --query "[].id" -o tsv; then
       echo "::error::resource list failed for RG ${rg} (sub ${sub}) while enumerating resources for the diagnostic-settings check: ${AZ_RUN_STDERR}"
       fail=1
       continue
@@ -227,7 +234,7 @@ for sub in "${SUBS[@]}"; do
     mapfile -t p_rg_resource_ids <<< "$p_rg_resource_ids_out"
     for res_id in "${p_rg_resource_ids[@]:-}"; do
       [ -z "$res_id" ] && continue
-      if ! az_run p_res_diag_rows_out rest --method get \
+      if ! az_run_retry p_res_diag_rows_out rest --method get \
           --url "${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}" \
           --query "value[].name" -o tsv; then
         # A resource-scoped diagnostic-settings GET can legitimately 404/BadRequest for a
@@ -260,7 +267,7 @@ done
 #     could not be checked", not to fail all-or-nothing on one Security-Admin-gated class.
 # ---------------------------------------------------------------------------
 echo "-- 2b. Tenant Microsoft.AadIam/diagnosticSettings --"
-if ! az_run p_tenant_diag_rows_out rest --method get \
+if ! az_run_retry p_tenant_diag_rows_out rest --method get \
     --url "${ARM_BASE}/providers/Microsoft.AadIam/diagnosticSettings?api-version=${TENANT_AAD_DIAGNOSTIC_SETTINGS_API_VERSION}" \
     --query "value[].name" -o tsv; then
   if is_auth_error "$AZ_RUN_STDERR"; then
@@ -288,7 +295,7 @@ fi
 echo "-- 3. Policy exemptions (subscription / MG / RG scope, atExactScope) --"
 
 for sub in "${SUBS[@]}"; do
-  if ! az_run p_sub_ex_rows_out rest --method get \
+  if ! az_run_retry p_sub_ex_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${sub}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
       --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
     echo "::error::subscription-scope policy exemption list failed for sub ${sub}: ${AZ_RUN_STDERR}"
@@ -315,7 +322,7 @@ for sub in "${SUBS[@]}"; do
   mapfile -t p_rg_names_ex <<< "$p_rg_names_ex_out"
   for rg in "${p_rg_names_ex[@]:-}"; do
     [ -z "$rg" ] && continue
-    if ! az_run p_rg_ex_rows_out rest --method get \
+    if ! az_run_retry p_rg_ex_rows_out rest --method get \
         --url "${ARM_BASE}/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
         --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
       echo "::error::RG-scope policy exemption list failed for RG ${rg} (sub ${sub}): ${AZ_RUN_STDERR}"
@@ -344,7 +351,7 @@ else
       continue
     fi
     mg_scope="$(mg_scope_path "$mg")"
-    if ! az_run p_mg_ex_rows_out rest --method get \
+    if ! az_run_retry p_mg_ex_rows_out rest --method get \
         --url "${ARM_BASE}${mg_scope}/providers/Microsoft.Authorization/policyExemptions?api-version=${POLICY_EXEMPTIONS_API_VERSION_NEW}&\$filter=atExactScope()" \
         --query "value[].[name, properties.policyAssignmentId]" -o tsv; then
       if is_auth_error "$AZ_RUN_STDERR"; then
@@ -377,7 +384,7 @@ if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
   echo "::error::SECURITY_SUBSCRIPTION_ID is empty - cannot check Microsoft.Security singletons."
   fail=1
 else
-  if ! az_run p_pricing_rows_out rest --method get \
+  if ! az_run_retry p_pricing_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/pricings?api-version=${SECURITY_PRICINGS_API_VERSION}" \
       --query "value[].[name, properties.pricingTier]" -o tsv; then
     echo "::error::pricings list failed for the security subscription: ${AZ_RUN_STDERR}"
@@ -395,7 +402,7 @@ else
     done
   fi
 
-  if ! az_run p_contact_rows_out rest --method get \
+  if ! az_run_retry p_contact_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/securityContacts?api-version=${SECURITY_CONTACTS_API_VERSION}" \
       --query "value[].name" -o tsv; then
     echo "::error::securityContacts list failed for the security subscription: ${AZ_RUN_STDERR}"
@@ -411,7 +418,7 @@ else
     done
   fi
 
-  if ! az_run p_automation_rows_out rest --method get \
+  if ! az_run_retry p_automation_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${SECURITY_SUBSCRIPTION_ID}/providers/Microsoft.Security/automations?api-version=${SECURITY_AUTOMATIONS_API_VERSION}" \
       --query "value[].name" -o tsv; then
     echo "::error::Microsoft.Security/automations list failed for the security subscription: ${AZ_RUN_STDERR}"
@@ -438,7 +445,7 @@ if [ -z "${IDENTITY_SUBSCRIPTION_ID:-}" ]; then
   echo "::error::IDENTITY_SUBSCRIPTION_ID is empty - cannot check AADDS."
   fail=1
 else
-  if ! az_run p_aadds_rows_out rest --method get \
+  if ! az_run_retry p_aadds_rows_out rest --method get \
       --url "${ARM_BASE}/subscriptions/${IDENTITY_SUBSCRIPTION_ID}/providers/Microsoft.AAD/domainServices?api-version=${AADDS_DOMAINSERVICES_API_VERSION}" \
       --query "value[].[name, properties.replicaSets[0].replicaSetId]" -o tsv; then
     echo "::error::Microsoft.AAD/domainServices list failed for the identity subscription: ${AZ_RUN_STDERR}"
