@@ -154,7 +154,86 @@ region with the only positive Search evidence - but the mechanism is now single-
 **Recommended default: no action; revisit only if a Search create fails.** If it does, the disposition
 is a third region rather than a return to eastus2.
 
-**RESOLVED:** _(pending)_
+**UPDATE 2026-07-31 (architect, pre-clearance refresh #3). Items 0 to 5 are ALL DISCHARGED. Items 6 to 8 stand as register entries. Two items are added. Body above unedited, per append-only.**
+
+**Item 0 (was BLOCKING): DISCHARGED.** The teardown reached green, ADR-068 Phase 4 EXECUTED rather
+than skipped, and on 2026-07-31 the estate and all eleven state blobs were independently confirmed
+greenfield from live read-only queries: management groups at Tenant Root only, no estate resource
+groups in any of the five subscriptions, ten state blobs at 152-153 bytes and `platform/identity` at
+181 (its carve-out A floor), zero soft-deleted and zero live Log Analytics workspaces on the security
+subscription, and `rg-security-globaris-poc` absent entirely. The ADR-057 subscription-scope survivor
+class is also fully absent: budgets 0 and cost exports 0 across all five subscriptions, zero
+cost-anomaly scheduled actions, no subscription-level diagnostic settings. The gate this item
+specified is met in full.
+
+**The four unpurgeable `kv-sec-globaris-*` Key Vaults: ROOT-CAUSED, and neither hypothesis in the
+item above was right.** They are **genuinely purge-protected** and Azure correctly refused. All four
+report `purgeProtectionEnabled = True`, deleted between 2026-07-11 and 2026-07-31, scheduled purge
+between 2026-10-09 and 2026-10-29, all in eastus2. The script's "not purge-protected" classification
+was the defect: it compared an Azure CLI row-embedded boolean `True` against lowercase `"true"`, so
+**the guard had never once fired** and the script attempted purges it should have skipped. Only Azure
+server-side `MethodNotAllowed` prevented wrong purges across three consecutive live runs. PR #59
+(`f34c4b7`) fixes the compare. The CI SP's permissions were never in question. **Nothing to action.**
+
+**They cannot block Step 3, verified against pinned config.** `platform/security/main.tf:108` names
+the vault `kv-sec-${var.org_prefix}-${random_id.security_kv.hex}` - a random suffix, not a region
+token and not a stable name - so every apply generates a new name. The four orphans are name-unique,
+with no create-time collision and **no soft-delete RECOVERY path either**, which means OQ-063's
+recover-on-rebuild reasoning does not apply to this vault at all. `main.tf:110` also puts the new
+vault in `centralus`, so it will not even share a region with them.
+
+**Items 1 to 5: DISCHARGED by live checks RC-1 to RC-5, run 2026-07-31.**
+
+| Check | Bar | Measured |
+|---|---|---|
+| RC-1 compute quota, centralus, landingzones sub | Total Regional >= 10, `standardDSv4Family` >= 8 | **10 / 10 / 10. PASS with ZERO headroom improvement over eastus2** - see new item 9. |
+| RC-2 Entra Domain Services supports Central US | present | yes, and East US 2 for the secondary. **The query as written in the design doc was DEFECTIVE** (`domainServices` versus `DomainServices`, case-sensitive JMESPath, returns `[]`); corrected in `docs/region-flip-centralus-primary.md` on 2026-07-31. The documented consequence of an empty result was STOP and give the identity pillar a DR-region carve-out, so a one-character casing error would have triggered a real architectural change. |
+| RC-3 `gpt-5.4-nano` catalog in centralus | GA, `2026-03-17`, `DataZoneStandard`, not Deprecating | all four. PASS. |
+| RC-4 `Standard_D2s_v4` in centralus | zones 1,2,3, no restrictions | PASS. Load-bearing, because the AKS pool pins `availability_zones = ["1","2","3"]`. |
+| RC-5 Network Watchers, landingzones sub | `_centralus` and `_eastus2` both in `NetworkWatcherRG` | both present, **re-confirmed AFTER the teardown**. `NetworkWatcherRG` does not match `RG_SWEEP_QUERY` in `scripts/teardown-common.sh`, so no teardown can delete it. |
+
+**RC-6 and RC-7 were NOT run, and both are re-homed as pre-clearance conditions rather than left as
+design-doc checks.** Pre-clearance refresh #3 promotes them:
+
+- **RC-6 becomes PC-3REG, BLOCKING before Steps 5 to 9.** Six `az provider show` reads (APIM,
+  Databricks, Service Bus, Event Hubs, App Gateway, Log Analytics in centralus) against a Step 9 that
+  costs 60 to 180 minutes and, on an APIM failure mid-provision, leaves a soft-deleted instance that
+  reproduces PC-4S for the next rebuild. The cost asymmetry is not close.
+- **RC-7 becomes PC-1REG, BLOCKING before Step 2, and RE-SCOPED to Tenant Root Group.** As written
+  RC-7 was non-blocking, to be run after Step 1, at the `globaris` scope. Both placements are wrong
+  once the primary region moves. It is too late, because the first resource-group PUT into centralus
+  is **Step 2**, not Step 4, and an allowed-locations Deny fails there with a clean plan and no
+  plan-time signal. And it looks at a scope that does not exist at Step 0 while missing the one that
+  does: before Step 1 the only management group in the tenant is Tenant Root Group, which is exactly
+  where an externally-managed policy would sit. Strong prior evidence it passes (the repo assigns no
+  `listOfAllowedLocations` anywhere, and this estate has created resources in centralus continuously
+  for weeks), but it stays a gate per LESSON 34.
+
+**Item 9 (NEW, register, non-blocking). Every full rebuild cycle permanently strands one more
+purge-protected Key Vault for 90 days, and that vault is invisible to any name-keyed check.** Four
+have accumulated since 2026-07-11. They are inert and free, but the residue grows monotonically with
+rebuild count and nothing in the estate reclaims it. This is a design consequence of `random_id` plus
+`purge_protection_enabled = true`, not a defect: a stable name would collide on rebuild, and disabling
+purge protection would fail the posture bar. **Recommended default: accept it, and record it once
+rather than rediscovering it every teardown.** The actionable half is that any future soft-delete
+sweep must enumerate `deletedVaults` **by PREFIX** (`kv-sec-<org_prefix>-`), never by exact name -
+which differs from the Log Analytics and APIM soft-delete cases, both of which have stable derived
+names. Handed to devsecops as an extension of pre-clearance finding F4 (`teardown-probe.yml` has no
+soft-delete class at all).
+
+**Item 10 (NEW, register, non-blocking). RC-1's real finding is that the flip bought service
+availability, not compute capacity.** Central US carries the **same 10-vCPU Total Regional limit** that
+constrained eastus2, and the `standardDSv4Family` limit is also 10. The 2026-07-18 quota increase
+(OQ-043) was filed for eastus2 and quota is per-region, so it does not carry over. AKS fits at 6 of 10
+steady and 8 of 10 on surge, and it fits **only because nothing else in the estate draws regional vCPU
+in centralus** (`enable_sql` and `enable_app_service` false, Databricks ships zero clusters,
+`enable_synthetic_workload` false, AKS user pools quota-blocked). **Recommended default: proceed, and
+if the Step 9 AKS create returns a quota error do NOT retry** (LESSON 59, runbook matrix U5) - set
+`enable_kubernetes_platform = false` via a reviewed one-line tfvars PR, ship `bank-app-p1`
+network-only, which is exactly what that pattern exists for (LESSON 42), and file a centralus quota
+increase in parallel. Tracked as **PC-4REG** in the pre-clearance, as a watch-item rather than a gate.
+
+**RESOLVED:** _(items 0 to 5 discharged 2026-07-31; items 6 to 10 remain open as register entries)_
 
 ---
 

@@ -1473,3 +1473,676 @@ Class 2 LAW soft-delete is closed only on the teardown path, and every recorded 
 2ca1fc5), PC-1Y greenfield re-proof gates every root, ADR-067 parallelism and depends_on verified inert
 on plan, Defender plan set re-audited clean against the blocked-five list; closes OQ-064
 ```
+
+---
+
+# 2026-07-31 REFRESH #3 - re-clearance against `banking` @ `7fc8930`, with `centralus` as PRIMARY (ADR-069)
+
+**Date:** 2026-07-31
+**Author:** cloud-solutions-architect
+**Type:** REFRESH of all three sections above. Append-only: nothing above this line was edited.
+**Repo state this refresh was computed against:** `banking` @ `7fc8930`. Written on branch
+`docs/preclearance-refresh-2026-07-31-centralus`, cut off `banking` at `7fc8930`.
+**Supersedes:** the per-root verdict table in refresh #2 (S0). S1 through S8 are otherwise carried,
+amended where stated in T1.
+**Basis moved:** `ed3450e` -> `7fc8930`, three merges: PR #59 (`f34c4b7`, teardown hardening),
+**PR #60 (`fbb8e3f`, commit `91523dc`, the ADR-069 region flip, 39 files)** and PR #61 (`7fc8930`,
+worklog only).
+
+---
+
+## Why refresh #3 exists, and why a carry-forward is inadmissible
+
+Refresh #2 cleared an apply path whose primary region was `eastus2`. That path no longer exists.
+Three things changed underneath it:
+
+1. **Both of refresh #2's conditions were discharged LIVE on 2026-07-31.** PC-1SEC and PC-1Y both
+   passed, Step 3 `platform/security` applied green with zero Class-1/2/3 failures, and Steps 1 and 2
+   went green before it. The GO-CONDITIONAL was resolved by execution, not by re-reasoning.
+2. **That estate was then torn down deliberately, for the flip.** So refresh #3 starts from a
+   genuinely greenfield estate, which is the strongest possible starting position and is also the
+   only position in which the flip is safe at all: on a LIVE estate the AVM hub module derives
+   `fw-hub-${location}-001` and the flip would force-replace both Premium firewalls, both policies
+   and every hub route table, which is the unconditional STOP of LESSON 26 and runbook Rule 1.
+3. **PR #60 changed the apply path in every root.** Not by much, and T2 quantifies exactly how much,
+   but a pre-clearance that cannot see it is worthless.
+
+**One framing correction, carried from the 2026-07-31 WORKLOG close and repeated here because it
+changes what this document has to check.** ADR-069's Context frames the flip as "four eastus2 capacity
+workarounds accumulated". The user corrected that and the correction is the accurate one: **the
+binding constraint was AI Search.** `eastus2` returned `InsufficientResourcesAvailable`, Search could
+only be obtained in `centralus`, and it was already deployed there behind a cross-region private
+endpoint pinned back to an `eastus2` spoke. The estate's most constrained service was living in the
+secondary region. vCPU quota, App Service and SQL were symptoms, not the cause. This is why the
+`search_location` carve-out retires **by construction** rather than inverting, and it is why RC-1
+passing with no improvement in the vCPU limit is not a contradiction of the flip's rationale.
+
+**And one thing no gate here would have caught, stated so nobody builds a false confidence on this
+document.** The wrong region was found by the user looking at the portal and seeing the primary
+firewall in East US. `primary_location = "eastus2"` was internally consistent, so pre-clearance
+passed, every plan-scan passed, `validate` passed and three applies went green. These gates verify
+internal consistency, not correspondence with intent. No tightening of them would have caught it.
+
+---
+
+## T0. VERDICT
+
+**Whole-run verdict: GO-CONDITIONAL. There is no NO-GO, no open code blocker, and no root whose
+region behaviour I could not resolve from pinned sources.**
+
+The conditional load is materially LOWER than refresh #2's, because the two whole-run gates that
+carried it (PC-1Y and PC-1SEC) are now discharged from live read-only evidence gathered today, and
+five of the seven ADR-069 verification checks (RC-1 through RC-5) were run live and passed. What
+replaces them is smaller and more specific: **three new conditions, all read-only, all cheap, all
+caused by the flip.**
+
+### The three new conditions
+
+| ID | What must be proved | Command shape | Blocks | Why the flip creates it |
+|---|---|---|---|---|
+| **PC-1REG** | **No `listOfAllowedLocations` (or resource-group equivalent) policy assignment exists at Tenant Root Group scope whose allowed set excludes `centralus`.** | `az policy assignment list --scope /providers/Microsoft.Management/managementGroups/<tenant-root> --disable-scope-strict-match --query "[?contains(to_string(parameters),'listOfAllowedLocations')]" -o json` -> expect empty | **Step 2** and every later root | This is RC-7, PROMOTED from "non-blocking, at leisure, after Step 1, at the `globaris` scope" to **BLOCKING, before Step 2, at Tenant Root Group**. Rationale in T5 amendment 1. Under `eastus2`-primary this risk was silently discharged by three green applies; under `centralus`-primary it is not. A Deny of this class passes `validate`, passes `plan`, and fails at the first resource-group PUT. |
+| **PC-2REG** | **Each of the five plan bars is RE-MEASURED against `centralus`-primary and the actual recorded, before that root's apply.** 537 / 36 / 48 / 696 (Steps 1-4) plus 26 (Step 10 identity Pass 1). **Step 1 is now DISCHARGED** (run `30636497926`, `banking` @ `7fc8930`: **537 to add, 0 change, 0 destroy, 0 replace, 0 import**, 2 min 36 s - an exact match, not an approximate one). Four remain. | the plan dispatch ADR-060 already mandates; read `Plan: N to add` | **every remaining root** | T3 certifies all five as expected-unchanged from pinned module sources. That certification is exactly what makes a delta informative. **A delta of even ONE against a bar certified unchanged is a STOP requiring a fresh architect disposition, never a silent bar update.** A delta means something region-conditional exists that T3 did not find, and that is precisely the information the bar exists to surface. **Do not generalise from Step 1's exact match:** `platform/management-groups` contains no regional resources at all, which makes it the weakest available test of the construction argument. The roots that carry regional names and locations (2, 3, 4, 10) are where a delta could hide. |
+| **PC-3REG** | **Service availability in `centralus` for the six provider surfaces the spokes need.** APIM `service`, Databricks `workspaces`, Service Bus `namespaces`, Event Hub `namespaces`, App Gateway (`Microsoft.Network`), Log Analytics `workspaces`. | `az provider show --namespace <ns> --query "resourceTypes[?resourceType=='<type>'].locations"` | **Steps 5-9** | This is RC-6, PROMOTED from "non-blocking, run at leisure" to **BLOCKING before Steps 5-9**. Six read-only commands against a Step 9 that costs 60 to 180 minutes and, if APIM is unavailable, leaves a soft-deleted instance behind that reproduces PC-4S for the next rebuild. The cost asymmetry is not close. |
+
+### Carried conditions, unchanged in substance
+
+PC-2R (the 8 estate-managed Defender plans read `Free`), PC-3C (`Enable-DDoS-VNET` reads
+`DoNotEnforce` at BOTH the connectivity and landingzones MGs, after Step 1, before Step 4), PC-2X
+(re-set `PLATFORM_LAW_CUSTOMER_ID` after Step 2), PC-4C (the 89 zones plus the 11 the spokes look up,
+after Step 4), PC-3X (firewall private IPs `10.0.0.4` / `10.1.0.4`), PC-1S (zero subscription-scoped
+policy exemptions, before Step 8), PC-4S (APIM soft-delete gone, before Step 9), PC-5X (the
+`enable_acr_kubelet_binding` gate present and the tfvars flip NOT yet merged, before Step 9), PC-1H
+and PC-2H (Steps 13-14). T5 states which of these change shape under the flip. Only PC-2X, PC-4S and
+the corp-a2 shape row carry text that is now wrong; none changes behaviour.
+
+### PC-4REG - a WATCH-ITEM, explicitly not a blocker
+
+**RC-1 passed with zero headroom, and the pass is not the finding.** Central US carries the **same
+10-vCPU Total Regional limit** that constrained `eastus2`, and the `standardDSv4Family` limit is also
+10. Measured 10 / 10 / 10 on 2026-07-31. What that means for the AKS steps, concretely:
+
+- AKS is pinned at 3 x `Standard_D2s_v4` = **6 of 10 regional vCPUs steady**, `max_surge = "1"` =
+  **8 of 10 during an upgrade** (`landing-zones/bank-app-p1/aks.tf`, ADR-043). It fits, with 2 vCPUs
+  of margin at peak.
+- **It fits only because nothing else in the estate draws regional vCPU in `centralus`.**
+  `enable_sql` and `enable_app_service` are both false (ADR-031 / ADR-032, NOT lifted by the flip -
+  offer caps attach to the subscription, not the region, LESSON 42). Databricks ships with zero
+  clusters. `enable_synthetic_workload` is false. AKS user pools are quota-blocked at POC per OQ-043.
+  Any change to any of those during this rebuild consumes AKS's margin.
+- **The flip bought service availability, not compute capacity.** The 2026-07-18 quota increase
+  (OQ-043) was filed for `eastus2` and quota is per-region, so it does not carry over. If this
+  rebuild ever needs more than 10 regional vCPUs in `centralus`, it hits the identical wall.
+- **Pre-agreed disposition if Step 9 returns a quota error on the AKS create:** do NOT retry
+  (LESSON 59, matrix U5). Set `enable_kubernetes_platform = false` for this rebuild via a reviewed
+  one-line tfvars PR and ship `bank-app-p1` network-only, which is exactly what the
+  shippable-network-only pattern exists for (LESSON 42), and file a `centralus` quota increase in
+  parallel.
+
+### Per-root verdict table, re-cleared against `7fc8930`
+
+| # | Root | R#2 verdict | **R#3 verdict** | Basis, and what the flip changed |
+|---|---|---|---|---|
+| 1 | `platform/management-groups` | GO | **GO** | **R#2 verdict holds and is now stronger:** its gating condition PC-1Y is DISCHARGED live today (MGs at Tenant Root only, no estate RGs in any of 5 subscriptions, all 11 state blobs at the empty baseline). Flip surface in this root is one attribute: `location` on `avm-ptn-alz` 0.19.1, plus an `amba_alz_resource_group_location` default value that is not even in the graph while `enable_om_phase1 = false`. `lib/globaris.alz_architecture_definition.json` carries **zero** region literals (verified). Watch W3 (MG-budget collision provable only at this apply) carried unchanged. **PC-2REG DISCHARGED for this root: plan run `30636497926` at `7fc8930` measured 537 / 0 / 0 / 0 / 0 under `centralus`-primary, an exact match to the `eastus2`-primary bar.** |
+| 2 | `platform/management` | GO | **GO-CONDITIONAL** | **Tightened by the flip, on PC-1REG only.** Step 2 creates `rg-management-globaris-poc`, which is **the estate's first resource-group PUT into `centralus` under this configuration**. An allowed-locations Deny permitting `eastus2` and not `centralus` fails HERE, with a clean plan and no plan-time signal. Step 1 creates no resource group, so Step 1 going green proves nothing about it. Otherwise unchanged: 11 plain `location =` attributes, no count or `for_each` touched. PC-2X carried (text correction in T5). |
+| 3 | `platform/security` | GO-CONDITIONAL (PC-1Y, PC-1SEC, PC-2R) | **GO-CONDITIONAL (PC-2R only)** | **Two of three conditions DISCHARGED live today.** PC-1Y discharged. **PC-1SEC discharged on BOTH halves:** zero soft-deleted workspaces on the security subscription, zero live workspaces, and `rg-security-globaris-poc` does not exist at all, which satisfies the second half the runbook added on 2026-07-30 after a soft-delete query alone read as a false PASS. PC-2R (the 8 Defender plans read `Free`) is **not** covered by today's evidence and remains the single open condition. ADR-067's `depends_on` and `-parallelism=1` are unaffected by the flip (both are graph and CLI concerns, not regional). Region surface is 7 plain `location =` attributes. |
+| 4 | `platform/connectivity` | GO | **GO-CONDITIONAL** | PC-3C carried unchanged (region-independent: `Enable-DDoS-VNET` is checked by assignment name at two MG scopes and is created by Step 1 from a region-literal-free library). **This is the root the flip touches hardest and it still comes out clean:** the firewall, policy and route-table NAMES swap between the two hubs (`fw-hub-eastus2-001` and `fw-hub-centralus-001` exchange places), which is free on greenfield and would be a ForceNew replace on a live estate. The 696 bar is certified expected-unchanged in T3 from three independently checked mechanisms. Subject to PC-2REG. |
+| 5 | `landing-zones/corp-a1` | GO-CONDITIONAL | **GO-CONDITIONAL** | PC-4C after Step 4, unchanged. Plus **PC-3REG**. The spoke moves `eastus2` -> `centralus`; the RSV stays `ZoneRedundant` and Central US has availability zones. `data.azurerm_network_watcher` now resolves `NetworkWatcher_centralus`, re-confirmed live today. |
+| 6 | `landing-zones/corp-a2` | GO-CONDITIONAL | **GO-CONDITIONAL** | as corp-a1, plus the largest semantic change of any spoke: **corp-a2 was the DR spoke in `centralus` and is now the DR spoke in `eastus2`.** RSV stays `GeoRedundant` (Central US and East US 2 are a symmetric Azure pair, so geo-redundancy survives the swap intact). Traffic Analytics stays DISABLED on its flow log, and the reason inverts with **zero code change** (see T2). `data.azurerm_network_watcher.secondary` now resolves `NetworkWatcher_eastus2`, re-confirmed live today. |
+| 7 | `landing-zones/online-p1` | GO-CONDITIONAL | **GO-CONDITIONAL** | as corp-a1. App Gateway WAF_v2 and the Static Web App both move to `centralus`; Static Web Apps' allowed region set includes `centralus` (verified at ADR-069 time). App Gateway availability is inside **PC-3REG**. |
+| 8 | `landing-zones/bank-data-p1` | GO-CONDITIONAL | **GO-CONDITIONAL** | PC-1S re-confirm before dispatch, unchanged. **The flip IMPROVES this root:** the ADR-051 cross-region private endpoint stops existing (service and PE NIC are both `centralus`), and deviation register entries d6 (Fabric) and d7 (Search) retire by construction. RC-3 discharged live (`gpt-5.4-nano` `2026-03-17` `DataZoneStandard`, GA not Deprecating, in the `centralus` catalog). Databricks availability is inside **PC-3REG**. |
+| 9 | `landing-zones/bank-app-p1` Pass 1 | GO-CONDITIONAL | **GO-CONDITIONAL** | PC-4S, PC-5X, tfvars-flip-not-early, all carried. Plus **PC-3REG** (APIM, Service Bus, Event Hubs) and the **PC-4REG** quota watch. RC-4 discharged live (`Standard_D2s_v4` in `centralus`: zones 1,2,3, no restrictions), which is load-bearing because the pool pins `availability_zones = ["1","2","3"]`. The AKS control-plane UAI role assignment now targets `privatelink.centralus.azmk8s.io`, derived from `var.primary_location`, never a literal. |
+| 10 | `platform/identity` Pass 1 | GO | **GO** | **The load-bearing root of the entire flip, and it clears.** `identity_location` flipped to `centralus` in BOTH the root default and, for the first time, in `envs/poc.tfvars`. Left at `eastus2` this was the failure that produced a clean plan, a green apply, and the identity pillar plus an unmovable AADDS managed domain stranded in the DR region. **RC-2 discharged live: Entra Domain Services supports Central US** (and East US 2). ADR-055 two-pass unchanged. Subject to PC-2REG (the 26-add Pass 1 bar). |
+| 11 | `platform/identity` Pass 2 | GO | **GO** | as Pass 1, `enable_conditional_access_override=true`. Entra objects are tenant-scoped and carry no region, so the "exactly ten pure adds" bar is region-independent by construction. |
+| 12 | `landing-zones/bank-app-p1` Pass 2 | GO-CONDITIONAL | **GO-CONDITIONAL** | unchanged. The reviewed one-line `envs/poc.tfvars` flip merged AFTER Step 9 is green. |
+| 13 | `platform/management` (B7) | GO-CONDITIONAL | **GO-CONDITIONAL** | PC-1H unchanged. One flip consequence worth stating: `amba_alz_resource_group_location` now resolves to `centralus`, so `rg-amba-monitoring-001` lands in `centralus`. That is correct and intended, and it is a second resource-group-create-in-`centralus` surface, so it inherits **PC-1REG**. |
+| 14 | `platform/management-groups` (B7) | GO-CONDITIONAL | **GO-CONDITIONAL** | PC-1H plus PC-2H, unchanged. |
+
+**Movement summary:** one root improves (3, security: three conditions down to one), two tighten
+(2 and 4, both on new region conditions), eleven hold. No root moved to NO-GO and none is close to it.
+
+---
+
+## T1. What refresh #2 still carries, and what it does not
+
+| Section | Status at 2026-07-31 | Basis |
+|---|---|---|
+| **S0** verdict table | **SUPERSEDED by T0.** Both its gating conditions are discharged. | live evidence, this refresh |
+| **S0** PC-1Y definition (two halves, FM-1 / FM-2 asymmetry) | **CARRIED and reaffirmed as the right shape.** It is region-agnostic and it worked: today's check passed both halves, with ten blobs at 152-153 bytes and `platform/identity` at 181 (its natural floor under ADR-068 carve-out A). One text correction to the runbook's restatement, T5 amendment 4. | T5 |
+| **S1** carry-forward table from the 2026-07-29 addendum | **CARRIED**, with R3 further amended: there IS more apply-path drift now, fully enumerated in T2. | T2 |
+| **S2** apply-path drift `b6db5d0..ed3450e` (four files) | **CARRIED as history.** Superseded as the current drift statement by T2, which covers `ed3450e..7fc8930`. | T2 |
+| **S3a** ADR-067 Class 3 `depends_on` closed on the apply path | **CARRIED unchanged.** `depends_on` is a graph edge; region is not in the graph. `platform/security/sentinel.tf` is not in the PR #60 diff. | `git diff fbb8e3f^ fbb8e3f` |
+| **S3b** Class 1 `-parallelism=1` wired into the apply step, PC-3SEC 25-45 min budget | **CARRIED unchanged, and now LIVE-PROVEN.** Step 3 applied green on 2026-07-31 with zero Class-1/2/3 failures. `_tf-root.yml` is not in the PR #60 diff. | live run plus diff |
+| **S3c** `permanently_delete_on_destroy` inert at apply | **CARRIED unchanged.** `platform/security/providers.tf` is not in the PR #60 diff. | diff |
+| **S3d** PC-1SEC | **DISCHARGED, both halves, live today.** Retired as a condition; the check itself stays in Step 0 because it is one command and the class recurs. | live evidence |
+| **S4** lifecycle audit (2026-07-30, next full re-audit due 2026-08-04) | **CARRIED, with a targeted region delta in T4.** Still 1 day old, well inside the 14-day window. Nothing in the audit was region-parameterised. | T4 |
+| **S5** verified-vs-assumed | **REPLACED by T6**, which promotes most of it from assumed to verified. | T6 |
+| **S6** the dispatch sequence and its four amendments | **CARRIED**, with six further amendments in T5. Step 0 stands; amendments 2 (Step 3 duration), 3 (STOP row B6) and 4 (STOP row B7) all stand unchanged and are region-independent. | T5 |
+| **S7** findings F1 to F5 handed to other roles | **F1 and F2 are LANDED** (STOP rows B6 and B7 and the Step 3 duration are corrected in the runbook, verified in the file today). **F3, F4, F5 remain OPEN** and are re-stated in T8 with the flip's additions. | runbook, read today |
+| **S8** decisions and open items | **CARRIED.** OQ-064 stays resolved. OQ-062 is now partly proven by the 2026-07-31 green Step 3. | T9 |
+
+---
+
+## T2. Apply-path drift `ed3450e..7fc8930`, file by file
+
+Three merges. Two of them are off the apply path in one line each:
+
+- **PR #59 (`f34c4b7`), teardown hardening.** `az_run_retry` for 5xx/429 on **reads only** (never on
+  a delete, never when `is_auth_error` matches, so ADR-063 section 9.4 is preserved: a failed list is
+  still never read as clean and a 403 can be neither retried nor swallowed), plus the Key Vault
+  purge-protection boolean compare fix. **Entirely in `scripts/` and `teardown.yml`. Zero apply-path
+  surface.** Consequential for the NEXT teardown, not for this rebuild.
+- **PR #61 (`7fc8930`).** `WORKLOG.md` only.
+
+**PR #60 (`91523dc`, merged `fbb8e3f`) is the whole of the drift. 39 files. The single most useful
+sentence about it is this: exactly ONE of the 39 changes what gets PUT.**
+
+| Class | Files | What changes | Effect on the apply |
+|---|---|---|---|
+| **A. Changes what gets PUT** | **1**: `envs/poc.tfvars` | `primary_location` `eastus2` -> `centralus`; `secondary_location` `centralus` -> `eastus2`; **three NEW declarations** `identity_location`, `fabric_location`, `search_location`, all `centralus` | **This is the entire functional change of the flip.** Every CI path (`_tf-root.yml` line 351 plan, 366 apply, 397 destroy; `plan-on-pr.yml`) passes `-var-file=envs/poc.tfvars`, so these five values are authoritative for every root. |
+| **B. Changes a default that A overrides on every CI path** | **11** `variables.tf`: management-groups, management, security, connectivity, identity, bank-app-p1, bank-data-p1, corp-a1, corp-a2, online-p1, synthetic - carrying 13 `default =` changes | 13 default values realigned | **Zero effect on any CI plan or apply.** A tfvars value beats a root default unconditionally. These exist so a local `terraform plan` run WITHOUT `-var-file` targets the right region, which is the same defect class as `identity_location` itself. `bank-data-p1`'s `fabric_location` and `search_location` defaults were already `centralus` and did not move. |
+| **C. Comments and variable descriptions** | **27**: `bootstrap/main.tf`, `envs/poc.backend.hcl`, and 25 `.tf` files across connectivity (7), corp-a2 (4), bank-data-p1 (4), bank-app-p1 (3), synthetic (3), corp-a1 (2), online-p1 (2) | prose | **Zero effect.** Terraform does not evaluate comments, and a `description` on a variable has no plan or apply semantics. |
+
+### The named files, at S2's level of specificity
+
+**`platform/identity/variables.tf` (14 lines) - the load-bearing one, and it is correct.**
+`identity_location` default `eastus2` -> `centralus`, description rewritten to a heredoc that states
+the constraint. This root **declares no `primary_location` at all**, which is exactly why the default
+was live: the load-bearing-versus-cosmetic test is "a root default is load-bearing if and only if
+`envs/poc.tfvars` declares no variable of that name", and until PR #60 `envs/poc.tfvars` declared no
+`identity_location`. The variable reaches six sites, all plain `location =` attributes: the identity
+VNet, both subnets by inheritance, the AADDS managed domain (`domain-services.tf:100`) and the
+identity RSV (`domain-services.tf:244`). **What gets PUT changes: the unmovable AADDS managed domain
+now builds in `centralus`.** The `initial_replica_set` block carries only `subnet_id` and inherits the
+domain's region, so there is no second region input to keep in step. Belt and braces are both present:
+the default now matches and the tfvars entry now exists, so a local plan and a CI plan agree.
+**RC-2 discharged this live.** The AADDS domain name `aadds.globaris.org` is tenant-scoped and carries
+no region token, so there is no naming interaction with any prior instance.
+
+**`landing-zones/bank-data-p1/ai.tf` (45) and `variables.tf` (43) - the largest per-file deltas, and
+both are essentially prose.** Not one `default =` in `ai.tf`, and one in `variables.tf`
+(`primary_location`, class B). What actually happened is that two DEVIATION notes were converted into
+KEEP-THIS notes, which is the right direction and worth checking rather than trusting:
+
+- The AI Search `search_location` carve-out is now **numerically redundant**
+  (`search_location == primary_location == centralus`). ADR-069 decision 5 keeps the variable and the
+  implementation keeps it. Correct: it is the proven escape hatch, and deleting a mechanism the moment
+  its trigger stops firing is how the lesson gets un-learned.
+- **The Search private endpoint's `location = var.primary_location` override is KEPT, and this is the
+  single most important line in the two files.** It is numerically a no-op today. It is load-bearing
+  the moment the two values differ again: the pinned Search module v0.3.0 consumes the per-PE location
+  as `coalesce(each.value.location, var.location)`, so without the override the NIC falls through to
+  the SERVICE region and collides with `snet-private-endpoints`, which is the literal failure of apply
+  `29678062833`. The comment now says DO NOT DELETE, with the reason. Verified present at `7fc8930`.
+- Same shape for `fabric_location` in `fabric.tf`. Deviation register entries **d6 and d7 retire by
+  construction**, not by action.
+
+**`landing-zones/corp-a2/*` (25 lines in `dns_links.tf`, plus main, outputs, providers, variables) -
+the DR spoke swaps regions, and the one asymmetry inverts with zero code change.** `secondary_location`
+default `centralus` -> `eastus2` (class B). Everything else is prose. The interesting part is the
+Traffic Analytics comment block: TA stays DISABLED on this spoke's flow log and the REASON inverts.
+Before: "the only LAW is in eastus2 and there is no centralus LAW". After: "the only LAW is in
+centralus and there is no eastus2 LAW". **The asymmetry itself is unchanged, because the estate still
+has exactly one platform LAW and it follows the primary region.** No `traffic_analytics` block is
+added or removed, so this root's plan shape is identical. The flow-log storage account and the
+`data.azurerm_network_watcher.secondary` lookup both follow `var.secondary_location` and now resolve
+in `eastus2`. **`NetworkWatcher_eastus2` re-confirmed live today.**
+
+**`bootstrap/main.tf` (19) and `envs/poc.backend.hcl` (7) - comment blocks ONLY. I checked this
+specifically and it is clean.** Neither file changes a single value.
+`bootstrap/variables.tf:44 primary_location` is still `"eastus2"` and **is not in the diff at all**.
+`envs/poc.backend.hcl` still reads `resource_group_name = "rg-tfstate-mgmt-eus2-001"`,
+`storage_account_name = "stglobaristfstate01"` and `container_name = "tfstate"`, unchanged.
+**Nothing in the diff moves bootstrap, and nothing changes the backend the deploy roots initialise
+against.** The added comments record why: the state key vault is purge-protected with 90-day
+retention, so a delete would block the vault name for 90 days (LESSON 57 class, no retry recovers it);
+state is a management-plane dependency with no data-plane coupling; and anti-correlation is the better
+posture, because keeping state out of the primary workload region means a `centralus` regional event
+still leaves state readable. The bootstrap comment also records the fact the implementer established
+independently and the ADR had not stated: **bootstrap receives no `-var-file` from any workflow, so
+its default is genuinely live** and must not be flipped. That is the correct reason, written down.
+
+### Three deliberate non-changes, each of which reads as an obvious tidy-up
+
+Recorded so a future reader does not "fix" them:
+
+1. **`bootstrap` stays `eastus2`** and is absent from the value diff, for the reasons above.
+2. **ADR-031 and ADR-032 gates stay `false`.** `enable_sql` and `enable_app_service` are not in
+   `envs/poc.tfvars` at all, so the root defaults govern and both remain `false`. Their descriptions
+   were updated to say explicitly that ADR-069 does NOT lift them, because the restriction attaches to
+   the subscription OFFER, not the region (LESSON 42; ADR-032 proved `eastus2` compute quota was
+   healthy, so the App Service failure was never regional).
+3. **The Search PE `location` override stays** despite becoming numerically redundant.
+
+### The one thing in class A that deserved a second look, and clears
+
+Adding `identity_location`, `fabric_location` and `search_location` to `envs/poc.tfvars` means those
+three values are now supplied to **all eleven roots**, and only one or two roots declare each. Ten
+roots therefore emit `Warning: Value for undeclared variable` on every plan and apply.
+
+**This is safe, and it is proven safe rather than reasoned safe.** Terraform errors on an undeclared
+variable supplied via `-var` on the command line but only WARNS for one supplied via `-var-file`.
+`envs/poc.tfvars` has carried root-specific variables that most roots do not declare since the
+scaffold (`identity_domain_name`, `appgw_capacity`, `enable_fabric_capacity`,
+`bank_app_p1_spoke_address_space` and others) across every green apply this estate has ever had.
+`_tf-root.yml` uses no `-detailed-exitcode` and no warning-to-error escalation on the plan or apply
+steps, so a warning cannot fail a run. **No behaviour change.**
+
+---
+
+## T3. The plan bars, assessed from the pinned module sources
+
+ADR-069 decision 9 claims the bars hold by construction. **I assessed that claim rather than
+inheriting it, and it holds for all five, with one honest caveat inside the Step 4 assessment.**
+
+Classification used: **(a)** expected to hold unchanged, **(b)** expected to move by a stated
+predictable delta, **(c)** genuinely unknown, must be re-measured before its apply with no prediction.
+**No bar in this estate falls into (b) or (c).** Where that conclusion could be wrong, T3 says so
+explicitly rather than rounding it away.
+
+| Step | Root | Bar | Class | Derivation |
+|---|---|---|---|---|
+| 1 | `platform/management-groups` | **537 adds** | **(a) unchanged - and now EMPIRICALLY CONFIRMED** | `var.primary_location` reaches exactly two places in this root. (i) `amba_policy_default_values.amba_alz_resource_group_location` - consumed ONLY when `enable_om_phase1 = true`, which is `false` at Step 1, so the AMBA architecture is not selected and this value is not in the graph. (ii) `module.alz_management_groups.location` on `Azure/avm-ptn-alz` 0.19.1, where `location` sets the location attribute of policy-assignment managed identities. It is **not** a `for_each` key, **not** a `count`, and **not** a filter. The address set is generated from `lib/globaris.alz_architecture_definition.json`, which I grepped for region strings and which contains **none**. No `listOfAllowedLocations` parameter is set anywhere in the repository. **Predicted exactly 537. Measured exactly 537** (run `30636497926`, 2 min 36 s, 0 change / 0 destroy / 0 replace / 0 import). |
+| 2 | `platform/management` | **36 adds** | **(a) unchanged** | `var.primary_location` appears 11 times, every one a plain `location =` attribute on a resource that exists unconditionally (RG, platform LAW, Automation Account, action group, budgets, cost exports, dashboard, workbook). No count, no `for_each`, no conditional expression consumes it. Checked specifically for the Azure Automation linked-workspace region-mapping constraint, which IS region-pair-sensitive: **the repo creates no `azurerm_log_analytics_linked_service`** (that resource appears only in module-cache examples), and the Automation Account is joined to the LAW by a diagnostic setting, which is cross-region-safe. **36 must be exactly 36.** |
+| 3 | `platform/security` | **~48 adds** | **(a) unchanged** | 7 plain `location =` attributes (RG, Security LAW, Key Vault, Event Hub namespace, two Defender-adjacent resources, one Sentinel-adjacent resource). Everything else in this root is subscription-scoped (the 8 Defender pricing PUTs), workspace-scoped (Sentinel onboarding, 10 scheduled alert rules, the connectors, 2 automation rules) or MG-scoped (2 policy assignments) - none of which carries a region. The Key Vault and Event Hub namespace names carry NEW `random_id` suffixes regardless of region, so the "new random suffixes" sub-check is unaffected. **Whatever the measured value was under `eastus2`, it is unchanged.** |
+| 4 | `platform/connectivity` | **EXACTLY 696 adds** | **(a) unchanged, and this is the one that needed the work** | Three mechanisms could plausibly have moved it. All three were checked in the pinned sources and none does. Detail below. |
+| 10 | `platform/identity` Pass 1 | **26 adds** | **(a) unchanged** | 6 plain `location =` attributes off `var.identity_location`. The AADDS managed domain, its replica set (which carries only `subnet_id` and inherits the domain's region), the VNet, its subnets, the NSG, the RSV, the RG, the policy exemption and the hub peering are all unconditional. Nothing counts or keys on region. **26 must be exactly 26.** (Step 11's "exactly ten pure adds" is Entra-only and carries no region at all, so it is region-independent by construction.) |
+
+**Do not generalise Step 1's exact match to the rest.** `platform/management-groups` creates no
+regional resources whatsoever, which makes it the weakest available test of the construction argument.
+It confirms that nothing in the ALZ policy engine is region-conditional, which is worth having, and
+nothing more. Steps 2, 3, 4 and 10 are where a delta could actually hide.
+
+### Step 4's three mechanisms, in detail
+
+**1. The AVM hub module templates `${location}` into 19 default names.**
+`Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet` v0.17.1, `locals.names.tf`, renders
+`var.default_naming_convention` through `templatestring(..., { location = value.location, sequence =
+... })`. The 19 defaults include `fw-hub-${location}-${sequence}`,
+`fwp-hub-${location}-${sequence}`, `pip-fw-hub-${location}-${sequence}`,
+`rt-hub-fw-${location}-${sequence}` and `rt-hub-std-${location}-${sequence}`. **Every one of these is
+an ATTRIBUTE of a resource whose Terraform address is keyed on the hub key (`primary` / `secondary`),
+never on the rendered name.** The observable effect is that `fw-hub-eastus2-001` and
+`fw-hub-centralus-001` **swap which hub they belong to**. Zero address change, zero count change, and
+free on greenfield. (On a live estate this is a ForceNew replace of both firewalls, both policies and
+every hub route table - the reason ADR-069 decision 6 gated its own dispatch behind a green teardown.)
+The two hub VNet names are repo-supplied literals, `vnet-hub-primary-*` and `vnet-hub-secondary-*`, and
+do not move at all - which is the topology proving out its own role-based naming.
+
+**2. The AVM private-DNS-zones module renames 5 of 93 zones and adds or removes none.**
+`Azure/avm-ptn-network-private-link-private-dns-zones` v0.23.1. Read from `locals.tf` at the pin:
+
+- Region substitution happens in exactly one expression, inside
+  `private_link_private_dns_zones_filtered_and_processed`:
+  `replace(replace(zone_value.zone_name, "{regionCode}", local.location_geo_code), "{regionName}", local.location_name)`.
+  It rewrites the `zone_name` VALUE and nothing else.
+- **The `for_each` key is `zone_key`, not the rendered zone name.**
+  `module "avm_res_network_privatednszone" { for_each = local.private_link_private_dns_zones_final }`,
+  and `private_link_private_dns_zones_final` is keyed on `item.zone_key` - a stable map key such as
+  `azmk8s`, optionally suffixed by a `custom_iterator` key that is a subzone name, never a region.
+  **So the address set is byte-identical across the flip.**
+- The only mechanism in this module that COULD change the zone count is
+  `private_link_private_dns_zones_regex_filter`, whose `enabled` field **defaults to `false`** and
+  which `platform/connectivity/dns.tf` does not set. So no zone is filtered in or out.
+- `variables.tf` at the pin carries **93** `zone_name` entries, of which exactly **5** are templated:
+  `privatelink.{regionName}.azurecontainerapps.io`, `privatelink.{regionName}.kusto.windows.net`,
+  `privatelink.{regionName}.azmk8s.io`, `privatelink.{regionCode}.backup.windowsazure.com`,
+  `privatelink.{regionName}.prometheus.monitor.azure.com`.
+- Geo-code resolution verified from the pinned `Azure/avm-utl-regions` data file, not assumed:
+  **`centralus` -> `cus`**, `eastus2` -> `eus2`. So `privatelink.eus2.backup.windowsazure.com` becomes
+  `privatelink.cus.backup.windowsazure.com`, and the four `{regionName}` zones follow the obvious
+  shape.
+- Both hubs set `enabled_resources.private_dns_zones = false`, so the hub module's own nested
+  private-DNS submodule creates nothing and there is no second zone set to reason about.
+
+**Consequence for PC-4C: 89 stays 89**, and the 11 zones the spokes look up stay resolvable. The only
+one of the 11 that moves is the AKS zone, and `landing-zones/bank-app-p1/dns_links.tf:28` builds it as
+`"privatelink.${var.primary_location}.azmk8s.io"` from the same variable that drives the module's
+`location`, so producer and consumer **cannot diverge**. Verified in the file: it is derived, never a
+literal. Same for the AKS control-plane UAI role-assignment scope in `aks.tf`.
+
+**3. The honest caveat: the hub module's availability-zone list is a LIVE lookup, not repo content.**
+`main.availability_zones.tf` instantiates `Azure/avm-utl-regions` v0.5.2 with **`use_cached_data =
+false`**, which issues a real ARM `locations` action against the connectivity subscription at plan
+time, and derives
+`local.availability_zones[key] = module.regions[0].regions_by_name[value.location].zones`. That value
+feeds `zones` on the Azure Firewall and on its public IPs via
+`coalesce(value.firewall.zones, local.availability_zones[key])`.
+
+- **It cannot move the bar.** `zones` is a list ATTRIBUTE on a resource that exists either way, never
+  a `count` and never a `for_each`. The 696 is unaffected in both directions.
+- **It can silently change posture.** If the subscription's logical zone mapping for `centralus`
+  returned fewer than three zones, both firewalls would be created less zone-redundant than intended,
+  with a clean plan and a green apply. RC-4 (`Standard_D2s_v4` in `centralus` with zones 1,2,3 and no
+  restrictions) is indirect but strong evidence against that, and Central US is documented as having
+  availability zones. **Flagged as a QA acceptance item after Step 4, not as a gate:** confirm both
+  firewalls report three zones.
+
+**Therefore 696 must be exactly 696.**
+
+### The rule that makes all of this useful
+
+**PC-2REG, restated because it is the point of T3.** I am certifying five bars as
+expected-unchanged, and one of the five has already come back exact. That certification is what gives
+a delta its meaning.
+
+> **A delta of even ONE against any bar certified unchanged above is a STOP. It is never a silent bar
+> update, never a "close enough", and never an operator judgement call.** A delta means something
+> region-conditional exists in this estate that the analysis above did not find, and finding that
+> thing is the entire reason the bar is written down. Escalate to the architect for a fresh
+> disposition before the apply.
+
+This applies with particular force to 696, which the runbook words as "EXACTLY 696 ... not an
+estimate, it is today's verified dry-plan". **Record the measured value for each of the five. Those
+recorded values become the verified `centralus`-primary precedent that replaces the `eastus2`-primary
+ones for the next rebuild.** Step 1's is already recorded above.
+
+---
+
+## T4. Lifecycle audit delta (LESSON 40/41)
+
+The governing audit was run 2026-07-21 and re-checked 2026-07-30 (refresh #2, S4). That is **1 day
+old**, comfortably inside the 14-day re-audit window, so this is a **region delta only**, not a
+re-derivation. **Next full re-audit still due 2026-08-04** if dispatch has not happened by then.
+
+**Nothing in the S4 audit was region-parameterised.** The eight Defender plans and the blocked-five
+enablement list, Foundational CSPM's 2026-10-27 opt-in move, the Sentinel portal-only deprecation,
+App Gateway v1 retirement and the WAF_v2 inline-configuration retirement (the estate is already on the
+separate WAF-policy model), Azure Firewall Premium, and the pinned-provider `features` argument are
+all service-lifecycle facts that do not vary by region. **All of S4 carries.**
+
+Region-specific items checked for this refresh:
+
+| Item | Status | Basis |
+|---|---|---|
+| **Traffic Analytics with a `centralus` Log Analytics workspace** | **PASS.** Central US is a supported region both for enabling Traffic Analytics on flow logs and for the linked Log Analytics workspace. This matters because four of the five spokes set `traffic_analytics { workspace_region = var.primary_location }` and an unsupported region returns `400 InvalidTAWorkspaceRegion` at apply, with a clean plan. | Microsoft Learn, Traffic Analytics supported regions, checked 2026-07-31 |
+| Central US: availability zones, symmetric pairing with East US 2, not access-restricted | **PASS**, carried from ADR-069's 2026-07-30 verification against Microsoft Learn "List of Azure regions" (page updated 2026-07-28). 1 day old. | ADR-069 evidence ledger |
+| `gpt-5.4-nano` `2026-03-17` `DataZoneStandard` in the `centralus` catalog | **PASS, live.** GA, not Deprecating. Model catalogs are per-region and this is exactly the LESSON 40/41 class, so it was right to re-check rather than carry. | RC-3, run live 2026-07-31 |
+| Entra Domain Services in Central US | **PASS, live.** | RC-2, run live 2026-07-31 |
+| `Standard_D2s_v4` in Central US: zones 1,2,3, no restrictions | **PASS, live.** | RC-4, run live 2026-07-31 |
+| Static Web Apps allowed regions include `centralus` | **PASS**, carried from ADR-069. | ADR-069 evidence ledger |
+| APIM, Databricks, Service Bus, Event Hubs, App Gateway, Log Analytics in `centralus` | **NOT VERIFIED. This is PC-3REG.** | T0 |
+| Module and provider pins | **UNCHANGED.** No `.terraform.lock.hcl` and no module `version =` is in the `ed3450e..7fc8930` delta. `azurerm` stays pinned at **4.71.0** by every root's committed lock file; `avm-ptn-alz` 0.19.1, hub-and-spoke 0.17.1 and private-DNS-zones 0.23.1 are all unchanged. | `git diff --stat` |
+
+---
+
+## T5. Runbook amendments
+
+**The runbook `docs/2026-07-22-full-estate-rebuild-runbook.md` remains the executable document. Its
+14-step order, its per-step commands and its STOP/rollback matrix all stand. Refresh #2's amendments
+1 to 4 all stand, and amendments 3 and 4 (STOP rows B6 and B7) are confirmed LANDED in the file.**
+This refresh changes six things, and answers the three shape questions directly.
+
+**Answering the three questions asked, before the amendments:**
+
+- **Step 0's PC-1Y and PC-1SEC checks do NOT change shape under `centralus`-primary.** PC-1Y
+  enumerates management groups, resource groups across five subscriptions, and eleven state blobs.
+  None of those is keyed on region: the MG names come from `lib/`, the RG names are
+  `rg-<role>-${org_prefix}-${environment}`, and the blob names are root paths. PC-1SEC queries the
+  workspace by the name `law-security-globaris-poc`, which `platform/security/main.tf` builds from
+  `org_prefix` and `environment` **only** - it carries no region token, so the same single query
+  covers both the pre-flip and post-flip workspace. Both checks are also **discharged live today**.
+- **The PC-3C DDoS gate before Step 4 does NOT change shape.** It reads the enforcement mode of the
+  `Enable-DDoS-VNET` assignment at two MG scopes. Enforcement mode is not region-parameterised, and
+  the assignment is created by Step 1 from a library file that carries no region literal. The reason
+  it exists (the ADR-026 `LinkedAuthorizationFailed` 403 on the hub VNet PUT) applies identically to a
+  `centralus` hub. **Keep it exactly as written.**
+- **The PC-2X `PLATFORM_LAW_CUSTOMER_ID` re-set does NOT change shape, but one clause inside it is
+  now false.** The command reads `law-platform-globaris-poc` in `rg-management-globaris-poc`, neither
+  of which carries a region token, so the command is correct unchanged. Its justification paragraph
+  says corp-a2 never reads the value "because Traffic Analytics is deliberately omitted from its DR
+  flow log (no centralus LAW, LESSON 43)". After the flip the LAW is in `centralus` and corp-a2 is in
+  `eastus2`, so the correct clause is **"no eastus2 LAW"**. The behaviour is unchanged: corp-a2 still
+  needs the value SUPPLIED because a no-default variable hard-fails if unset.
+
+**Amendment 1 (NEW, BLOCKING). Add PC-1REG to Step 0, and re-scope RC-7 to reach it.**
+
+RC-7 in `docs/region-flip-centralus-primary.md` section 7.3 is listed as non-blocking, to be run at
+leisure, **after Step 1**, at the `globaris` MG scope. That placement is wrong in two ways once the
+primary region moves:
+
+- **It is too late.** The first resource-group PUT into `centralus` is **Step 2**, not Step 4. An
+  allowed-locations Deny fails there, with a clean plan and no plan-time signal at all.
+- **It looks at a scope that does not exist yet at Step 0**, and it misses the one that does. Before
+  Step 1 the only management group in the tenant is Tenant Root Group, which is precisely where an
+  externally-managed policy would sit.
+
+Replacement, run at Step 0 alongside 0a and 0b:
+
+```
+az policy assignment list \
+  --scope /providers/Microsoft.Management/managementGroups/<tenant-root-id> \
+  --disable-scope-strict-match \
+  --query "[?contains(to_string(parameters),'listOfAllowedLocations')].{name:name, scope:scope, params:parameters}" -o json
+```
+
+**Bar: empty.** A non-empty result whose allowed set excludes `centralus` is a **STOP** before Step 2.
+**Strong prior evidence it passes**, stated so nobody treats this as alarmism: the repository assigns
+no `listOfAllowedLocations` parameter anywhere (grepped, zero hits, including both ALZ library files),
+and this estate has been creating resources in `centralus` continuously for weeks (secondary hub,
+corp-a2, Fabric F2, AI Search). It stays a gate anyway per LESSON 34: the policy matrix is read live at
+every ancestor scope, never reasoned about. **Repeat it at the `globaris` scope after Step 1**, which
+is the original RC-7, now cheap because it is the same command with a different scope.
+
+**Amendment 2 (NEW, BLOCKING). Promote RC-6 to PC-3REG, before Steps 5-9.**
+
+Six `az provider show` reads against a Step 9 that costs 60 to 180 minutes and, on an APIM failure
+mid-provision, leaves a soft-deleted instance that reproduces PC-4S for the next rebuild. Move it out
+of design-doc section 7.3 "at leisure" and into the Steps 5-9 pre-flight next to PC-4S and PC-5X.
+
+**Amendment 3 (correction). PC-4S's APIM purge `--location` must NOT be flipped.**
+
+Section 2a currently reads
+`az apim deletedservice purge --service-name apim-bank-app-p1-globaris-poc --location eastus2`.
+**`eastus2` is CORRECT and must be left alone:** the argument identifies where the SOFT-DELETED
+instance lives, and that instance was created under `eastus2`-primary. An operator doing a
+find-and-replace pass for the flip would break this command. Better still, remove the hazard entirely
+by reading the location from the `deletedservices` response rather than hardcoding it - because after
+THIS rebuild a cancelled APIM create leaves a soft-delete in `centralus` and the hardcoded value
+becomes wrong in the other direction.
+
+**Amendment 4 (correction, not caused by the flip). Step 0a's state-blob baseline sentence is
+misleading.**
+
+It reads "roughly 150-250 bytes (observed floor 181)". The ADR-068 Phase 4 canonical empty document is
+**152-153 bytes**; **181 is `platform/identity`'s** natural terraform-empty floor under carve-out A,
+which is never Phase-4 reset. As written, the sentence makes a perfectly correct 152 read as
+suspicious. Today's live check saw exactly that split: ten blobs at 152-153 and identity at 181.
+Suggested replacement: "Ten blobs should read 152-153 bytes (the ADR-068 Phase 4 canonical empty
+document); `platform/identity` should read about 181 (its natural terraform-empty floor - carve-out A
+means it is never Phase-4 reset). Anything materially larger is FM-2; absent or under 100 bytes is
+FM-1."
+
+**Amendment 5 (correction). Two inverted Traffic Analytics clauses.**
+
+Runbook line 393 (inside PC-2X) and line 505 (the corp-a2 row of the Steps 5-9 shape table) both say
+"no centralus LAW". After the flip both should read **"no eastus2 LAW"**. Behaviour unchanged; the
+text is now the wrong way round, and it is exactly the kind of thing an operator reasons from at 2am.
+
+**Amendment 6 (addition). Record the measured plan values.**
+
+Steps 1, 2, 3, 4 and 10 should each gain an explicit instruction to WRITE DOWN the observed
+`Plan: N to add`, because those five numbers become the verified `centralus`-primary precedent that
+replaces the `eastus2`-primary ones. PC-9S already says this for the spokes; it should be said for the
+platform roots too, since those are the ones carrying hard bars. Step 1's value is already recorded in
+T3 (537, run `30636497926`).
+
+**Unchanged and load-bearing:** ADR-060 sequential single-target dispatch, one run in flight at a
+time, never `target=all` for apply; **plan then scan then apply, per root, every time** (the rule that
+was got wrong twice on 2026-07-31 - `action=apply` skips the Plan step entirely, so a bare apply means
+no plan-scan and no U1 or B4 check); `--ref banking` on every dispatch; the identity two-pass override
+on Steps 10-11 only; U1 (any `-/+` replace or unexpected destroy is a hard STOP) and U5 (a second
+identical failure on one root after one clean retry is a HARD STOP, counting toward the project's
+4-failure bar).
+
+---
+
+## T6. VERIFIED vs ASSUMED (this replaces S5)
+
+### Verified LIVE by the operator lane, 2026-07-31, read-only, sourced not inferred
+
+| ID | Result |
+|---|---|
+| **PC-1Y half 1 (live Azure)** | **PASS.** Management groups: Tenant Root Group only, no `globaris` tree. No estate resource groups in any of the 5 subscriptions - only `NetworkWatcherRG` (protected from teardown by design), the bootstrap state RG in the management sub, and a Cloud Shell storage RG in landingzones. |
+| **PC-1Y half 2 (state backend)** | **PASS.** All 11 blobs at the empty baseline: ten at 152-153 bytes, `platform/identity` at 181 (carve-out A floor). No blob materially larger, so **no FM-2**. No blob absent or under 100 bytes, so **no FM-1**. |
+| **PC-1SEC, both halves** | **PASS.** Zero soft-deleted workspaces on the security subscription, zero live workspaces, and `rg-security-globaris-poc` does not exist at all. The second half is the one the runbook added on 2026-07-30 after the soft-delete query alone read as a false PASS. |
+| **PC-1R (ADR-057 subscription-scope survivors)** | **PASS.** Across all five estate subscriptions: budgets 0, cost exports 0. Management sub cost-anomaly scheduled actions 0. Security sub subscription-level diagnostic settings none. This is the class that voided the 2026-07-23 attempt and that the 2026-07-30 failed teardown left intact. |
+| **Step 1 plan bar under `centralus`-primary** | **PASS, exact.** Run `30636497926`, ref `banking` @ `7fc8930`: **537 to add, 0 change, 0 destroy, 0 replace, 0 import, 0 "already exists"**, 2 min 36 s. |
+| **RC-1** compute quota, `centralus`, landingzones sub | **PASS with ZERO headroom improvement.** Total Regional 10, `standardDSv4Family` 10, `standardDASv4Family` 10. See PC-4REG in T0 - this is the finding, not the pass. |
+| **RC-2** Entra DS supports Central US | **PASS.** And East US 2 for the secondary. |
+| **RC-3** `gpt-5.4-nano` catalog in `centralus` | **PASS.** GA, `2026-03-17`, `DataZoneStandard`, not Deprecating. |
+| **RC-4** `Standard_D2s_v4` in `centralus` | **PASS.** Zones 1,2,3, no restrictions. |
+| **RC-5** Network Watchers | **PASS, re-confirmed 2026-07-31 AFTER the teardown.** `NetworkWatcher_centralus` and `NetworkWatcher_eastus2` both live in `NetworkWatcherRG` in the landingzones subscription. This matters more than it looks: `data.azurerm_network_watcher` resolves at PLAN time, before any VNet exists to trigger auto-creation, and a missing watcher has already blocked corp-a1 and online-p1 once in this estate's history. Four spokes now need `_centralus` and corp-a2 needs `_eastus2`. Both present. Independently, `NetworkWatcherRG` does not match `RG_SWEEP_QUERY` in `scripts/teardown-common.sh`, so no teardown can delete it. |
+| **The four soft-deleted `kv-sec-globaris-*` Key Vaults** | **ROOT-CAUSED, and they do NOT block Step 3.** See T7. |
+
+### RC-6 and RC-7 were NOT run
+
+Stated plainly because the ADR-069 check set is only 5 of 7 discharged. **RC-6** (service availability
+sweep for `centralus`) becomes **PC-3REG**, blocking Steps 5-9. **RC-7** (allowed-locations policy)
+becomes **PC-1REG**, re-scoped to Tenant Root Group and promoted to blocking before Step 2.
+
+### Verified by me, from the repository, at `7fc8930`
+
+The complete apply-path delta and its per-file disposition (T2); that exactly one of the 39 files in
+PR #60 changes what gets PUT; that `bootstrap/variables.tf` is not in the diff and
+`envs/poc.backend.hcl` changes no value; that all 16 `eastus2`/`centralus` literals in the repo are
+accounted for and that `red_team_geo_location = "westeurope"` is a seventeenth, deliberately a third
+region; that only six names in repo-owned code interpolate a region variable and all six are DATA
+SOURCE lookups (five Network Watchers, one AKS private DNS zone); that no `listOfAllowedLocations`
+parameter is assigned anywhere in the repo including both ALZ library files; that
+`lib/globaris.alz_architecture_definition.json` contains no region literal; that the private-DNS-zones
+module's `for_each` key is `zone_key` and not the rendered zone name, that its regex filter defaults
+off, and that `centralus` maps to geo code `cus` in the pinned regions data; that the hub module
+templates `${location}` into 19 default NAMES and derives `zones` from a live regions lookup that is an
+attribute and never a count; that both hubs set `enabled_resources.private_dns_zones = false`; that the
+repo creates no `azurerm_log_analytics_linked_service`; that `enable_sql`, `enable_app_service`,
+`enable_vpn_gateway`, `enable_dns_resolver`, `enable_bastion`, `enable_acr_kubelet_binding` and
+`enable_synthetic_workload` are all still off; that `_tf-root.yml` passes `-var-file` on plan, apply
+and destroy and uses no `-detailed-exitcode`.
+
+### NOT verified, because it requires live Azure and I am read-only on it
+
+| ID | What must be proved | Owner | Blocks |
+|---|---|---|---|
+| **PC-1REG** | No allowed-locations Deny at Tenant Root Group excluding `centralus` | operator | **Step 2** onward |
+| **PC-3REG** | APIM, Databricks, Service Bus, Event Hubs, App Gateway, Log Analytics available in `centralus` (RC-6) | operator | **Steps 5-9** |
+| **PC-2R** | The 8 estate-managed Defender plans read `Free` in the security subscription | operator | **Step 3** |
+| **PC-3R** | `Microsoft.CostManagementExports` is `NotRegistered` in the management subscription | operator | Step 2 |
+| **PC-3C** | `Enable-DDoS-VNET` reads `DoNotEnforce` at BOTH the connectivity and landingzones MGs | operator | Step 4 |
+| **PC-4S** | The soft-deleted APIM instance is gone. Do not assume the auto-purge fired. | operator | Step 9 |
+| **PC-1S** | Zero subscription-scoped policy exemptions in the landingzones subscription | operator | Step 8 |
+| **PC-2REG** | The remaining four plan bars (36 / 48 / 696 / 26), re-measured and recorded | operator | Steps 2, 3, 4, 10 |
+| **Live policy matrix at every ancestor MG scope** | Structurally unreadable below Tenant Root until Step 1 creates the tree. PC-1REG covers the one scope that exists now; PC-3C and the re-run of PC-1REG at `globaris` cover it after Step 1. | operator | Steps 2, 4 |
+| **Tenant prerequisites** | CI SP role bindings, RP registrations, federated credentials, identity licensing. Carried as W1: Step 1 IS the live confirmation and fails loud there before any estate resource is touched. Step 1's clean plan on 2026-07-31 is partial evidence (it proves read access at MG scope), not full. | operator | Step 1 |
+| **Firewall zone redundancy after Step 4** | Both firewalls should report three zones. Attribute-level, cannot move the 696 bar, but can silently degrade posture (T3 mechanism 3). QA acceptance item, not a gate. | qa-engineer | advisory |
+| **GitHub known-issues sweep** | Open `azurerm` and AVM issues at 4.71.0 affecting these roots. Refresh #2 checked the `azurerm_security_center_subscription_pricing` 409 class specifically and did not sweep the other nine roots. **I did not extend that sweep this pass either.** Named rather than implied. | architect / operator | advisory |
+
+---
+
+## T7. The four soft-deleted Key Vaults: root-caused, inert, and a standing consequence worth recording once
+
+OQ-066 item 0 recorded four `kv-sec-globaris-*` vaults refusing purge with `MethodNotAllowed` and
+asked whether the teardown script's "not purge-protected" classification was wrong or the CI SP lacked
+the purge action. **Neither. They are genuinely purge-protected and Azure correctly refused.** Read
+live from the security subscription on 2026-07-31: all four report `purgeProtectionEnabled = True`,
+deleted between 2026-07-11 and 2026-07-31, scheduled purge dates between 2026-10-09 and 2026-10-29, all
+four in `eastus2`.
+
+This is exactly consistent with the PR #59 finding that the guard compared an Azure CLI row-embedded
+boolean `True` against lowercase `"true"`, so **the guard had never once fired** and the script
+attempted purges it should have skipped. Only Azure's server-side `MethodNotAllowed` prevented wrong
+purges across three consecutive live runs. PR #59 fixes the compare, so the next teardown classifies
+them correctly and skips them. **Nothing to action.**
+
+**Why they cannot block Step 3, verified against the pinned config rather than assumed.**
+`platform/security/main.tf:108` names the vault
+`kv-sec-${var.org_prefix}-${random_id.security_kv.hex}`. The name carries a **random suffix - not a
+region token and not a stable name** - so every apply generates a new vault name. The four
+soft-deleted vaults are therefore name-unique orphans with **no create-time interaction of any kind**:
+no collision, and no soft-delete RECOVERY path either, which means **OQ-063's recover-on-rebuild
+reasoning does not apply to this vault at all**. Additionally `main.tf:110` sets
+`location = var.primary_location`, now `centralus`, so the new vault will not even land in the same
+region as the four orphans.
+
+**Two consequences, stated here so they are recorded once rather than rediscovered every teardown:**
+
+1. **Every full rebuild cycle permanently strands one more purge-protected Key Vault for 90 days.**
+   Four have accumulated since 2026-07-11. They are inert and free, but the residue grows monotonically
+   with rebuild count and nothing in the estate reclaims it. That is a design consequence of
+   `random_id` plus `purge_protection_enabled = true`, not a defect. It is the correct trade for a
+   security root: a stable name would collide on rebuild, and disabling purge protection would fail the
+   posture bar.
+2. **Because the name is random rather than derived, this vault is invisible to any pre-clearance check
+   keyed on a known name.** Any future soft-delete sweep must enumerate `deletedVaults` **by prefix**
+   (`kv-sec-<org_prefix>-`), never by exact name. Refresh #2's S8 flagged the general principle (every
+   pre-clearance needs a soft-delete-recovery sweep across every soft-deleting type); this is the
+   concrete shape that sweep must take for Key Vault, and it differs from the Log Analytics and APIM
+   cases, both of which DO have stable derived names.
+
+---
+
+## T8. Findings handed to other roles (NOT fixed here, docs-only pass)
+
+Refresh #2's F1 and F2 are LANDED (verified in the runbook today). F3, F4 and F5 remain open and are
+restated. F6 to F10 are new.
+
+| # | Finding | Owner | Severity |
+|---|---|---|---|
+| F3 (carried) | **`-parallelism=1` is applied to `platform/security`'s apply step only, not its destroy step.** Destroying `azurerm_security_center_subscription_pricing` resets the plan to `Free`, which is the SAME subscription-level pricing write that 409s under concurrency. Eight destroy concurrently at default parallelism during ADR-066 Phase 1's security-layer destroy. | devsecops-engineer | Medium. Not a blocker for this apply; a plausible first failure of the next teardown. |
+| F4 (carried) | **`teardown-probe.yml` has no soft-delete class.** It never queries `list-deleted-workspaces`, APIM `deletedservices`, deleted Key Vaults or deleted Cognitive Services accounts. Every one is a proven rebuild-blocker class here. **Extended by T7: the Key Vault query must enumerate by PREFIX, because the vault name is random.** | devsecops-engineer | Medium. |
+| F5 (carried) | `DEPLOYMENT.md` section 3 Step 5 still lists `PLATFORM_LAW_CUSTOMER_ID` as a `platform/security` secret; Step 3 still describes connectivity as creating a VPN Gateway and DNS Private Resolver. Both false since 2026-07-21. **Now also carries stale region text.** | technical-writer | Low. |
+| **F6 (NEW)** | **Runbook amendments 1 to 6 in T5.** Amendments 1 and 2 are new BLOCKING gates (PC-1REG at Step 0, PC-3REG before Steps 5-9). Amendments 3 to 6 are corrections: the APIM purge `--location` must NOT be flipped, the state-blob baseline sentence is misleading, two Traffic Analytics clauses are inverted, and the five platform plan bars need a "record the actual" instruction. | devsecops-engineer | **Amendments 1-3 should land before dispatch.** 4-6 are low but cheap. |
+| **F7 (NEW)** | **`check-adr-landed.sh` and the append-only ADR convention are in structural tension, and the register is already wrong twice.** The awk keeps the FIRST `- **Landed:**` line in each ADR block (`if (!has_landed)`), while `DECISIONS.md`'s own preamble instructs authors to "update the field by appending a dated addendum, never by editing the body". So an ADR whose landing is corrected by addendum **still reports `NOT IMPLEMENTED`**. Both **ADR-068** (Phase 4 proven live 2026-07-31) and **ADR-069** (merged as PR #60) are affected today. This is the exact class of false register the check was built to prevent, inverted. Fix: take the LAST `- **Landed:**` line in the block, and add one line to the preamble saying an addendum must repeat the field as a top-level `- **Landed:**` list item. | devsecops-engineer | Medium. A traceability check that reports false negatives is worse than none, because it is trusted. |
+| **F8 (NEW)** | **`shellcheck` should be added to `preflight.sh` as a best-effort step, the same shape as `actionlint`.** The PR #59 regression (a deleted `cut -f3` leaving an unassigned variable, fatal under `set -u`) is SC2154 territory. `bash -n` cannot catch it, `preflight.sh` has no shell-execution step, and only a careful human read of the diff caught it. | devsecops-engineer | Medium. |
+| **F9 (NEW)** | **`check-claims.sh` exits 1 on `banking` from pre-existing failures in its own fixtures and two docs**, so it cannot currently serve as a red/green gate. Either fix the fixtures or scope the check so a clean tree passes. | devsecops-engineer | Low, but it silently devalues a gate. |
+| **F10 (NEW)** | **ADR-068 Phase 4's absent-blob fallback creates blobs where none existed**, clearing three standing FM-1 alarms at `INFO`. Either it should warn loudly or INV-STATE needs amending. Carried from the 2026-07-31 close; unchanged by the flip but still open. FM-1 is the "state lost while resources may be live" class, and silently manufacturing state is the wrong default for it. | devsecops-engineer | Medium. |
+
+---
+
+## T9. Decisions and open items
+
+- **No new ADR.** This refresh introduces no new decision. ADR-060 (sequential single-target),
+  ADR-061 (Secret determinism), ADR-066, ADR-067, ADR-068 and **ADR-069** all govern unchanged; this
+  document confirms ADR-069's implementation rather than revising it.
+- **ADR-069 gets a dated addendum** (written this pass, in `DECISIONS.md`): `Landed:` moves from
+  `NOT IMPLEMENTED` to `91523dc (PR #60)`, the Context framing is corrected to the AI Search
+  rationale, and decision 3's "every region-valued input" wording is narrowed to exclude
+  `red_team_geo_location`.
+- **`docs/region-flip-centralus-primary.md` RC-2 casing defect CORRECTED this pass** (one line):
+  `resourceType=='domainServices'` becomes `resourceType=='DomainServices'`. As written the query
+  returns `[]`, and the documented consequence of an empty result is STOP, keep `identity_location` at
+  `eastus2`, and give the identity pillar an explicit DR-region carve-out. **A one-character casing
+  error in a check would have triggered a real architectural change.** Same defect class as the Key
+  Vault `True`/`true` compare fixed in PR #59 the same night, and worth naming as a class: **a check
+  whose failure mode is an empty result is only as trustworthy as its exact-match string.**
+- **OQ-066 updated** (append, dated): item 0 DISCHARGED, items 1 to 5 DISCHARGED by RC-1 to RC-5, the
+  four Key Vaults root-caused, RC-6 and RC-7 re-homed as PC-3REG and PC-1REG, and a new item 9
+  recording the monotonic purge-protected-vault residue and the prefix-enumeration requirement.
+- **OQ-062 is partly proven.** Item (f) is closed by the 2026-07-31 green Step 3, which created a
+  fresh workspace with zero "already exists" on any `Microsoft.SecurityInsights` child. Item (e), the
+  az-sweep step 7b backstop, remains unexercised.
+- **OQ-065 limb B remains open** (no state-provenance gate on the deploy path). Step 0a is its
+  zero-code half and it worked today.
+- **Watch-item carried unchanged:** promote `banking` to `main`, or block `main` from `deploy.yml`
+  dispatch, as a post-rebuild cleanup. Related to OQ-057.
+- **ADR-worthy, deliberately NOT written this pass to hold scope:** the generalisation behind
+  PC-1REG, that **a change to a foundational estate-wide value silently re-arms every environmental
+  precondition that was previously discharged only by successful execution.** Three green applies
+  proved `eastus2` was permitted by the live policy matrix, by the offer, and by the model catalog.
+  They proved nothing whatsoever about `centralus`. The corollary is a pre-clearance rule worth
+  writing down properly: when a foundational value changes, every check whose evidence was
+  "it worked last time" reverts to unproven, regardless of how many times it worked. Recorded here and
+  under OQ-066 so it is not lost.
+
+---
+
+## Proposed commit message (refresh #3)
+
+```
+docs(preclearance): 2026-07-31 refresh #3 - re-clear the full-estate rebuild against 7fc8930 with
+centralus primary; whole-run GO-CONDITIONAL, PC-1SEC and PC-1Y discharged live, three new region
+conditions (PC-1REG allowed-locations at tenant root before Step 2, PC-2REG re-measure the plan bars,
+PC-3REG service availability before Steps 5-9); PR #60's 39 files assessed with exactly one changing
+what gets PUT; five plan bars certified expected-unchanged from pinned module sources and Step 1
+confirmed exact at 537; ADR-069 addendum lands the Landed field and narrows decision 3; RC-2 casing
+defect corrected
+```
