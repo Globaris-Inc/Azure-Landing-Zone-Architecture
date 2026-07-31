@@ -110,6 +110,12 @@ variable "enable_corp_policy_exemptions" {
   default     = true
 }
 
+variable "enable_dine_ownership_exemptions" {
+  description = "Create the ADR-070 RG-scoped MITIGATED policy exemptions on the workload RG that make Terraform the sole writer of diagnostic settings (Deploy-Diag-LogsCat at the globaris MG) and of private-endpoint DNS zone groups (Deploy-Private-DNS-Zones at the corp MG), plus their separate 300s propagation sleep. SEPARATE flag from enable_corp_policy_exemptions on purpose: that one is the OQ-024 flow-log Waiver on the network RG, this one is the DINE ownership ruling on the workload RG, and the two must be independently reversible. Default true; set false only if ADR-070 is reversed or this spoke leaves the corp MG."
+  type        = bool
+  default     = true
+}
+
 # ---------------------------------------------------------------------------
 # Wave B5 - data platform flags (docs/b5-data-platform-design.md; ADR-048)
 # ---------------------------------------------------------------------------

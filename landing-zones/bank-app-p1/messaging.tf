@@ -82,6 +82,17 @@ module "event_hubs" {
   }
 
   tags = local.common_tags
+
+  # ADR-070 decision 2 / LESSON 35 - the ZONE-GROUP half. pe-evhns-* carries
+  # groupId "namespace", which BOTH Deploy-Private-DNS-Zones members
+  # DINE-Private-DNS-Azure-EventHubNamespace and
+  # DINE-Private-DNS-Azure-ServiceBusNamespace test for (neither definition
+  # checks the target resource type), so both are exempted in
+  # policy_exemptions.tf and this edge waits for that to propagate. A
+  # "deployedByPolicy" group here would be mutually exclusive with the
+  # module-managed group, not a duplicate. The diagnostics half rides the native
+  # setting below, which carries its own edge.
+  depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }
 
 # DEVIATION: native diagnostic setting for the Event Hubs namespace. The 0.1.0 module
@@ -107,6 +118,23 @@ resource "azurerm_monitor_diagnostic_setting" "event_hubs" {
   enabled_metric {
     category = "AllMetrics"
   }
+
+  # ADR-070 decision 2 / LESSON 35. Deploy-Diag-LogsCat member eventhub-namespaces
+  # would write a second setting named "setByPolicy-LogAnalytics" on this same
+  # namespace, which is duplicate ingestion billed twice on the Analytics meter -
+  # a cost and governance concern, not a create blocker. The differently-named
+  # policy setting cannot block this resource: Azure permits five diagnostic
+  # settings per resource and the azurerm pre-create GET is scoped to the exact
+  # configured name. It is also dormant while the assignment's logAnalytics
+  # parameter is the zero-GUID placeholder (OQ-021).
+  #
+  # This is the FIFTH diagnostic setting in this root and the easiest to miss,
+  # because it is authored natively rather than through an AVM
+  # diagnostic_settings input (the 0.1.0 module declares that input but never
+  # consumes it - see the DEVIATION note above), so it is covered explicitly
+  # here. Exempted in policy_exemptions.tf; this edge waits for the exemption to
+  # propagate.
+  depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }
 
 # ---------------------------------------------------------------------------
@@ -168,4 +196,17 @@ module "service_bus" {
   }
 
   tags = local.common_tags
+
+  # ADR-070 decision 2 / LESSON 35: both halves apply here.
+  #   - LIVE race: pe-sbns-* carries groupId "namespace", which BOTH
+  #     DINE-Private-DNS-Azure-ServiceBusNamespace and
+  #     DINE-Private-DNS-Azure-EventHubNamespace test for (neither checks the
+  #     target resource type), and Azure allows only one zone group per PE.
+  #   - Dormant: Deploy-Diag-LogsCat member servicebus-namespaces would write a
+  #     differently-named "setByPolicy-LogAnalytics" setting beside diag-sbns-*.
+  #     Duplicate ingestion and cost, not a create blocker, and blocked entirely
+  #     today by the zero-GUID logAnalytics parameter (OQ-021).
+  # All three members are exempted in policy_exemptions.tf; this edge waits for
+  # that to propagate.
+  depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }

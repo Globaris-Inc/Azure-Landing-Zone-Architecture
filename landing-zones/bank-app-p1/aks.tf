@@ -194,5 +194,25 @@ module "aks" {
 
   tags = local.common_tags
 
+  # ADR-070 NOTE - deliberately NOT gated on
+  # time_sleep.wait_dine_ownership_exemptions, and the reason is written down so
+  # the omission is not read as an oversight. There is simply nothing to exempt:
+  # Deploy-Diag-LogsCat's resourceTypeList has no
+  # microsoft.containerservice/managedclusters entry and the initiative carries
+  # no member for that type, so there is no reference id and inventing one would
+  # produce an exemption that silently does nothing (live enumeration
+  # 2026-07-31, PC-2DINE). The only AKS diagnostics policy above this
+  # root is "Resource logs in Azure Kubernetes Service should be enabled"
+  # (245fc9df-fa96-4414-9a0b-3738c2f7341c) inside Deploy-ASC-Monitoring and
+  # Deploy-MCSB2-Monitoring, whose allowedValues are AuditIfNotExists and
+  # Disabled only.
+  #
+  # Note that even where a member DOES exist, the diagnostics half of this ruling
+  # is a duplicate-ingestion control and not a create blocker (see the reasoning
+  # in policy_exemptions.tf), so diag-aks-* is no more exposed than its four
+  # siblings. The cluster also creates no private endpoint - the API server
+  # A record is written by the control-plane UAI into the shared azmk8s.io zone,
+  # which is a zone record and not a privateDnsZoneGroups child - so the workload
+  # RG needs no exemption at all.
   depends_on = [time_sleep.wait_aks_uai_rbac]
 }

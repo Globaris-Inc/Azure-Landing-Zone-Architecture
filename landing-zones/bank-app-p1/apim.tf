@@ -158,6 +158,24 @@ module "apim" {
   # (3h) governs, which covers the documented worst case (design doc section 9).
 
   tags = local.common_tags
+
+  # ADR-070 decision 2 / LESSON 35. APIM creates no private endpoint, so ONLY the
+  # diagnostics half applies here, and that half is a duplicate-ingestion and
+  # governance control rather than a create blocker: Deploy-Diag-LogsCat member
+  # apimanagement-service would write a second setting named
+  # "setByPolicy-LogAnalytics" beside diag-apim-*, which is a different name, and
+  # Azure permits five diagnostic settings per resource while the azurerm
+  # pre-create GET is scoped to the exact configured name. It cannot block this
+  # create, and it cannot write at all while the assignment's logAnalytics
+  # parameter is the zero-GUID placeholder (OQ-021).
+  #
+  # The edge is still worth its cost, for two reasons specific to this resource.
+  # APIM allLogs is one of the two largest ingestion volumes in the estate, so a
+  # silent duplicate here is the biggest recurring bill the ruling avoids; and
+  # this is the longest single provision in the build at 60 to 180 minutes, so
+  # anything that has to be redone after it is the most expensive rework
+  # available (ADR-070 decision 6). Exemption in policy_exemptions.tf.
+  depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }
 
 # ---------------------------------------------------------------------------
