@@ -134,8 +134,8 @@ is why the flip does not cascade.
 ### 3.1 Derived from the variable: no action, they track automatically
 
 **AVM hub module default naming convention.** `Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet`
-v0.17.1 templates `${location}` and `${sequence}` into 20 default names
-(`.terraform/modules/hub_and_spoke/variables.tf` lines 3-22). The repo does not override them, so
+v0.17.1 templates `${location}` and `${sequence}` into 19 default names
+(`.terraform/modules/hub_and_spoke/variables.tf` lines 3-21). The repo does not override them, so
 `fw-hub-eastus2-001` and `fw-hub-centralus-001` are **module output, not repo literals**. After the
 flip the primary firewall becomes `fw-hub-centralus-001` and the secondary `fw-hub-eastus2-001`:
 the two names swap hubs. The same applies to `fwp-hub-*`, `pip-fw-hub-*`, `rt-hub-fw-*`,
