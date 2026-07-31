@@ -3,7 +3,8 @@
 #          with default-deny, a UDR-egress AKS cluster cannot bootstrap without this
 #          set. Rules verified against Microsoft Learn aks/outbound-rules-control-egress
 #          (page dated 2026-06-18, fetched 2026-07-18). PRIMARY policy only: the bank
-#          spokes are eastus2-only and their UDRs point at 10.0.0.4; the secondary
+#          spokes are primary-region-only (centralus, ADR-069) and their UDRs point
+#          at 10.0.0.4, which is pinned by CIDR not region; the secondary
 #          policy stays rule-less (its firewall returns for mesh-route integrity).
 # Section: Banking wave B2 (docs/b2-aks-platform-design.md section 6; ADR-044)
 # Last updated: 2026-07-18

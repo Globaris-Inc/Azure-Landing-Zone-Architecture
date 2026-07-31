@@ -218,13 +218,21 @@ variable "identity_vnet_dns_servers" {
 }
 
 variable "identity_location" {
-  description = "Azure region for the identity VNet, Entra Domain Services, and RSV. Defaults to the primary region (eastus2) to co-locate with the primary hub it peers to."
+  description = <<-EOT
+    Azure region for the identity VNet, Entra Domain Services, and RSV. MUST equal
+    the estate primary region (centralus after ADR-069) to co-locate with the primary
+    hub it peers to. Declared in envs/poc.tfvars, which is authoritative; this default
+    is the safety net for a local plan run without -var-file. Diverging this from
+    primary_location strands the identity pillar in the DR region with a clean plan and
+    a green apply, and an Entra Domain Services managed domain cannot be moved to
+    another region after creation.
+  EOT
   type        = string
-  default     = "eastus2"
+  default     = "centralus"
 }
 
 variable "primary_hub_vnet_id" {
-  description = "ARM resource ID of the primary hub VNet (eastus2). From platform/connectivity output 'primary_hub_vnet_id'. Used for the identity-to-hub peering."
+  description = "ARM resource ID of the primary hub VNet. From platform/connectivity output 'primary_hub_vnet_id'. Used for the identity-to-hub peering."
   type        = string
   default     = ""
 }

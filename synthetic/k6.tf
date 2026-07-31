@@ -17,7 +17,8 @@
 #   - PROMPT.md §13.2 header says "k6 in ACI" but the body specifies "Azure
 #     Container Apps Jobs / Logic App timer". Going with Container Apps Jobs:
 #     simpler than ACI + Logic App, native scheduling, native LAW integration.
-#   - The "anomalous geo" scenario runs from the same eastus2 environment as
+#   - The "anomalous geo" scenario runs from the same primary-region (centralus)
+#     Container Apps environment as
 #     baseline/spike. The geo tag is conveyed via request headers (see
 #     k6/anomalous.js). Real cross-region simulation is §13.3's responsibility.
 #   - Cron times are UTC. Adjusted to land at ~9am ET / noon ET / 3am ET.

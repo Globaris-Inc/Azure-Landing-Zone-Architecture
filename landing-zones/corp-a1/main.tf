@@ -1,10 +1,10 @@
-# Purpose: corp-a1 landing zone - private spoke VNet (eastus2), App Service + Azure SQL
+# Purpose: corp-a1 landing zone - private spoke VNet (centralus), App Service + Azure SQL
 #          with Private Endpoint, peered to the primary hub.
 # Section: 9 - Landing Zone Spokes
 # Last updated: 2026-07-10
 #
 # Architecture:
-#   - Spoke VNet (10.10.0.0/16) peered to primary hub VNet (eastus2)
+#   - Spoke VNet (10.10.0.0/16) peered to primary hub VNet (centralus)
 #   - All subnet traffic forced through Azure Firewall Premium via UDR
 #   - App Service (Linux B2) with VNet integration in snet-integration (/26)
 #   - Azure SQL Server (Entra-only auth, no public access) + SQL DB (GP_S_Gen5_1 serverless)

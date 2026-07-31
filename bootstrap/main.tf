@@ -2,6 +2,25 @@
 # Section: 10a - Pipeline & Tooling (bootstrap subset)
 # Last updated: 2026-07-06
 #
+# NOTE (ADR-069, 2026-07-30): the state backend STAYS in eastus2 and is deliberately
+# NOT co-located with the estate's primary workload region, which ADR-069 moved to
+# centralus. The `eus2` token in rg-tfstate-mgmt-eus2-001 and id-tfstate-mgmt-eus2-001
+# is therefore historical, and that is accepted with a written reason rather than
+# renamed. Why: (a) azurerm_key_vault.tfstate is purge-protected with 90-day
+# soft-delete retention, so a purge-protected vault CANNOT be purged and the vault
+# name would be blocked for 90 days after a delete - a LESSON 57 class failure that no
+# retry recovers; (b) state is a management-plane dependency with no data-plane
+# coupling, no latency requirement, no policy scope and no role in the DR story;
+# (c) anti-correlation is the better posture - keeping state OUT of the primary
+# workload region means a centralus regional event still leaves state readable, so the
+# estate can be planned and applied during the incident; (d) moving it means destroying
+# the state SA, the CMK vault and the UAMI, rewriting envs/poc.backend.hcl and running
+# -migrate-state across eleven roots, on the one layer deliberately excluded from
+# teardown. var.primary_location in THIS root is local-state and load-bearing (bootstrap
+# is not run through _tf-root.yml, so it never receives -var-file=envs/poc.tfvars);
+# it is NOT part of the ADR-069 region surface and must not be flipped.
+# See ADR-069 decision 4 / docs/region-flip-centralus-primary.md section 3.3.
+#
 # Resources created:
 #   - Resource Group (Management sub, eastus2)
 #   - User-Assigned Managed Identity (for Storage CMK)

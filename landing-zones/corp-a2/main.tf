@@ -1,10 +1,10 @@
-# Purpose: corp-a2 landing zone - DR spoke VNet (centralus), App Service + SQL mirroring
+# Purpose: corp-a2 landing zone - DR spoke VNet (eastus2), App Service + SQL mirroring
 #          corp-a1, Recovery Services Vault for Azure Site Recovery.
 # Section: 9 - Landing Zone Spokes
 # Last updated: 2026-07-10
 #
 # Architecture:
-#   - Spoke VNet (10.11.0.0/16) peered to secondary (DR) hub VNet (centralus)
+#   - Spoke VNet (10.11.0.0/16) peered to secondary (DR) hub VNet (eastus2)
 #   - All subnet traffic forced through secondary Azure Firewall via UDR
 #   - App Service (Linux B2) with VNet integration - mirrors corp-a1 workload tier
 #   - Azure SQL Server (Entra-only auth) - independent; geo-replication to/from corp-a1

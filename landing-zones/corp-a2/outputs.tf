@@ -3,7 +3,7 @@
 # Last updated: 2026-07-10
 
 output "spoke_vnet_id" {
-  description = "ARM resource ID of the corp-a2 spoke VNet (centralus DR). Referenced by Section 4 Private DNS zone links."
+  description = "ARM resource ID of the corp-a2 spoke VNet (eastus2 DR). Referenced by Section 4 Private DNS zone links."
   value       = module.spoke_vnet.resource_id
 }
 

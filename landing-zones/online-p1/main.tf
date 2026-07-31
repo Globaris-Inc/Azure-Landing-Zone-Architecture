@@ -4,7 +4,7 @@
 # Last updated: 2026-05-14
 #
 # Architecture:
-#   - Spoke VNet (10.20.0.0/16) peered to primary hub VNet (eastus2)
+#   - Spoke VNet (10.20.0.0/16) peered to primary hub VNet (centralus)
 #   - snet-appgateway (/24) - Application Gateway WAF_v2; NO firewall UDR on this subnet
 #     (App Gateway WAF_v2 is incompatible with UDRs pointing to NVAs on its own subnet)
 #   - snet-workload (/24) and snet-private-endpoints (/24) - firewall UDR applied

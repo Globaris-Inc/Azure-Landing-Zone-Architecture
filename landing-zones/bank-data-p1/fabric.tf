@@ -33,11 +33,16 @@ resource "azurerm_fabric_capacity" "this" {
   # non-alphanumeric characters.
   name                = "fabbankdata${var.org_prefix}${var.environment}"
   resource_group_name = azurerm_resource_group.shared.name
-  # DEVIATION: var.fabric_location (default centralus), NOT var.primary_location -
-  # Fabric CU quota is 0 in eastus2 on this subscription/offer, available in
-  # centralus (portal-verified 2026-07-19; B5 pre-clearance addendum). The RG
-  # stays eastus2 (RG location does not constrain member-resource regions).
-  # Region alignment revisited at wave B-R.
+  # var.fabric_location, NOT var.primary_location. As of ADR-069 the two are EQUAL
+  # (both centralus), so this is no longer a deviation and deviation register entry
+  # d6 is retired by construction - the capacity and the rest of the spoke are now
+  # in the same region.
+  # The separate input is KEPT on purpose: Fabric CU quota was portal-verified as 0
+  # on this subscription/offer in what is now the SECONDARY region (2026-07-19; B5
+  # pre-clearance addendum), and this input is the proven escape hatch if the
+  # primary region ever runs short too. A Fabric capacity is a control-plane /
+  # CU-billing surface with no VNet coupling, so it can diverge again with no
+  # network impact (the RG location does not constrain member-resource regions).
   location = var.fabric_location
 
   sku {

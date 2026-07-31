@@ -8,7 +8,7 @@
 # Last updated: 2026-07-18
 #
 # Architecture:
-#   - Spoke VNet (default 10.30.0.0/16, eastus2) peered to primary hub VNet
+#   - Spoke VNet (default 10.30.0.0/16, centralus) peered to primary hub VNet
 #   - snet-aks-nodes (/24)         - AKS node pools (wave B2, Azure CNI Overlay,
 #                                    outbound type userDefinedRouting via the hub firewall)
 #   - snet-apim (/24)              - APIM Developer, internal VNet mode (wave B4);
@@ -18,10 +18,10 @@
 #     route table below) and an NSG
 #
 # Address space: ARCHITECT-CONFIRMED (B1 amendment ruling). Banking allocation table:
-#   10.30.0.0/16 - bank-app-p1 (eastus2, THIS root)
-#   10.31.0.0/16 - RESERVED bank-app DR (centralus, design-only, NOT deployed)
-#   10.32.0.0/16 - bank-data-p1 (eastus2, landing-zones/bank-data-p1)
-#   10.33.0.0/16 - RESERVED bank-data DR (centralus, design-only, NOT deployed)
+#   10.30.0.0/16 - bank-app-p1 (centralus, THIS root)
+#   10.31.0.0/16 - RESERVED bank-app DR (eastus2, design-only, NOT deployed)
+#   10.32.0.0/16 - bank-data-p1 (centralus, landing-zones/bank-data-p1)
+#   10.33.0.0/16 - RESERVED bank-data DR (eastus2, design-only, NOT deployed)
 # Non-overlapping with the estate: hubs 10.0/16 + 10.1/16, identity 10.2.0.0/24,
 # spokes 10.10/16, 10.11/16, 10.20/16.
 

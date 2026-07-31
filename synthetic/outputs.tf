@@ -69,7 +69,7 @@ output "k6_job_names" {
 # ---------------------------------------------------------------------------
 
 output "red_team_primary_rg_name" {
-  description = "Resource group name hosting the eastus2 red-team simulator resources (decoy SA, decoy KV, primary CAJs)."
+  description = "Resource group name hosting the primary-region (centralus) red-team simulator resources (decoy SA, decoy KV, primary CAJs)."
   value       = local.red_team_enabled == 1 ? azurerm_resource_group.red_team_primary[0].name : ""
 }
 

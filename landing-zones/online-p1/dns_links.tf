@@ -62,7 +62,7 @@ resource "azurerm_storage_account" "flow_logs" {
 }
 
 # ---------------------------------------------------------------------------
-# Network Watcher data source (primary region - eastus2)
+# Network Watcher data source (primary region - centralus)
 # ---------------------------------------------------------------------------
 
 data "azurerm_network_watcher" "primary" {

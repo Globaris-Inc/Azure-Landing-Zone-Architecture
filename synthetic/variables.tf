@@ -22,15 +22,15 @@ variable "landingzones_subscription_id" {
 }
 
 variable "primary_location" {
-  description = "Primary Azure region (matches corp-a1 + online-p1 landing zones)."
+  description = "Primary Azure region (matches corp-a1 + online-p1 landing zones). Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "eastus2"
+  default     = "centralus"
 }
 
 variable "secondary_location" {
-  description = "Secondary / DR region (matches corp-a2 cold standby)."
+  description = "Secondary / DR region (matches corp-a2 cold standby). Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "centralus"
+  default     = "eastus2"
 }
 
 variable "org_prefix" {

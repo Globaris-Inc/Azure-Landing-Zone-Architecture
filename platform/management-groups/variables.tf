@@ -28,9 +28,9 @@ variable "landingzones_subscription_id" {
 }
 
 variable "primary_location" {
-  description = "Primary Azure region for resources that require a location (e.g. policy assignments with remediation)."
+  description = "Primary Azure region for resources that require a location (e.g. policy assignments with remediation). Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "eastus2"
+  default     = "centralus"
 }
 
 variable "tags" {

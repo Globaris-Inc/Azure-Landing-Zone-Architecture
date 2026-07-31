@@ -13,9 +13,9 @@ variable "security_subscription_id" {
 }
 
 variable "primary_location" {
-  description = "Primary Azure region for security resources."
+  description = "Primary Azure region for security resources. Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "eastus2"
+  default     = "centralus"
 }
 
 variable "org_prefix" {

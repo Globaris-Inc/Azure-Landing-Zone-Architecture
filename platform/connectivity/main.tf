@@ -59,7 +59,7 @@ resource "azurerm_resource_group" "connectivity_secondary" {
 }
 
 # ---------------------------------------------------------------------------
-# Hub-and-spoke VNets - primary (eastus2) + secondary (centralus) DR hub
+# Hub-and-spoke VNets - primary (centralus) + secondary (eastus2) DR hub
 # ---------------------------------------------------------------------------
 #
 # Module: Azure/avm-ptn-alz-connectivity-hub-and-spoke-vnet v0.17.1

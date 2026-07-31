@@ -25,9 +25,9 @@ variable "connectivity_subscription_id" {
 # ---------------------------------------------------------------------------
 
 variable "primary_location" {
-  description = "Primary Azure region for bank-data-p1 resources."
+  description = "Primary Azure region for bank-data-p1 resources. Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "eastus2"
+  default     = "centralus"
 }
 
 variable "org_prefix" {
@@ -46,7 +46,7 @@ variable "environment" {
 # ---------------------------------------------------------------------------
 
 variable "spoke_address_space" {
-  description = "CIDR block for the bank-data-p1 spoke VNet. All subnet prefixes are computed from this block. 10.32.0.0/16 is ARCHITECT-CONFIRMED (B1 amendment ruling): 10.31.0.0/16 is RESERVED for the bank-app DR spoke (centralus, design-only). Full banking allocation table in this root's README and main.tf header."
+  description = "CIDR block for the bank-data-p1 spoke VNet. All subnet prefixes are computed from this block. 10.32.0.0/16 is ARCHITECT-CONFIRMED (B1 amendment ruling): 10.31.0.0/16 is RESERVED for the bank-app DR spoke (eastus2, design-only). Full banking allocation table in this root's README and main.tf header."
   type        = string
   default     = "10.32.0.0/16"
 }
@@ -85,7 +85,7 @@ variable "private_dns_rg_name" {
 # ---------------------------------------------------------------------------
 
 variable "platform_law_workspace_id" {
-  description = "ARM resource ID of the platform Log Analytics workspace (eastus2, region-matched to this spoke - LESSON 43)."
+  description = "ARM resource ID of the platform Log Analytics workspace (centralus, region-matched to this spoke - LESSON 43)."
   type        = string
 }
 
@@ -141,7 +141,19 @@ variable "enable_fabric_capacity" {
 }
 
 variable "fabric_location" {
-  description = "Azure region for the Fabric capacity ONLY. DEVIATION from the estate primary_location: Fabric CU quota is 0 in eastus2 on this subscription/offer while centralus has availability (portal-verified 2026-07-19, B5 pre-clearance addendum). Fabric capacities are a control-plane/CU-billing surface with no VNet or data-plane coupling to the eastus2 spoke at B5 (no Fabric items exist), so the region split carries no network impact. Region alignment is revisited at wave B-R."
+  description = <<-EOT
+    Azure region for the Fabric capacity ONLY. As of ADR-069 (2026-07-30) this EQUALS
+    primary_location (both centralus), so it is no longer a deviation: the wave B5
+    region split is retired by construction and deviation register entry d6 with it.
+    The variable is deliberately KEPT rather than folded into primary_location - it is
+    the estate's proven capacity escape hatch for Fabric, and Fabric CU quota was
+    portal-verified as 0 in the region that is now secondary (eastus2) on this
+    subscription/offer (2026-07-19, B5 pre-clearance addendum). Fabric capacities are a
+    control-plane / CU-billing surface with no VNet or data-plane coupling to the spoke,
+    so this input can diverge from primary_location again without network impact if a
+    future region ever runs short. Authoritative value is envs/poc.tfvars (ADR-069
+    decision 3); this default only matches it.
+  EOT
   type        = string
   default     = "centralus"
 }
@@ -163,7 +175,26 @@ variable "enable_ai_platform" {
 }
 
 variable "search_location" {
-  description = "Azure region for the AI Search service ONLY. DEVIATION from primary_location: AI Search returned InsufficientResourcesAvailable (regional capacity exhaustion) in eastus2 on 2026-07-19 apply 29678062833; centralus has capacity (fix-spec CLASS 1, docs/preclearance/b6-ai-platform.md addendum; ADR-051 post-apply correction). Cross-region PE is coherent - the Search PE NIC STAYS in the eastus2 snet-private-endpoints and private DNS is region-agnostic (one A record in the spoke-linked search zone regardless of service region); only the service location moves. Shares the eastus2-capacity B-R region-alignment revisit with fabric_location (deviation register d6/d7)."
+  description = <<-EOT
+    Azure region for the AI Search service ONLY. As of ADR-069 (2026-07-30) this EQUALS
+    primary_location (both centralus), so the ADR-051 cross-region private endpoint no
+    longer exists - the Search service and its PE NIC are both in the primary region -
+    and deviation register entry d7 is retired by construction.
+    The variable is deliberately KEPT rather than folded into primary_location: it cost
+    a failed apply to learn it was needed (AI Search returned
+    InsufficientResourcesAvailable, regional capacity exhaustion, in the region that is
+    now secondary (eastus2) on 2026-07-19 apply 29678062833, fix-spec CLASS 1,
+    docs/preclearance/b6-ai-platform.md addendum), and deleting a capacity escape hatch
+    the moment its trigger stops firing is how the lesson gets un-learned.
+    NOTE for anyone re-diverging this from primary_location: the Search private endpoint
+    in ai.tf MUST keep its explicit location = var.primary_location override. That line
+    pins the PE NIC to the region of snet-private-endpoints; without it the module
+    defaults the NIC to the SERVICE region and collides with the subnet, which is the
+    exact failure of apply 29678062833. It is numerically a no-op today and load-bearing
+    the moment these two values differ.
+    Authoritative value is envs/poc.tfvars (ADR-069 decision 3); this default only
+    matches it.
+  EOT
   type        = string
   default     = "centralus"
 }
