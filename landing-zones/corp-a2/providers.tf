@@ -5,7 +5,7 @@
 # Apply order: After platform/connectivity (secondary hub VNet ID and firewall IP required).
 #
 # Providers:
-#   azurerm (default) -> Landing Zones subscription - all corp-a2 spoke resources (centralus)
+#   azurerm (default) -> Landing Zones subscription - all corp-a2 spoke resources (eastus2)
 #   azurerm.connectivity -> Connectivity subscription - hub-to-spoke return VNet peering only
 #   azapi (default) -> Landing Zones subscription - anchors the AVM RSV +
 #     app_service_plan azapi parent_id to the correct sub

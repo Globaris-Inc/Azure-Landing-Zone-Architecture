@@ -21,7 +21,7 @@
 # list (LESSON 40 rot class), and log_analytics_destination_type "Dedicated" lands
 # the structured firewall logs in resource-specific tables (AZFWApplicationRule,
 # AZFWNetworkRule, ...) - the current MS-recommended mode. Unlike Traffic Analytics
-# (LESSON 43), diagnostic settings are cross-region-safe, so the single eastus2
+# (LESSON 43), diagnostic settings are cross-region-safe, so the single centralus
 # platform LAW serves both hub firewalls.
 
 resource "azurerm_monitor_diagnostic_setting" "firewall" {

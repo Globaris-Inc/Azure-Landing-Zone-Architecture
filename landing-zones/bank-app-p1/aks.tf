@@ -29,7 +29,9 @@ resource "azurerm_user_assigned_identity" "aks" {
   tags                = local.common_tags
 }
 
-# Private DNS Zone Contributor at the shared privatelink.eastus2.azmk8s.io zone scope
+# Private DNS Zone Contributor at the shared privatelink.centralus.azmk8s.io zone scope
+# (the zone name tracks var.primary_location - the AVM private-DNS module substitutes
+# {regionName} - so the grant scope is derived, never a literal)
 # (Connectivity subscription - zone looked up in dns_links.tf, spoke + hub links live
 # since B1).
 resource "azurerm_role_assignment" "aks_uai_private_dns_zone" {
@@ -130,7 +132,7 @@ module "aks" {
   }
 
   # Private cluster on the estate's shared central zone (ADR-043): the control-plane
-  # UAI above writes the API server A record into privatelink.eastus2.azmk8s.io.
+  # UAI above writes the API server A record into privatelink.centralus.azmk8s.io.
   api_server_access_profile = {
     enable_private_cluster             = true
     enable_private_cluster_public_fqdn = false
@@ -162,7 +164,7 @@ module "aks" {
     }
   }
 
-  # Container Insights to the platform LAW (eastus2, region-matched - LESSON 43).
+  # Container Insights to the platform LAW (centralus, region-matched - LESSON 43).
   # use_aad_auth = false (verified at build per the design's fallback ruling): the
   # module only wires the required MSCI data collection rule through its
   # onboard_monitoring path, which also drags in managed Prometheus resources -

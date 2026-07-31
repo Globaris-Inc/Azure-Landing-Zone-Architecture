@@ -61,11 +61,14 @@ module "foundry" {
     system_assigned = true
   }
 
-  # ONE deployment (ADR-051): gpt-5.4-nano 2026-03-17, the newest current-GA
-  # nano-class chat model in eastus2 (the founding-design examples are Deprecating
-  # in the live catalog - LESSON 40 class). DataZoneStandard = US data-zone
-  # processing (banking residency posture); capacity 10 = 10K TPM of the 2000
-  # K-TPM verified free. GlobalStandard is the recorded fallback if DataZone caps.
+  # ONE deployment (ADR-051): gpt-5.4-nano 2026-03-17, selected as the newest
+  # current-GA nano-class chat model (the founding-design examples were Deprecating
+  # in the live catalog - LESSON 40 class). Model catalogs are PER REGION and the
+  # account follows var.primary_location, which ADR-069 moved to centralus, so this
+  # selection is re-verified in the centralus catalog by pre-clearance check RC-3
+  # before dispatch. DataZoneStandard = US data-zone processing (banking residency
+  # posture); capacity 10 = 10K TPM of the 2000 K-TPM verified free. GlobalStandard
+  # is the recorded fallback if DataZone caps.
   cognitive_deployments = {
     chat = {
       name = "chat"
@@ -187,12 +190,15 @@ module "search" {
   # hyphen legal, 30 chars rendered at poc defaults (limit 60).
   name                = "srch-bank-data-p1-${var.org_prefix}-${var.environment}"
   resource_group_name = azurerm_resource_group.workload.name
-  # DEVIATION (fix-spec CLASS 1, docs/preclearance/b6-ai-platform.md addendum
-  # 2026-07-19; ADR-051 correction): var.search_location (default centralus), NOT
-  # var.primary_location - AI Search returned InsufficientResourcesAvailable in
-  # eastus2 on apply 29678062833. The Search PE below STAYS in the eastus2
-  # snet-private-endpoints (cross-region PE is coherent; private DNS is
-  # region-agnostic) - only the service location moves. B-R region-alignment revisit.
+  # var.search_location, NOT var.primary_location. As of ADR-069 the two are EQUAL
+  # (both centralus), so this is no longer a deviation and the ADR-051 cross-region
+  # PE no longer exists: service and PE NIC are both in the primary region, and
+  # deviation register entry d7 is retired by construction.
+  # The separate input is KEPT on purpose. AI Search returned
+  # InsufficientResourcesAvailable (regional capacity exhaustion) in what is now the
+  # SECONDARY region on apply 29678062833 (fix-spec CLASS 1,
+  # docs/preclearance/b6-ai-platform.md addendum 2026-07-19; ADR-051 correction), and
+  # this input is the proven escape hatch if centralus ever runs short too.
   location = var.search_location
 
   # Smallest PE-capable tier (free has no PE support), smallest basic topology.
@@ -219,14 +225,15 @@ module "search" {
   private_endpoints = {
     search = {
       name = "pe-srch-bank-data-p1-${var.org_prefix}-${var.environment}"
-      # The PE NIC MUST match its subnet region (eastus2 snet-private-endpoints);
-      # the Search SERVICE stays centralus per the CLASS 1 capacity deviation
-      # above. Without this the per-PE location (v0.3.0 variables.tf line 218,
-      # consumed at main.privateendpoint.tf line 5 as
-      # coalesce(each.value.location, var.location)) defaults to the service
-      # location centralus and collides with the eastus2 subnet - the actual
-      # apply 29678062833 PE failure (architect rerun-addendum correction). This
-      # makes it a correct cross-region PE: eastus2 NIC -> centralus service.
+      # DO NOT DELETE THIS location LINE (ADR-069 decision 5). It is numerically a
+      # no-op while search_location == primary_location, and load-bearing the moment
+      # they differ. The PE NIC MUST match the region of its subnet
+      # (snet-private-endpoints, always var.primary_location). Without this override
+      # the per-PE location (v0.3.0 variables.tf line 218, consumed at
+      # main.privateendpoint.tf line 5 as coalesce(each.value.location,
+      # var.location)) falls through to the SERVICE location and collides with the
+      # subnet - the actual apply 29678062833 PE failure (architect rerun-addendum
+      # correction). Removing it re-arms exactly that failure.
       location                        = var.primary_location
       subnet_resource_id              = module.spoke_vnet.subnets["private-endpoints"].resource_id
       private_dns_zone_resource_ids   = [data.azurerm_private_dns_zone.linked["search"].id]

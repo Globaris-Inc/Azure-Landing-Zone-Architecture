@@ -3,7 +3,7 @@
 # Last updated: 2026-07-17 (ADR-042 note: mesh is firewall-independent; hub route tables absent while gated)
 #
 # Architecture:
-#   - Hub-to-hub transit between primary (eastus2) and secondary (centralus)
+#   - Hub-to-hub transit between primary (centralus) and secondary (eastus2)
 #     enables the corp-a2 DR spoke to reach corp-a1 resources through the firewall
 #     chain without on-premises VPN traversal.
 #   - ADR-042: the mesh peering is firewall-independent and deploys regardless of

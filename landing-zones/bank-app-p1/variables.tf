@@ -26,9 +26,9 @@ variable "connectivity_subscription_id" {
 # ---------------------------------------------------------------------------
 
 variable "primary_location" {
-  description = "Primary Azure region for bank-app-p1 resources."
+  description = "Primary Azure region for bank-app-p1 resources. Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "eastus2"
+  default     = "centralus"
 }
 
 variable "org_prefix" {
@@ -47,7 +47,7 @@ variable "environment" {
 # ---------------------------------------------------------------------------
 
 variable "spoke_address_space" {
-  description = "CIDR block for the bank-app-p1 spoke VNet. All subnet prefixes are computed from this block. 10.30.0.0/16 is ARCHITECT-CONFIRMED (B1 amendment ruling); 10.31.0.0/16 is RESERVED for the bank-app DR spoke (centralus, design-only). Full banking allocation table in this root's README and main.tf header."
+  description = "CIDR block for the bank-app-p1 spoke VNet. All subnet prefixes are computed from this block. 10.30.0.0/16 is ARCHITECT-CONFIRMED (B1 amendment ruling); 10.31.0.0/16 is RESERVED for the bank-app DR spoke (eastus2, design-only). Full banking allocation table in this root's README and main.tf header."
   type        = string
   default     = "10.30.0.0/16"
 }
@@ -86,7 +86,7 @@ variable "private_dns_rg_name" {
 # ---------------------------------------------------------------------------
 
 variable "platform_law_workspace_id" {
-  description = "ARM resource ID of the platform Log Analytics workspace (eastus2, region-matched to this spoke - LESSON 43)."
+  description = "ARM resource ID of the platform Log Analytics workspace (centralus, region-matched to this spoke - LESSON 43)."
   type        = string
 }
 

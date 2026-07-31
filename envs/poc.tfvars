@@ -18,13 +18,51 @@
 
 environment = "poc"
 
+# ---------------------------------------------------------------------------
+# REGION SURFACE - this block is the SINGLE declaration point for every
+# region-valued input in the estate (ADR-069 decision 3 / design doc F4).
+#
+# ADR-069 (2026-07-30) flipped the pair: centralus is PRIMARY, eastus2 is
+# SECONDARY/DR. Rationale: four independent capacity constraints were found in
+# eastus2 on this tenant and two of them (AI Search InsufficientResourcesAvailable,
+# Fabric CU quota 0) were already resolved by moving the workload to centralus.
+# Resolves OQ-004, which was raised at bootstrap and never answered, so
+# PROMPT.md's suggested pair became the configuration by default.
+#
+# identity_location / fabric_location / search_location are declared HERE because
+# each root's own default is otherwise the live value (no tfvars entry existed),
+# which is exactly how identity_location could have stranded the identity pillar
+# and an unmovable AADDS domain in the DR region with a clean plan and a green
+# apply. Every root default is aligned to these values as a safety net; these
+# entries are authoritative because _tf-root.yml passes -var-file=envs/poc.tfvars
+# to every plan, apply and destroy.
+#
+# NOT part of this surface: bootstrap/ stays in eastus2 by design (local state,
+# purge-protected key vault name lock, deliberate anti-correlation with the
+# primary workload region - ADR-069 decision 4 / design doc section 3.3).
+# ---------------------------------------------------------------------------
+
 # Primary Azure region
-primary_location = "eastus2"
+primary_location = "centralus"
 
 # Secondary / DR region
-secondary_location = "centralus"
+secondary_location = "eastus2"
 
-# Short org prefix used in resource naming (e.g. "cto" → cto-hub-vnet-eastus2)
+# Identity pillar region - identity VNet, Entra Domain Services managed domain,
+# identity RSV. Co-located with the primary hub it peers to. AADDS cannot be
+# moved after creation, so this must never silently diverge from primary_location.
+identity_location = "centralus"
+
+# Microsoft Fabric capacity region (bank-data-p1). Equal to primary_location
+# after ADR-069; kept as a separate input because it is the proven capacity
+# escape hatch for Fabric CU quota (ADR-069 decision 5).
+fabric_location = "centralus"
+
+# AI Search service region (bank-data-p1). Equal to primary_location after
+# ADR-069; kept as a separate input for the same reason as fabric_location.
+search_location = "centralus"
+
+# Short org prefix used in resource naming (e.g. "cto" -> cto-hub-vnet-primary)
 org_prefix = "globaris"
 
 # ---------------------------------------------------------------------------
@@ -153,10 +191,10 @@ appgw_capacity = 1
 
 # Banking spoke VNet CIDR allocations - ARCHITECT-CONFIRMED (B1 amendment ruling).
 # Full banking allocation table:
-#   10.30.0.0/16 - bank-app-p1 (eastus2, deployed)
-#   10.31.0.0/16 - RESERVED bank-app DR (centralus, design-only, NOT deployed)
-#   10.32.0.0/16 - bank-data-p1 (eastus2, deployed)
-#   10.33.0.0/16 - RESERVED bank-data DR (centralus, design-only, NOT deployed)
+#   10.30.0.0/16 - bank-app-p1 (centralus, deployed)
+#   10.31.0.0/16 - RESERVED bank-app DR (eastus2, design-only, NOT deployed)
+#   10.32.0.0/16 - bank-data-p1 (centralus, deployed)
+#   10.33.0.0/16 - RESERVED bank-data DR (eastus2, design-only, NOT deployed)
 # Non-overlapping with the estate (hubs 10.0/16 + 10.1/16, identity 10.2.0.0/24,
 # spokes 10.10/16, 10.11/16, 10.20/16).
 # NOTE: like the Section 9 entries above, each root declares its own
@@ -259,7 +297,8 @@ enable_fabric_capacity = true
 # ---------------------------------------------------------------------------
 # Microsoft Foundry account (kind AIServices, S0) in bank-data-p1 carrying ONE
 # chat model deployment - gpt-5.4-nano 2026-03-17 on DataZoneStandard capacity 10
-# (the founding-design example models are Deprecating in the live eastus2 catalog;
+# (the founding-design example models were Deprecating in the live eastus2 catalog
+# when ADR-051 was written; the centralus catalog is re-checked per ADR-069 RC-3;
 # DataZone = US data-zone residency posture) - plus an AI Search basic service
 # (1 partition / 1 replica). Both PE-only into snet-private-endpoints (account PE
 # carries the three-zone group cognitiveservices + openai + services.ai; Search

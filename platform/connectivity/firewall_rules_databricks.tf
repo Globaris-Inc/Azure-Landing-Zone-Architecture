@@ -6,8 +6,9 @@
 #          Entra ID through that route. DORMANT at B5 (hard boundary: zero clusters,
 #          so no compute-plane egress exists) but it makes the posture QA-verifiable
 #          and closes the B1-parked caveat in landing-zones/bank-data-p1/main.tf.
-#          PRIMARY policy only (ADR-044/ADR-009 pattern): nothing in eastus2 routes
-#          to the secondary firewall. A NEW RCG rather than extending the AKS/APIM
+#          PRIMARY policy only (ADR-044/ADR-009 pattern): nothing in the primary
+#          region (centralus, ADR-069) routes to the secondary firewall. A NEW RCG
+#          rather than extending the AKS/APIM
 #          ones: source prefix, lifecycle, and review blast radius differ per wave.
 # Section: Banking wave B5 (docs/b5-data-platform-design.md section 5; ADR-048)
 # Last updated: 2026-07-18

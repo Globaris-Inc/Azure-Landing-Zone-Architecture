@@ -4,17 +4,17 @@
 # Last updated: 2026-06-04
 #
 # Architecture:
-#   - Primary CAE (eastus2) is reused from §13.2.
+#   - Primary CAE (centralus) is reused from §13.2.
 #   - Secondary CAE in `red_team_geo_location` (default westeurope) hosts the
 #     impossible-travel west pole - distinct geo IP is the whole point.
 #   - One Azure File share `red-team-scripts` on the existing corp-a1 synthetic
 #     SA. Both CAEs mount it (cross-region for westeurope - fine for ~5 KB
 #     bash files).
-#   - Decoy Storage Account (eastus2, public network, Defender for Storage on
+#   - Decoy Storage Account (centralus, public network, Defender for Storage on
 #     via §6) holds a small dummy blob. The `storage_anomaly` CAJ's MI has
 #     Storage Blob Data Reader → can read → the burst registers as
 #     `StorageBlobLogs` rows.
-#   - Decoy Key Vault (eastus2, RBAC mode, public network). MI gets only
+#   - Decoy Key Vault (centralus, RBAC mode, public network). MI gets only
 #     Key Vault Reader (control plane). `az keyvault secret show` always
 #     fails 403 - that is the §6 "KV bulk secret access" signal.
 #   - All red-team resources + jobs tagged `Purpose = "SecuritySimulation"`
@@ -305,7 +305,7 @@ resource "azurerm_container_app_environment" "red_team_secondary" {
 }
 
 # ---------------------------------------------------------------------------
-# Red-team scripts share + uploads - reuses corp-a1 synthetic SA (eastus2)
+# Red-team scripts share + uploads - reuses corp-a1 synthetic SA (centralus)
 # ---------------------------------------------------------------------------
 
 resource "azurerm_storage_share" "red_team_scripts" {

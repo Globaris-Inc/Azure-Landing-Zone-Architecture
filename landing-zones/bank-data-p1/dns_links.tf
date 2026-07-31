@@ -101,7 +101,7 @@ data "azurerm_network_watcher" "primary" {
 # ---------------------------------------------------------------------------
 # VNet flow log - bank-data-p1 spoke VNet -> platform Log Analytics (Traffic Analytics)
 # target_resource_id is the spoke VNet (VNet-scoped flow logs; NSG flow logs retired
-# 2025-06-30, LESSON 40). Traffic Analytics LAW is region-matched (eastus2, LESSON 43).
+# 2025-06-30, LESSON 40). Traffic Analytics LAW is region-matched (centralus, LESSON 43).
 # ---------------------------------------------------------------------------
 
 resource "azurerm_network_watcher_flow_log" "spoke" {

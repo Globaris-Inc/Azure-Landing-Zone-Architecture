@@ -23,7 +23,7 @@ output "connectivity_secondary_rg_id" {
 }
 
 output "primary_hub_vnet_id" {
-  description = "ARM resource ID of the primary hub VNet (eastus2). Consumed by spoke peering in Section 9."
+  description = "ARM resource ID of the primary hub VNet (centralus). Consumed by spoke peering in Section 9."
   value       = module.hub_and_spoke.virtual_network_resource_ids["primary"]
 }
 
@@ -33,7 +33,7 @@ output "primary_hub_vnet_name" {
 }
 
 output "secondary_hub_vnet_id" {
-  description = "ARM resource ID of the secondary (DR) hub VNet (centralus)."
+  description = "ARM resource ID of the secondary (DR) hub VNet (eastus2)."
   value       = module.hub_and_spoke.virtual_network_resource_ids["secondary"]
 }
 

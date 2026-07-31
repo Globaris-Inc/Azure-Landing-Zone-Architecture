@@ -6,7 +6,7 @@
 # Architecture:
 #   - Recovery Services Vault (Standard) in the corp-a1 shared RG (rg-corp-a1-shared-*).
 #   - Storage mode ZoneRedundant: corp-a1 is the in-region primary spoke, so backup
-#     data is kept zone-redundant within eastus2 (corp-a2, the DR spoke, stays
+#     data is kept zone-redundant within centralus (corp-a2, the DR spoke, stays
 #     GeoRedundant - do not change corp-a2). Cross-region restore is a GeoRedundant-only
 #     capability and is therefore disabled here.
 #   - The vault is created bare here; backup/ASR policies and item enrolment are

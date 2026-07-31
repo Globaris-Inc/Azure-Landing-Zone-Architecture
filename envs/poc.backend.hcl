@@ -21,6 +21,13 @@
 
 # --- Replace TODO values after bootstrap apply ---
 
+# NOTE (ADR-069, 2026-07-30): the `eus2` token below is HISTORICAL. The state backend
+# stays in eastus2 by design and is deliberately NOT co-located with the estate's
+# primary workload region, which ADR-069 moved to centralus: the state key vault is
+# purge-protected (a delete would block the name for 90 days), and keeping state out of
+# the primary region means a centralus regional event still leaves state readable.
+# Do not "fix" this name to match the primary region.
+# See ADR-069 decision 4 / docs/region-flip-centralus-primary.md section 3.3.
 resource_group_name  = "rg-tfstate-mgmt-eus2-001"
 storage_account_name = "stglobaristfstate01"
 container_name       = "tfstate"

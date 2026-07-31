@@ -21,9 +21,9 @@ variable "connectivity_subscription_id" {
 # ---------------------------------------------------------------------------
 
 variable "secondary_location" {
-  description = "DR Azure region for corp-a2 resources. Must match the secondary hub location."
+  description = "DR Azure region for corp-a2 resources. Must match the secondary hub location. Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "centralus"
+  default     = "eastus2"
 }
 
 variable "org_prefix" {
@@ -48,7 +48,7 @@ variable "spoke_address_space" {
 }
 
 variable "secondary_hub_vnet_id" {
-  description = "ARM resource ID of the secondary (DR) hub VNet (centralus). From platform/connectivity output 'secondary_hub_vnet_id'."
+  description = "ARM resource ID of the secondary (DR) hub VNet (eastus2). From platform/connectivity output 'secondary_hub_vnet_id'."
   type        = string
 }
 
@@ -72,7 +72,7 @@ variable "secondary_firewall_private_ip" {
 # ---------------------------------------------------------------------------
 
 variable "enable_sql" {
-  description = "Gate for the SQL data tier (logical server, database, and its private endpoint). Default false: Azure SQL provisioning is restricted in the spoke region (centralus) for the landingzones subscription (ProvisioningDisabled - a subscription/region restriction surfaced during PUT polling, not a code bug), so the SQL tier is pre-staged but not deployed. Set true once a region/subscription that permits Azure SQL is available or a support-request exception is granted. See the DEVIATION note on azurerm_mssql_server.this in main.tf."
+  description = "Gate for the SQL data tier (logical server, database, and its private endpoint). Default false: Azure SQL provisioning is restricted in the spoke region (eastus2 after ADR-069) for the landingzones subscription (ProvisioningDisabled - a subscription/region restriction surfaced during PUT polling, not a code bug), so the SQL tier is pre-staged but not deployed. ADR-069 does NOT lift this gate: the restriction attaches to the subscription offer, not to the region (ADR-031, LESSON 42). Set true only after a live probe on this subscription in this region succeeds, or a support-request exception is granted. See the DEVIATION note on azurerm_mssql_server.this in main.tf."
   type        = bool
   default     = false
 }

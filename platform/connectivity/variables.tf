@@ -15,15 +15,15 @@ variable "connectivity_subscription_id" {
 }
 
 variable "primary_location" {
-  description = "Primary Azure region for the primary hub VNet and firewall."
+  description = "Primary Azure region for the primary hub VNet and firewall. Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "eastus2"
+  default     = "centralus"
 }
 
 variable "secondary_location" {
-  description = "Secondary / DR Azure region for the secondary hub VNet and firewall."
+  description = "Secondary / DR Azure region for the secondary hub VNet and firewall. Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "centralus"
+  default     = "eastus2"
 }
 
 variable "org_prefix" {
@@ -110,7 +110,7 @@ variable "enable_dns_resolver" {
 # ---------------------------------------------------------------------------
 
 variable "platform_law_workspace_id" {
-  description = "ARM resource ID of the platform Log Analytics workspace - destination for the hub firewall diagnostic settings (firewall_diagnostics.tf; closes the B2 QA MEDIUM finding that no AZFW logs reached the LAW). CI already injects TF_VAR_platform_law_workspace_id estate-wide for every root (_tf-root.yml), so adding this variable needs ZERO CI change; supply it via poc.secret.tfvars locally. Unlike Traffic Analytics (LESSON 43), diagnostic settings are cross-region-safe, so the single eastus2 workspace serves both hub firewalls. Only consumed while enable_firewall is true."
+  description = "ARM resource ID of the platform Log Analytics workspace - destination for the hub firewall diagnostic settings (firewall_diagnostics.tf; closes the B2 QA MEDIUM finding that no AZFW logs reached the LAW). CI already injects TF_VAR_platform_law_workspace_id estate-wide for every root (_tf-root.yml), so adding this variable needs ZERO CI change; supply it via poc.secret.tfvars locally. Unlike Traffic Analytics (LESSON 43), diagnostic settings are cross-region-safe, so the single centralus workspace serves both hub firewalls. Only consumed while enable_firewall is true."
   type        = string
 }
 

@@ -21,9 +21,9 @@ variable "connectivity_subscription_id" {
 # ---------------------------------------------------------------------------
 
 variable "primary_location" {
-  description = "Primary Azure region for online-p1 resources."
+  description = "Primary Azure region for online-p1 resources. Authoritative value is envs/poc.tfvars (ADR-069); this default only matches it."
   type        = string
-  default     = "eastus2"
+  default     = "centralus"
 }
 
 variable "org_prefix" {

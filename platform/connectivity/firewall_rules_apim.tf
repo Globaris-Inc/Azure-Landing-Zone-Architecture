@@ -6,7 +6,8 @@
 #          the APIM create hangs toward its 3h timeout. FQDN/port sets verified against
 #          MS Learn api-management virtual-network-reference (ms.date 2026-04-30,
 #          fetched at design 2026-07-18). PRIMARY policy only (ADR-044/ADR-009
-#          pattern): nothing in eastus2 routes to the secondary firewall. A NEW RCG
+#          pattern): nothing in the primary region (centralus, ADR-069) routes to
+#          the secondary firewall. A NEW RCG
 #          rather than extending rcg-aks-egress-primary: source prefix, lifecycle, and
 #          review blast radius differ per wave.
 # Section: Banking wave B4 (docs/b4-apim-platform-design.md section 6; ADR-047)
