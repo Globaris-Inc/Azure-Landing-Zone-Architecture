@@ -280,6 +280,83 @@ in `NetworkWatcherRG`, landingzones sub) blocks Steps 5 to 9 and has already blo
   d6/d7 marked retired by this ADR. `ARCHITECTURE.md` region narrative updated by whoever lands the
   implementation.
 
+**ADDENDUM 2026-07-31 (the decision is IMPLEMENTED; the Context framing is corrected; decision 3's wording is narrowed). Body above unedited, per append-only.**
+
+- **Landed:** `91523dc` (PR #60), merged to `banking` as `fbb8e3f` on 2026-07-31. 39 files. This
+  supersedes the `NOT IMPLEMENTED` in the field above, which was accurate when written.
+  **Caveat on the register, not on the decision:** `scripts/check-adr-landed.sh` keeps the FIRST
+  `- **Landed:**` line in each ADR block, so it will continue to report ADR-069 as
+  `NOT IMPLEMENTED` until that parser is changed to take the LAST one. The same is true of ADR-068,
+  which was proven live the same day. Handed to devsecops as finding F10 in
+  `docs/preclearance/2026-07-22-full-estate-rebuild.md` refresh #3 (T8, listed there as F7). Do not
+  resolve it by editing the body of either ADR: the append-only rule is the more important of the two
+  and the parser is the thing that should move.
+
+1. **The Context framing is wrong and should be read as corrected.** The Context table above presents
+   the flip as "four independent capacity constraints accumulated in eastus2, so the region choice was
+   wrong". The user corrected that framing on 2026-07-31 and the correction is the accurate one:
+   **the binding constraint was AI Search.** `eastus2` returned `InsufficientResourcesAvailable`,
+   Search could be obtained only in `centralus`, and it was already deployed there behind a
+   cross-region private endpoint pinned back to an `eastus2` spoke. **The estate's most constrained
+   service was living in the secondary region.** The vCPU quota, App Service and SQL findings were
+   symptoms of a compute-restricted subscription, not causes of the region decision, which is exactly
+   why decision 7 does NOT lift ADR-031 or ADR-032. This distinction is load-bearing rather than
+   cosmetic: it is why the `search_location` carve-out retires **by construction** rather than
+   inverting, and it is why RC-1 coming back with no improvement in the vCPU limit (10 in `centralus`,
+   the same as `eastus2`) is not a contradiction of the ruling. The flip bought service availability,
+   not compute capacity.
+
+2. **Decision 3's "every region-valued input" is narrowed, and the narrowing is deliberate rather than
+   an oversight.** Decision 3 says `envs/poc.tfvars` becomes "the SINGLE declaration point for every
+   region-valued input". Taken literally that is false: `synthetic/variables.tf`
+   `red_team_geo_location` (default `westeurope`) is a region-valued input and is correctly NOT in the
+   tfvars region block. Corrected wording, which matches what was implemented and what the design
+   doc's F4 lists: **`envs/poc.tfvars` is the single declaration point for every input that names the
+   estate's PRIMARY or SECONDARY region.** `red_team_geo_location` is excluded on purpose, because it
+   is deliberately a THIRD region - the impossible-travel pole for the Section 13.3 red-team
+   simulation - and pinning it to the primary or secondary pair would destroy the signal the scenario
+   exists to generate. Its distance from the estate is the feature. It is therefore a workload
+   parameter, not part of the estate region surface, and it must not be swept into a future region
+   flip. Count for the record: 17 region literals in repo-owned code, of which 16 name the primary or
+   secondary pair (the set decision 2 classifies) and one is `red_team_geo_location`.
+
+3. **What actually landed, versus what this ADR specified.** The implementation matched the spec on
+   every load-bearing point, verified file by file in refresh #3 section T2. `envs/poc.tfvars` gained
+   the three new declarations and the two flipped values; `platform/identity/variables.tf`
+   `identity_location` moved to `centralus` in both the default and the tfvars, closing the silent
+   failure this ADR was principally written to prevent; the Search private endpoint's
+   `location = var.primary_location` override was KEPT with a DO NOT DELETE comment; both capacity
+   escape-hatch variables were kept; `bootstrap` did not move and is absent from the value diff;
+   ADR-031 and ADR-032 gates stayed false. One fact the implementer established independently and
+   which this ADR had not stated: **`bootstrap` receives no `-var-file` from any workflow**, so its
+   default is genuinely live - which is a stronger reason for decision 4 than the three the body gives.
+
+4. **Decision 9's plan-bar prediction is now partly evidenced.** Step 1 `platform/management-groups`
+   re-planned under `centralus`-primary at 537 to add, 0 change, 0 destroy, 0 replace, 0 import
+   (run `30636497926`, 2 min 36 s) - an exact match to the `eastus2`-primary bar, not an approximate
+   one. Four bars remain unmeasured (36 / 48 / 696 / 26). Refresh #3 section T3 certifies all five as
+   expected-unchanged from the pinned module sources, with the derivation for each. **Do not
+   generalise from Step 1:** that root creates no regional resources at all, so it is the weakest
+   available test of the construction argument. Decision 9's STOP rule stands unchanged and applies to
+   the remaining four.
+
+5. **Decision 6's blocking gate is DISCHARGED.** The teardown reached green, Phase 4 executed, and on
+   2026-07-31 the estate and all eleven state blobs were independently confirmed greenfield. The flip
+   is therefore being dispatched against exactly the precondition decision 6 required, which is the
+   only condition under which the `fw-hub-${location}-001` rename is free rather than a ForceNew
+   replace of both Premium firewalls.
+
+6. **One check in the implementation surface was defective and is corrected.** RC-2 in
+   `docs/region-flip-centralus-primary.md` section 7.1 queried
+   `resourceTypes[?resourceType=='domainServices']`; the actual ARM type is `DomainServices`. As
+   written the query returns `[]`, and this ADR's own documented consequence of an empty result is
+   STOP, keep `identity_location` at `eastus2`, and give the identity pillar an explicit DR-region
+   carve-out. **A one-character casing error in a verification query would have triggered a real
+   architectural change in the opposite direction to the evidence.** Corrected in the design doc on
+   2026-07-31. The generalisable form is worth carrying: **a check whose failure mode is an empty
+   result is only as trustworthy as its exact-match string.** Same defect class as the Key Vault
+   `True`/`true` compare fixed in PR #59 the same night.
+
 ---
 
 ### ADR-068: A verified `target=all` teardown ends by RESETTING every eligible Terraform state blob to a canonical, metadata-labelled EMPTY document - never by deleting it. The two mirror-image state failure modes (FM-1 state-missing-while-resources-live, FM-2 state-populated-while-resources-gone) are named, given opposite guards, and reconciled by one ordering gate

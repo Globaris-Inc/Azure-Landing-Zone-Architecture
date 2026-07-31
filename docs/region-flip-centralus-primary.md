@@ -506,11 +506,23 @@ Below that, AKS cannot be deployed and `enable_kubernetes_platform` must go fals
 **RC-2. Entra Domain Services region support.**
 ```
 az provider show --namespace Microsoft.AAD \
-  --query "resourceTypes[?resourceType=='domainServices'].locations" -o json
+  --query "resourceTypes[?resourceType=='DomainServices'].locations" -o json
 ```
 Bar: the list contains Central US. If it does not, STOP: `identity_location` must stay eastus2 and
 ADR-069 needs an explicit carve-out for the identity pillar, which is a real architectural change
 (identity in the DR region), not an implementation detail.
+
+> **CORRECTED 2026-07-31 (architect).** This query originally read `resourceType=='domainServices'`
+> with a lowercase `d`. The actual ARM resource type is `DomainServices`, and the JMESPath comparison
+> is case-sensitive, so the query as written returned `[]` on a tenant where Entra Domain Services is
+> perfectly available. The documented consequence of an empty result is the STOP above: keep
+> `identity_location` at eastus2 and give the identity pillar an explicit DR-region carve-out. **A
+> one-character casing error in a verification query would therefore have triggered a real
+> architectural change in the opposite direction to the evidence.** The check was run correctly by
+> hand on 2026-07-31 and PASSED (Central US supported, and East US 2 for the secondary). Generalisable
+> form, worth carrying: **a check whose failure mode is an empty result is only as trustworthy as its
+> exact-match string.** Same defect class as the Key Vault `True` versus `"true"` compare fixed in
+> PR #59 the same night.
 
 **RC-3. Foundry model catalog in centralus.**
 ```
