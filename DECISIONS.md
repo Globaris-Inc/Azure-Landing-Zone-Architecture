@@ -49,6 +49,123 @@
 
 <!-- Newest at the top. -->
 
+### ADR-070: Terraform is the SOLE owner of diagnostic settings and private-endpoint DNS zone groups on every resource a landing-zone root creates; the ALZ DINE policies that write the same two object classes are suppressed at those scopes by RG-scoped `Mitigated` exemptions. The twice-failed `bank-data-p1` apply is runbook matrix **B1** (delete the survivor, rerun, do not import), **NOT** the ADR-067 teardown class, and the bright-line test between the two is written down here so it stops being re-litigated.
+
+- **Date:** 2026-07-31
+- **Section:** 9 (Landing Zone Spokes) / 2 (Management Group Hierarchy, the DINE assignments) / 10 (Pipeline & Tooling, the rebuild dispatch). Extends ADR-028 and LESSON 35 (the RG-scoped exemption + 300s sleep + `depends_on` unit). Constrains ADR-067's addendum by defining when it fires. Relates to OQ-021 (the diagnostics DINE) and OQ-032 (the accepted `CreatedDate` tag drift that accounts for all 29 plan changes).
+- **Status:** Accepted (architect ruling; user directed a ruling on the ownership conflict that failed `landing-zones/bank-data-p1` twice during the live centralus rebuild, runs `30661012325` and `30662610292`).
+- **Landed:** NOT IMPLEMENTED (decisions 1, 2 and 6 need Cloud Engineer code in `landing-zones/bank-data-p1` and `landing-zones/bank-app-p1`; decisions 3, 4, 5 and 7 are operator and gate actions needing no code).
+- **Decision makers:** claude (architect); user (evidence gathering, and the ruling that the failure be diagnosed rather than retried a third time).
+
+**Context:**
+
+`landing-zones/bank-data-p1` (Step 8 of the full-estate rebuild) failed identically on two consecutive applies. Three resources returned `already exists - to be managed via Terraform this resource needs to be imported`:
+
+| Terraform address | Object |
+|---|---|
+| `module.databricks_workspace["main"].azurerm_monitor_diagnostic_setting.this["platform_law"]` | `diag-dbw-bank-data-p1-globaris-poc` |
+| `module.foundry["main"].azurerm_monitor_diagnostic_setting.this["platform_law"]` | `diag-aif-bank-data-p1-globaris-poc` |
+| `module.search["main"].azurerm_monitor_diagnostic_setting.this["platform_law"]` | `diag-srch-bank-data-p1-globaris-poc` |
+
+Live evidence gathered by the user and treated here as sourced, not re-run:
+
+1. All three settings return a body on a direct ARM GET at `2021-05-01-preview`, each pointing at `law-platform-globaris-poc`, with exactly ONE setting per resource on LIST.
+2. None of the three is in Terraform state. The diagnostic plan (run `30662130982`) is **4 to add, 29 to change, 0 to destroy**, with 0 replacements, 0 imports and 0 tainted. The fourth add is `azapi_resource.foundry_pe_dns_zone_group["main"]`. All 29 changes are the accepted OQ-032 `CreatedDate = "1970-01-01"` tag churn, confirmed by opening the diff blocks rather than counting tokens.
+3. The AVM modules compute the name as `coalesce(each.value.name, "diag-${var.name}")`, so `diag-<resource>` is a Terraform-derived name.
+4. Three `PolicyDeployment_*` deployments in `rg-bank-data-p1-workload-globaris-poc` were still `Running` about 50 minutes after starting, writing **competing objects with different names**: `setByPolicy-LogAnalytics` diagnostic settings on the Foundry account and the Search service, and a `deployedByPolicy` private DNS zone group on `pe-aif-bank-data-p1-globaris-poc`.
+5. The DINE definitions firing include "Configure Cognitive Services accounts to use private DNS zones" and the blob and dfs groupID private-DNS definitions, plus Defender and activity-log ones.
+6. The datalake's diagnostic setting is an **azapi** resource (`module.datalake["main"].module.diagnostic_setting_storage_account.azapi_resource.this["platform_law"]`). azapi PUTs idempotently with no RequiresImport pre-check, and it did not error. The three failures are all **azurerm** `azurerm_monitor_diagnostic_setting`, which performs a pre-create GET and raises `ImportAsExistsError` on any non-404.
+7. All three AVM modules are already at the latest published registry versions (`avm-res-cognitiveservices-account` 0.11.1, `avm-res-search-searchservice` 0.3.0, `avm-res-databricks-workspace` 0.5.0). There is no upgrade to take.
+
+**Two things in the record are wrong or unestablished, and this ADR does not build on either.**
+
+The 2026-07-31 operator entry for Steps 4-8 root-caused this as ARM read-after-write eventual consistency and offered "zero DINE diagnostic policies assigned at the landingzones MG" as evidence 2 and "all three return EMPTY when queried live" as evidence 3. Evidence 2 checked ONE scope. The ALZ diagnostics and private-DNS DINE assignments are inherited from an ANCESTOR management group, which is exactly the failure mode the standing pre-clearance rule ("live policy matrix at EVERY ancestor MG scope", LESSON 34) exists to prevent, and evidence 4 above shows those policies demonstrably firing on these very resources. Evidence 3 is contradicted by the user's direct GET and LIST. Neither correction changes the ruling below, but the prior "known transient class, retry on occurrence, no code change" disposition is **superseded**: two identical failures on one root is already at the runbook's U5 hard-stop bar, and a third bare retry is precisely what LESSON 59 forbids.
+
+**The provenance of the three existing settings is NOT established, and this ADR says so rather than papering over it.** The first apply failed at 19:59:44; the Foundry `PolicyDeployment` began at 20:00:24, forty seconds LATER. DINE therefore cannot have created what the first apply tripped over. Two candidate explanations remain and they are separated by one cheap read each (D1 and D2 in decision 4). Note also that evidence 1 and the provider's own RequiresImport check issue the SAME API call, so if that API is answering loosely it is answering loosely to `az rest` too; the discriminator is the `name` field of each entry returned by LIST, which has not yet been read back.
+
+**Why this is an ownership question and not only a provider question.** Two writers are competing for two object classes on the same resources:
+
+- **Diagnostic settings.** Terraform declares them through the AVM `diagnostic_settings` input on 8 resources estate-wide. The ALZ diagnostics DINE writes `setByPolicy-LogAnalytics` on the same scopes. Two settings on one resource pointing at the SAME workspace means the same rows are ingested twice and billed twice on the Analytics ingestion meter, which for `allLogs` on AKS, APIM, Databricks and Foundry is a real and recurring FinOps cost for zero additional insight.
+- **Private-endpoint DNS zone groups.** Azure supports **only one private DNS zone group per private endpoint** (Microsoft Learn, private-endpoint DNS integration). So a `deployedByPolicy` group and Terraform's `default` group on `pe-aif-bank-data-p1-globaris-poc` are not duplicates, they are mutually exclusive. Worse, the DINE group would carry ONE zone while the Foundry account needs THREE (cognitiveservices, openai, services.ai), so if DINE wins the race the private endpoint resolves incorrectly AND Terraform's pending azapi PUT collides. The repo has carried this DINE as "post-apply drift, never a create blocker" in `docs/preclearance/landing-zones.md` row 12, `docs/preclearance/b5-data-platform.md` row 8 and the rebuild gate's PC-8S table. **That classification is now falsified for any private endpoint whose zone group Terraform has not yet created**, which is exactly the state a failed apply leaves behind.
+
+**Decision:**
+
+1. **Ownership: Terraform, exclusively, on every resource a landing-zone or platform root creates.** For those resources Terraform is the sole writer of `microsoft.insights/diagnosticSettings` and of `Microsoft.Network/privateEndpoints/privateDnsZoneGroups`. The ALZ DINE policies keep their scope over everything the estate's Terraform does NOT create; they lose it over everything it does. Accepting duplicates is rejected (duplicate ingestion and duplicate cost for diagnostics; a hard mutual exclusion for zone groups). Disabling the AVM `diagnostic_settings` inputs and letting DINE own diagnostics is rejected (it deletes the estate's own observability wiring, makes log routing invisible in code, and today would route nothing at all while OQ-021 stands).
+
+2. **Mechanism: RG-scoped policy exemptions, category `Mitigated`, on the resource groups that hold Terraform-owned resources.** `Mitigated` rather than `Waiver` is deliberate and load-bearing documentation: the policy's INTENT is met, by another mechanism, which is precisely what that category means. Implement with the unit already proven in these roots (ADR-028, LESSON 35): `azurerm_resource_group_policy_exemption` + a **new, separate** `time_sleep` of `300s` + `depends_on` from every protected resource. It must be a NEW `time_sleep` resource, not the existing `wait_corp_policy_exemptions`: adding a member to the existing exemption map does not re-trigger a `time_sleep` that is already in state, so the new exemption would get no propagation window at all.
+   - MG-wide `enforcementMode = "DoNotEnforce"` (the `Enable-DDoS-VNET` precedent in `platform/management-groups`) is REJECTED as the primary mechanism: it is not resource-scoped, it silently disarms the control for future workloads that Terraform does not manage, and it removes the compliance signal everywhere. It is retained as the documented FALLBACK for any assignment whose members cannot be enumerated well enough to write a scoped exemption.
+   - **The exact assignment names and `policyDefinitionReferenceIds` are UNVERIFIED here and must not be guessed.** The user's evidence names policy DEFINITIONS; exemptions are written against ASSIGNMENTS. The implementer's first step is decision 4's read D3. If an assignment turns out to be a standalone definition rather than an initiative, `policy_definition_reference_ids` must be omitted, since the provider rejects it in that case.
+
+3. **This failure is runbook matrix B1, not ADR-067. The bright-line test, stated once so it stops being argued:**
+
+   > ADR-067's addendum fires when the estate cannot move forward without either (a) importing a live Azure object into Terraform state, or (b) reconciling a state that no longer describes what Terraform built. It does **not** fire because an apply failed, and it does **not** fire on the string `already exists`.
+   >
+   > **Test:** can every object the failed apply is blocked on be DELETED, and recreated identically by the next apply, with no data loss, no soft-delete window, no purge protection and no dependent object?
+   > - **Yes** -> runbook **B1**: stop, delete the specific survivor, rerun the same root, do not import. State and Azure are congruent the moment the delete completes.
+   > - **No** -> **ADR-067**: full teardown and restart from Step 1.
+
+   Applied here the answer is unambiguously yes. The blocking objects are three `microsoft.insights/diagnosticSettings` sub-resources and at most one `privateDnsZoneGroups` child. All four are control-plane-only, hold no data, have no soft-delete and no purge protection, have no dependents, and are reproduced identically by the plan that is already sitting there. Deleting them costs nothing and loses nothing.
+
+   The contrast with ADR-067's actual Class 2 is the whole point: those orphans were `Microsoft.SecurityInsights` children inside a soft-delete-RECOVERED Log Analytics workspace. Deleting the workspace re-entered the recovery loop on the next apply, and the co-located Key Vault was purge-protected for 90 days, so **there was no delete path at all** and import or teardown were the only options. That is why the addendum was written, and it is why it does not reach a diagnostic setting.
+
+   The plan corroborates it independently: **4 add / 29 change / 0 destroy, 0 replace, 0 import, 0 tainted.** A partial state that plans as a pure forward-completion is not a divergent state. Had that plan shown any replace, any destroy, or any import block, ADR-067 would fire and the answer would be teardown. It did not.
+
+   **Full teardown and restart is therefore NOT ordered.** The seven green roots and roughly 1,391 applied resources stand.
+
+4. **Immediate recovery for `bank-data-p1`, in this order.** The next dispatch of this root is a FIXED dispatch, not a third bare retry (U5 has already fired; LESSON 59 requires one consolidated fix-spec).
+
+   **D1 (read-only, 2 minutes, decides the provenance).** LIST the diagnostic settings on all three resources and print the `name` of every entry verbatim, not the requested name from the URL. If the names are `diag-dbw-*` / `diag-aif-*` / `diag-srch-*`, real Terraform-shaped objects exist and something wrote them; if the names are `setByPolicy-LogAnalytics`, no Terraform-shaped object ever existed and the `already exists` is a provider false positive against a DINE sibling on the same scope. **The recovery action is the same in both branches** (delete, then retry), which is why recovery is not blocked on this read; it is required for the record and for decision 7.
+
+   **D2 (read-only, 2 minutes, tests OQ-021 and the same provenance).** Read the diagnostics DINE assignment's Log Analytics workspace parameter at every ancestor MG scope. If it is the zero-GUID subscription, OQ-021 still holds, the DINE cannot successfully write anything, and it cannot be the creator. If it holds the real `law-platform-globaris-poc` resource ID, OQ-021 has silently resolved and DINE IS a live competing writer.
+
+   **D3 (read-only, blocking for decision 2).** Enumerate the live policy ASSIGNMENTS and their `policyDefinitionReferenceIds` for the diagnostics and private-DNS DINE families at **every** ancestor scope of the landingzones subscription (tenant root, `globaris`, `landingzones`, `corp`), not just `landingzones`. This is the check the prior session's evidence 2 skipped.
+
+   **R1. Confirm the PolicyDeployments have settled before touching anything.** Deleting a survivor while a remediation is mid-flight simply recreates it. **Settled** means: every deployment in `rg-bank-data-p1-workload-globaris-poc` whose name starts `PolicyDeployment` reads `provisioningState` in {`Succeeded`, `Failed`, `Canceled`}, none in {`Running`, `Accepted`}, **and** a second read five minutes later returns the same set with no NEW `PolicyDeployment` name. Both reads are required; the first alone does not prove no further remediation is queued.
+   **Cap: do not wait indefinitely.** A diagnostic-setting PUT takes seconds, so a deployment `Running` for 50 minutes is already pathological. If any is still `Running`/`Accepted` 90 minutes after it started, treat it as stuck rather than slow: cancel it (`az deployment group cancel`), re-read, proceed, and record the stuck deployment as evidence in OQ-067.
+
+   **R2. Delete the survivors.** The three diagnostic settings named in the error, plus ANY private DNS zone group on `pe-aif-bank-data-p1-globaris-poc` (whatever it is called), plus any `setByPolicy-LogAnalytics` setting D1 turned up on those three resources. This is the runbook B1 action and it is explicitly sanctioned there. Do not delete anything on a resource that is not in the failing set.
+
+   **R3. Land the decision-2 exemption unit** (Cloud Engineer, reviewer gate, merge to `banking`) before re-dispatching. Without it the retry is a race against a remediation that is already running, and losing that race spends the U5 budget on a coin flip.
+
+   **R4. Plan, then apply** (ADR-060, always plan first). The plan bar for the retry: pure adds only; the 4 known adds plus the new exemption and `time_sleep` resources; **0 destroy, 0 replace, 0 import, 0 `already exists`**; changes limited to OQ-032 `CreatedDate` churn. Anything else is a STOP.
+
+5. **Steps 1 to 7 are NOT contaminated, and the check that proves it is cheap.** No already-green root holds a state-versus-Azure divergence today, because no green root is missing an object it created. The exposure that DOES exist is duplicate ingestion and a latent RequiresImport trap on the NEXT rebuild, on exactly five objects:
+
+   | Root | Object | Shape |
+   |---|---|---|
+   | `platform/management` (Step 2) | `azurerm_monitor_diagnostic_setting.automation_account` | root-level azurerm, in state |
+   | `platform/security` (Step 3) | `azurerm_monitor_diagnostic_setting.security_sub_activity` | root-level azurerm, subscription scope, in state |
+   | `platform/connectivity` (Step 4) | `azurerm_monitor_diagnostic_setting.firewall` (both hubs) | root-level azurerm, in state |
+   | `landing-zones/online-p1` (Step 7) | `azurerm_monitor_diagnostic_setting.appgw` = `diag-appgw-to-platform-law` | root-level azurerm, in state |
+
+   `corp-a1` and `corp-a2` (Steps 5 and 6) declare diagnostic settings only on the App Service, which is gated OFF by ADR-031/ADR-032, so those two roots created **zero** diagnostic settings and **zero** private endpoints. They are clean by construction. No root before Step 8 creates a private endpoint at all, so the zone-group conflict has no earlier surface.
+   **Operator check (PC-1D, cheap, read-only):** run `action=plan` on each green root and confirm zero adds of any `azurerm_monitor_diagnostic_setting`, 0 replace, 0 destroy, with only OQ-032 tag churn in the changes; and LIST the diagnostic settings on those five objects and confirm exactly one entry each. Two entries on any of them is duplicate ingestion to report, not a Terraform failure.
+
+6. **Step 9 (`landing-zones/bank-app-p1`) is GATED on this ruling. Do not dispatch it until the decision-2 exemption unit is merged and `bank-data-p1` is green.** The same conflict awaits and the economics are worse: this root declares **four** azurerm diagnostic settings (`diag-acr-*`, `diag-aks-*`, `diag-apim-*`, `diag-sbns-*`, all through the AVM `diagnostic_settings` input, all the exact failing shape) and creates three private endpoints with module-managed zone groups. The zone-group risk is lower than Foundry's because all three are single-zone and land in the same PUT as the private endpoint, which is the b2/b3 precedent; the Foundry three-zone group was the outlier. The diagnostic-setting risk is four times bank-data-p1's per-resource exposure, AKS `allLogs` is the largest duplicate-ingestion bill in the estate, and the APIM create runs 60 to 180 minutes. **Failing on a diagnostic setting after a ninety-minute APIM provision is the single most expensive failure available in this run, and it is the failure that has now fired six times (three resources across two applies).** Dispatching Step 9 unfixed is knowingly spending the most expensive slot on a known-armed failure.
+
+7. **OQ-021 is extended, not replaced, and its recommended option is REVERSED.** OQ-021 covers the diagnostics half of this exactly, and its Option A ("wire the platform LAW resource ID into the ALZ diagnostic-settings assignment parameter") is now shown to be **actively harmful if landed alone**: it converts a DINE that currently fails harmlessly into one that successfully writes a second `setByPolicy-LogAnalytics` setting onto every resource in the estate, including all 8 whose diagnostics Terraform owns. That means duplicate ingestion estate-wide AND it arms this exact RequiresImport failure on every future rebuild of every spoke. Option A is only safe when paired with decision 2's exemptions, and the two must land together or not at all. The private-DNS zone-group half is a DIFFERENT policy family and is NOT covered by OQ-021, so it goes to a new **OQ-067** together with the unresolved provenance sub-question.
+
+**Alternatives considered:**
+
+- **Full estate teardown and restart from Step 1 (the literal reading of ADR-067's addendum).** Rejected. It would discard seven green roots and roughly 1,391 applied resources to remove three objects that a single DELETE call each removes, and the restart would land in exactly the same place because the competing writer is a policy assignment that survives teardown. Reading the addendum as "any failure anywhere means teardown" also makes the runbook's own B5 and B7b rows (both "single rerun of the same root") dead letters, and this same rebuild already recovered Step 1's `PolicyAssignmentNotFound` by diagnostic-plan-then-retry without anyone calling for a teardown.
+- **Config-driven `import` of the three settings.** Rejected on two independent grounds. It is forbidden outright by ADR-067's addendum, and it is worse than deleting even if it were allowed: if D1 shows the live names are `setByPolicy-LogAnalytics`, the import would adopt a DINE-owned object under a Terraform address, leaving the policy free to keep rewriting a resource Terraform believes it controls.
+- **A third bare retry on the standing "known transient class" disposition.** Rejected. U5 has fired, and the class is not transient in the way that disposition assumed: a competing writer with a live policy assignment behind it recurs by design, not by timing.
+- **Fork the three AVM modules to inject a `time_sleep` before the diagnostic settings.** Rejected. It buys AVM divergence and a maintenance tail against a symptom, and it does not touch the private DNS zone group conflict at all. Retained as the fallback ONLY if the exemptions land and the failure still recurs, in which case the correct shape is not a fork but moving those three settings to root-level `azapi_resource` (which PUTs idempotently and has no RequiresImport pre-check, and is precisely why the datalake setting never failed).
+- **Turn the AVM `diagnostic_settings` inputs off and let DINE own diagnostics.** Rejected. See decision 1.
+- **Accept the duplicates.** Rejected. It is not available for zone groups (only one per private endpoint), and for diagnostics it means paying twice, indefinitely, for identical rows.
+
+**Consequences:**
+
+- Positive: one writer per object class, so the failure cannot recur by design rather than by timing. The estate keeps its in-code observability wiring and its DINE governance signal everywhere Terraform is not the writer. Seven green roots survive. The B1-versus-ADR-067 boundary is now a written test instead of a judgement call. The `deployedByPolicy` zone-group hazard is caught before Step 9 rather than after a 90-minute APIM create.
+- Negative / trade-offs: two more policy exemptions per affected root, which is real governance surface that a reviewer must be able to justify (the `Mitigated` category and the description field carry that justification). Another 300s propagation sleep in the apply path. Step 9 is delayed by the code change plus its reviewer gate. Any resource in an exempted RG that Terraform does NOT give a diagnostic setting will now have none at all, which is a deliberate trade and must be listed in the exemption description.
+- Follow-ups required:
+  1. Cloud Engineer implements decision 2 in `landing-zones/bank-data-p1` and `landing-zones/bank-app-p1` after D3 supplies the real assignment names and reference ids. One PR, both roots, reviewer gate.
+  2. Operator runs D1, D2, D3 and records the answers in OQ-067; runs R1 and R2; then R4.
+  3. Architect appends the retry disposition to `docs/preclearance/2026-07-22-full-estate-rebuild.md` (done in the same commit as this ADR: addendum 2026-07-31 B, PC-1DINE through PC-5DINE).
+  4. DevSecOps amends the runbook: PC-8S row `Deploy-Private-DNS-Zones` must stop reading "post-apply drift only, never a create blocker", and matrix 3d needs a row for this failure class pointing at B1 and at this ADR.
+  5. QA adds the duplicate-diagnostic-setting audit (decision 5's PC-1D LIST half) to the per-root acceptance criteria; it is a FinOps finding, not a pass/fail gate.
+  6. OQ-021 and OQ-067 are answered together, not separately, since landing either half alone is worse than landing neither.
+
 ### ADR-069: `centralus` becomes the PRIMARY region and `eastus2` the secondary/DR. The region pair was never actually decided - OQ-004 was raised at bootstrap and never answered, so `PROMPT.md`'s suggestion became the config by default and four separate capacity workarounds accumulated around a primary region that could not serve the estate. Resolves OQ-004.
 
 - **Date:** 2026-07-30

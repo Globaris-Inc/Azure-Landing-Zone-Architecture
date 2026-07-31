@@ -31,6 +31,101 @@
 
 <!-- Newest at the top. -->
 
+### OQ-067: Who owns private-endpoint DNS zone groups when ALZ DINE and Terraform both write them, and what actually created the three Terraform-named diagnostic settings before any DINE deployment started?
+
+- **Raised:** 2026-07-31 (architect, ruling ADR-070 on the twice-failed `bank-data-p1` apply)
+- **Section:** 9 (Landing Zone Spokes) / 2 (Management Group Hierarchy, the DINE assignments)
+- **Blocking:** **Item A: No** (ADR-070 decision 2 rules the mechanism; this entry records the live
+  values the implementer needs). **Item B: Yes for Step 9** - not because it changes the recovery,
+  which is the same either way, but because an unexplained writer producing Terraform-shaped names
+  must be identified before the estate's most expensive root is dispatched.
+- **Priority:** High
+- **Relates to:** ADR-070 (the ruling), OQ-021 (the diagnostics half of the same conflict - see its
+  2026-07-31 update, which REVERSES its recommended option), OQ-032 (the tag drift that accounts for
+  all 29 plan changes), ADR-028 / LESSON 35 (the exemption unit being reused).
+
+**Item A: the private-DNS DINE versus Terraform zone-group ownership.**
+
+OQ-021 covers the diagnostics half of this conflict. It does not cover `Deploy-Private-DNS-Zones`,
+which is a different policy family with a harder failure mode: Azure supports **only one private DNS
+zone group per private endpoint**, so a DINE-created `deployedByPolicy` group and a Terraform-created
+`default` group are not duplicates, they are mutually exclusive. On `pe-aif-bank-data-p1-globaris-poc`
+the DINE group would also carry one zone where the Foundry account needs three (cognitiveservices,
+openai, services.ai), so if the policy wins the race the private endpoint resolves incorrectly and
+Terraform's pending PUT collides.
+
+Three places in the repo currently classify this DINE as harmless - `docs/preclearance/landing-zones.md`
+row 12 ("post-apply drift, not a create blocker"), `docs/preclearance/b5-data-platform.md` row 8 ("PASS
+by proven precedent"), and the rebuild gate's PC-8S table ("post-apply drift only, never a create
+blocker"). That classification holds only while every private endpoint arrives WITH its zone group in
+the same PUT, which is the module-managed case. It is **false for any private endpoint whose zone group
+Terraform has not yet created**, which is exactly the state a failed apply leaves behind, and it is
+false for the one private endpoint in the estate whose zone group is authored natively rather than by
+the module.
+
+**Options being considered (item A):**
+- **A (RULED, ADR-070 decision 2): RG-scoped `Mitigated` exemption** on the resource groups holding
+  Terraform-owned private endpoints, with the ADR-028 / LESSON 35 unit (exemption + a NEW 300s
+  `time_sleep` + `depends_on` from every protected resource). Narrow, reversible, keeps the control
+  live everywhere else, and `Mitigated` records honestly that the policy's intent IS met by another
+  mechanism.
+- **B: `enforcementMode = "DoNotEnforce"` on the assignment at the MG** (the `Enable-DDoS-VNET`
+  precedent). Rejected as primary, retained as the fallback if an assignment's members cannot be
+  enumerated well enough to scope an exemption. It disarms the control for future workloads Terraform
+  does not manage.
+- **C: let DINE own zone groups and stop declaring them in Terraform.** Rejected: single-zone only, so
+  it cannot express the Foundry three-zone case at all, and it removes DNS wiring from code.
+
+**What the implementer needs, and cannot get from the repo (read D3 in ADR-070 decision 4):**
+the live policy ASSIGNMENT names and their `policyDefinitionReferenceIds` for both DINE families, at
+**every** ancestor scope of the landingzones subscription - tenant root, `globaris`, `landingzones` and
+`corp`. The failure evidence names policy DEFINITIONS ("Configure Cognitive Services accounts to use
+private DNS zones", "Configure a private DNS Zone ID for blob groupID", "... for dfs groupID"), and
+exemptions are written against assignments, not definitions. **Do not guess these names.** The prior
+session's "zero DINE diagnostic policies assigned at the landingzones MG" was true of that one scope
+and false of the estate, which is the exact ancestor-scope error LESSON 34 and the standing
+pre-clearance rule exist to prevent.
+
+**Item B: what created `diag-aif-bank-data-p1-globaris-poc` before 19:59:44?**
+
+The first apply failed at 19:59:44. The Foundry `PolicyDeployment` did not start until 20:00:24, forty
+seconds LATER. DINE therefore cannot have created the object the first apply tripped over. Neither can
+it explain the Databricks failure, for which the evidence shows no competing PolicyDeployment at all.
+The name `diag-<resource>` is computed by the AVM module from our own input, so nothing in Azure other
+than this Terraform would produce it.
+
+Two candidate explanations remain:
+
+- **B1: the objects genuinely exist under Terraform-shaped names.** Then something PUT them and lost
+  the acknowledgement, and the most likely writer is our own provider on a request whose response was
+  lost. There is no third-party owner, and delete-and-retry is completely safe.
+- **B2: the objects do not exist under those names, and the `already exists` is a provider false
+  positive.** The Azure Monitor `diagnosticSettings` GET returns something the azurerm RequiresImport
+  pre-check reads as an existing object for a name that was never created. This is a reported family
+  on the provider (hashicorp/terraform-provider-azurerm issues #7114, #11076, #19500, #25673, all
+  "already exists" on greenfield), and it fits the asymmetry in the evidence exactly: the datalake's
+  setting is an **azapi** resource, which PUTs idempotently with no pre-check, and it did not fail
+  while three azurerm siblings did.
+
+**The discriminator is one read (D1 in ADR-070 decision 4): LIST the diagnostic settings on all three
+resources and print the `name` of every entry verbatim, not the requested name from the URL.** The
+existing GET evidence cannot settle it, because the RequiresImport check and `az rest` issue the same
+API call - if that API is answering loosely it is answering loosely to both. Note also that "points at
+`law-platform-globaris-poc`" does not discriminate either: a Terraform-created setting and a
+DINE-created setting would both name that workspace. Pair it with **D2** (the DINE assignment's
+workspace parameter at every ancestor scope): if that parameter is still the zero-GUID subscription
+then OQ-021 holds, DINE cannot successfully write anything, and B2 is the only survivor.
+
+One more datum to capture while reading: three `PolicyDeployment_*` were still `Running` about 50
+minutes after starting. A diagnostic-setting PUT takes seconds. Either they are stuck, or their inner
+PUT is being retried against an unsatisfiable target, which is what an unwired workspace parameter
+would produce. Record the final `provisioningState` and any inner error code here.
+
+**Consequence of leaving item B unanswered:** an unidentified writer that produces Terraform-shaped
+object names is a bigger problem than a policy collision, because no exemption suppresses it. ADR-070
+does not block the `bank-data-p1` recovery on this (the action is identical under B1 and B2), but it
+does gate Step 9, where the same class would fire four times after a 60 to 180 minute APIM create.
+
 ### OQ-066: The centralus-primary flip (ADR-069) rests on capacity that is EVIDENCED for a subset and ASSUMED for the rest - plus a teardown that failed and left the estate non-greenfield
 
 - **Raised:** 2026-07-30 (architect, while ruling ADR-069 on the region flip)
@@ -2322,6 +2417,60 @@ re-apply - track and fix it on its own.
 **Consequence of leaving it:** the managed domain's and other targeted resources' diagnostic logs do not
 ship to the central platform LAW until the parameter is wired. This is an observability gap, not a
 security or availability one.
+
+**UPDATE 2026-07-31 (architect, ADR-070). STILL OPEN, but Option A is REVERSED as written and must
+never land alone. Body above unedited, per append-only.**
+
+This question is no longer only an observability gap. It is one half of a live ownership conflict that
+has now failed `landing-zones/bank-data-p1` twice during the centralus rebuild (runs `30661012325` and
+`30662610292`). ADR-070 rules the ownership; this entry records what changes here.
+
+**What changed.** Terraform declares diagnostic settings through the AVM `diagnostic_settings` input on
+eight resources estate-wide: `platform/management` (automation account), `platform/security`
+(subscription activity), `platform/connectivity` (both hub firewalls), `landing-zones/online-p1`
+(App Gateway), and four in `landing-zones/bank-app-p1` (ACR, AKS, APIM, Service Bus), plus the three in
+`landing-zones/bank-data-p1` that just failed. The `Deploy-Diag-LogsCat` DINE writes
+`setByPolicy-LogAnalytics` on the same scopes. Two settings on one resource pointing at the SAME
+workspace means the same rows are ingested twice and billed twice on the Analytics ingestion meter.
+For `allLogs` on AKS, APIM, Databricks and Foundry that is a real recurring cost for zero extra insight.
+
+**Why Option A alone is now actively harmful.** Option A wires the real platform LAW resource ID into
+the assignment parameter. Today the parameter resolves to the zero-GUID subscription, so every
+remediation fails and the DINE writes nothing - which is annoying but harmless. Wiring it converts a
+DINE that fails harmlessly into one that **succeeds** on every resource in the estate. That produces
+duplicate ingestion estate-wide, and it arms the azurerm `azurerm_monitor_diagnostic_setting`
+RequiresImport failure on every future rebuild of every spoke, which is exactly the failure that just
+cost this rebuild two applies. **Option A is only safe when it lands together with ADR-070 decision 2's
+RG-scoped `Mitigated` exemptions on the resource groups where Terraform owns the diagnostic settings.**
+The two must ship in one change or neither ships.
+
+**Option B is correspondingly stronger than when this was written**, but still not recommended:
+disabling the assignment loses the governance signal for everything Terraform does NOT wire, which is
+most of the estate.
+
+**New option C (recommended default, ADR-070 decision 1 + 2): keep the DINE, wire its parameter, and
+carve Terraform's own resource groups out of it by exemption.** One writer per resource. The policy
+keeps its scope over everything the estate's Terraform does not create, which is the governance signal
+Option B would have thrown away, and it loses that scope over everything Terraform does create, which
+is what removes the collision.
+
+**Sequencing (do not reorder).** The exemptions must be live and propagated (300s, LESSON 35) BEFORE
+the assignment parameter is wired. Wiring first and exempting second opens a window in which the DINE
+successfully writes competing settings across the whole estate, and every one of those becomes a
+survivor that a later apply trips over.
+
+**Corrections to the record this update carries.** The 2026-07-31 Steps 4-8 operator entry offered
+"zero DINE diagnostic policies assigned at the landingzones MG" as evidence that no policy could have
+created the disputed settings. That check read one scope. These assignments are inherited from an
+ANCESTOR management group, which is the precise failure mode LESSON 34 and the standing pre-clearance
+rule ("live policy matrix at EVERY ancestor MG scope") exist to prevent, and live `PolicyDeployment`
+evidence shows the family firing on these very resources.
+
+**Still open, and what would close it:** read D2 in ADR-070 decision 4 - the assignment's Log Analytics
+workspace parameter value at every ancestor scope. Zero-GUID means this question stands exactly as
+written. The real workspace ID means it has silently resolved and the duplicate-ingestion exposure is
+already live estate-wide, which would need the exemptions urgently rather than eventually. Answer this
+together with OQ-067, never separately.
 
 ### OQ-020: Can Cost Management exports write to the keyless cost-exports SA?
 

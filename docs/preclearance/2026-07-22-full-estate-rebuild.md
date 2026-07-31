@@ -2146,3 +2146,107 @@ what gets PUT; five plan bars certified expected-unchanged from pinned module so
 confirmed exact at 537; ADR-069 addendum lands the Landed field and narrows decision 3; RC-2 casing
 defect corrected
 ```
+
+---
+
+# 2026-07-31 ADDENDUM B - RETRY disposition for `landing-zones/bank-data-p1` (Step 8), and the Step 9 gate
+
+**Why this addendum exists.** The standing rule is that no first apply **or retry** of any root
+proceeds without a written architect disposition. `landing-zones/bank-data-p1` has now failed twice
+(runs `30661012325` and `30662610292`), which is already at the runbook's U5 hard-stop bar, so the
+next dispatch of this root is a FIXED dispatch and needs its own clearance. This addendum is
+append-only; nothing above the heading is edited. The ruling it enforces is **ADR-070**; the open
+items are **OQ-021 (updated 2026-07-31)** and **OQ-067**.
+
+## U0. VERDICT
+
+| Root | Verdict | Conditions |
+|---|---|---|
+| `landing-zones/bank-data-p1` (Step 8 retry) | **GO-CONDITIONAL** | PC-1DINE, PC-2DINE, PC-3DINE, PC-4DINE all discharged, in that order, before dispatch |
+| `landing-zones/bank-app-p1` (Step 9) | **NO-GO until PC-5DINE clears** | Gated on ADR-070 decision 6 |
+| Steps 1 to 7 (the seven green roots) | **NOT contaminated. No teardown.** | PC-1D is a cheap confirmation, not a blocker |
+
+**Full estate teardown is NOT ordered.** ADR-070 decision 3 gives the bright-line test and applies it:
+the blocking objects are deletable control-plane children with no data, no soft-delete, no purge
+protection and no dependents, and the pending plan reproduces them identically. That is runbook matrix
+**B1** (delete the specific survivor, rerun, do not import), not ADR-067. The seven green roots and
+roughly 1,391 applied resources stand.
+
+## U1. Conditions
+
+**PC-1DINE (BLOCKING, read-only, records provenance).** LIST the diagnostic settings on the Databricks
+workspace, the Foundry account and the Search service, and print the `name` of every entry **verbatim**,
+not the requested name from the URL. Expect either the three `diag-*` names or
+`setByPolicy-LogAnalytics`. Record which, in OQ-067. The recovery action is identical either way, so
+this does not block the retry - it blocks Step 9, and it is the only read that can settle OQ-067
+item B. Do not treat the existing GET evidence as sufficient: the provider's RequiresImport check and
+`az rest` issue the same call, so a loose answer is loose to both.
+
+**PC-2DINE (BLOCKING, read-only, tests OQ-021).** Read the diagnostics DINE assignment's Log Analytics
+workspace parameter at **every** ancestor scope of the landingzones subscription - tenant root,
+`globaris`, `landingzones`, `corp`. Zero-GUID means OQ-021 stands and the DINE cannot successfully
+write anything. The real `law-platform-globaris-poc` resource ID means OQ-021 has silently resolved and
+the duplicate-ingestion exposure is already live estate-wide. In the same pass, enumerate the live
+policy ASSIGNMENT names and their `policyDefinitionReferenceIds` for both the diagnostics and the
+private-DNS DINE families at those same four scopes; ADR-070 decision 2 cannot be implemented without
+them and they must not be guessed. **Checking only the `landingzones` scope is the exact error that
+produced the prior "zero DINE diagnostic policies" finding.**
+
+**PC-3DINE (BLOCKING, the settle gate).** Before deleting anything, confirm every deployment in
+`rg-bank-data-p1-workload-globaris-poc` whose name starts `PolicyDeployment` reads `provisioningState`
+in {`Succeeded`, `Failed`, `Canceled`}, none in {`Running`, `Accepted`}, **and** that a second read five
+minutes later returns the same set with no NEW `PolicyDeployment` name. Both reads are required: the
+first alone proves nothing about a remediation still queued. Deleting a survivor mid-remediation simply
+recreates it.
+**Cap:** a diagnostic-setting PUT takes seconds, so a deployment `Running` for 50 minutes is already
+pathological. If any is still `Running`/`Accepted` 90 minutes after it started, treat it as stuck, not
+slow: cancel it, re-read, proceed, and record it in OQ-067.
+
+**PC-4DINE (BLOCKING, the fix).** The decision-2 exemption unit is merged to `banking` before dispatch,
+and the dispatched `headSha` carries it (LESSON 33). Without it the retry races a live policy
+assignment, and losing that race spends the U5 budget on a coin flip. Delete the survivors (the three
+diagnostic settings named in the errors, plus ANY private DNS zone group on
+`pe-aif-bank-data-p1-globaris-poc`, plus anything PC-1DINE turned up on those three resources) only
+AFTER PC-3DINE clears and only on the failing set.
+
+**PC-5DINE (BLOCKING before Step 9).** `landing-zones/bank-app-p1` is not dispatched until the
+exemption unit is merged AND `bank-data-p1` is green. Four azurerm diagnostic settings of the exact
+failing shape (`diag-acr-*`, `diag-aks-*`, `diag-apim-*`, `diag-sbns-*`) sit behind a 60 to 180 minute
+APIM create. Failing on a diagnostic setting after a ninety-minute provision is the most expensive
+failure available in this run.
+
+## U2. Plan bar for the retry (Rule 1 applies unchanged)
+
+| Scan item | Bar |
+|---|---|
+| adds | the 4 known (3 diagnostic settings + `azapi_resource.foundry_pe_dns_zone_group["main"]`) plus the new exemption and its new `time_sleep` |
+| changes | OQ-032 `CreatedDate` churn ONLY, confirmed by opening a diff block, never by counting `-` prefixes |
+| destroys | 0 |
+| replacements (`must be replaced` / `-/+` / `forces replacement`) | 0 |
+| imports / `already exists` | **0**. Any recurrence here is a STOP and escalates to ADR-070's fallback (move the three settings to root-level `azapi_resource`), not a fourth retry |
+
+## U3. What this addendum does NOT clear
+
+- The provenance of the three settings before 19:59:44 (OQ-067 item B). Open by design; PC-1DINE and
+  PC-2DINE are the reads that close it.
+- Wiring the OQ-021 assignment parameter. Out of scope for this retry, and ADR-070 decision 7 rules it
+  must never land without the exemptions in the same change.
+- Steps 10 to 14. Untouched by this addendum.
+
+## U4. Correction to PC-8S in this document
+
+The PC-8S table row `Deploy-Private-DNS-Zones` DINE at corp reads "Post-apply drift only, never a
+create blocker | QA item". That is **false for any private endpoint whose zone group Terraform has not
+yet created**, which is exactly the state a failed apply leaves behind, and false for the Foundry
+account private endpoint whose three-zone group is authored natively rather than by the module. Azure
+supports only one private DNS zone group per private endpoint, so the policy's group and Terraform's
+group are mutually exclusive, not duplicative. Handed to DevSecOps as a runbook amendment
+(ADR-070 follow-up 4). Recorded here rather than edited above, per append-only.
+
+## Proposed commit message (addendum B)
+
+```
+docs(preclearance): 2026-07-31 addendum B - bank-data-p1 Step 8 RETRY cleared GO-CONDITIONAL on
+PC-1DINE..PC-4DINE, Step 9 gated on PC-5DINE; full teardown NOT ordered (ADR-070 decision 3, runbook
+B1 not ADR-067); PC-8S private-DNS DINE row corrected
+```
