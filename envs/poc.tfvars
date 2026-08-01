@@ -356,17 +356,28 @@ enable_ai_platform = true
 # (ADR-052 section 5). Supplied via TF_VAR_om_operator_notification_email in CI /
 # poc.secret.tfvars locally - NEVER committed here.
 #
-# HELD FALSE FOR THE B0a GREENFIELD REBUILD (2026-07-21, PC-4R option A in
-# docs/preclearance/b0a-redeploy.md section 8). On an empty tenant the two roots are
-# circular with the flag true: platform/management-groups selects globaris-amba, whose
-# Deploy-AMBA-* DINE assignments reference id-amba-prod-001 by constructed resource id,
-# but that MI is created by platform/management, which cannot apply before the MG tree
-# exists (it writes a Globaris-root role assignment and three MG-scope budgets). False
-# reproduces the proven 2026-07-16 green B0a (globaris architecture, no AMBA module;
-# plan-scan precedents 537 / 36 / 48 adds). Flip back to true to re-land wave B7 as an
-# increment on a green estate, in the ORDERING above (platform/management first, verify
-# the MI is live, then platform/management-groups).
-enable_om_phase1 = false
+# TRUE IS THE STEADY STATE. This is the wave B7 re-land (rebuild runbook STEPS 13-14),
+# flipped on 2026-07-31 once STEPS 1 through 12 of the full-estate rebuild were all
+# green (~1,495 resources live). True is the normal, intended value for an estate that
+# is already standing.
+#
+# READ THIS BEFORE ANY FRESH GREENFIELD REBUILD: set this back to false for STEPS 1
+# through 12, and flip it to true only AFTER STEP 12 is green. False is a greenfield
+# ORDERING workaround (2026-07-21, PC-4R option A in docs/preclearance/b0a-redeploy.md
+# section 8), not a feature toggle. On an empty tenant the two roots are circular with
+# the flag true: platform/management-groups selects globaris-amba, whose Deploy-AMBA-*
+# DINE assignments reference id-amba-prod-001 by constructed resource id, but that MI is
+# created by platform/management, which cannot apply before the MG tree exists (it writes
+# a Globaris-root role assignment and three MG-scope budgets). False reproduces the
+# proven 2026-07-16 green B0a (globaris architecture, no AMBA module; plan-scan
+# precedents 537 / 36 / 48 adds). Bail-out check (runbook B4): if a greenfield
+# management-groups plan shows a resource count in the 700s, or any address referencing
+# rg-amba-monitoring-001 / id-amba-prod-001, this flag was left true too early - stop and
+# reset it to false before applying.
+#
+# Re-landing on a green estate follows the ORDERING above: platform/management first,
+# verify id-amba-prod-001 is live, then platform/management-groups.
+enable_om_phase1 = true
 
 # ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
