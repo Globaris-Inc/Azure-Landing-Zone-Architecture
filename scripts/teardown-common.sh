@@ -630,6 +630,178 @@ databricks_force_delete_cascade() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# ADR-072 (2026-08-01) - the PRE-DESTROY ATTACHMENT SWEEP. A cross-root RP-ATTACHED object is
+# one an Azure resource provider or platform addon creates inside root B's resource group as a
+# side effect of a configuration DECLARED in a DIFFERENT root A (ADR-072 decision 5,
+# "attachment declares ownership" - root A owns the object, root B only owns the container).
+# Two live classes today, both landing in platform/management's resource group:
+#   - Traffic Analytics' Microsoft.Insights/dataCollectionEndpoints and .../dataCollectionRules,
+#     named NWTA-<derived from the platform workspace's regenerated customerId> - created and
+#     ACTIVELY MANAGED by Traffic Analytics itself (four spoke roots' flow-log blocks point at
+#     the platform workspace: corp-a1, online-p1, bank-app-p1, bank-data-p1 - corp-a2's block is
+#     commented out). Microsoft's own "Manage virtual network flow logs" reference
+#     (learn.microsoft.com/en-us/azure/network-watcher/vnet-flow-logs-manage, verified
+#     2026-08-01) states verbatim that Traffic Analytics creates and manages this DCR/DCE pair
+#     in the workspace's own resource group, prefixed NWTA, and warns against operating on them
+#     directly - Traffic Analytics creates ONE pair per WORKSPACE, not per flow log.
+#   - Microsoft.OperationsManagement/solutions - the ContainerInsights object created by
+#     landing-zones/bank-app-p1's AKS monitoring addon (`use_aad_auth = false`, the legacy
+#     workspace-key Container Insights path - OQ-068). No root in this estate declares
+#     azurerm_log_analytics_solution (grep-confirmed 2026-08-01), so this type is narrow enough
+#     that any instance found in an estate-owned RG belongs to this class.
+#
+# ORDERING CONSTRAINT - the exact MIRROR of ADR-063 G-1 (a resource-scoped diagnostic setting,
+# keyed to its HOST's URI, must be swept BEFORE the host is destroyed - teardown-az-sweep.sh's
+# "step 2-pre"). An attachment object is keyed to its CONTAINER, not a host resource, so the
+# ordering inverts: it must be swept AFTER every declaring root has destroyed (sweeping while a
+# creator is still live invites the live RP to simply recreate what was just deleted - Microsoft
+# explicitly documents Traffic Analytics as actively managing its pair) and BEFORE the
+# container-owning root (platform/management) destroys its resource group (or the delete is
+# refused by `prevent_deletion_if_contains_resources`, ADR-072 decision 2's rejected
+# alternative). Callers must run this between the LAST declaring root's destroy and
+# platform/management's own destroy - see teardown.yml's "Phase 1.5" job for the exact position.
+#
+# SCOPE, a three-part predicate, in this exact order (ADR-072 decision 4):
+#   (a) CONTAINMENT - the resource group is estate-owned (is_estate_owned --rg, matching the
+#       SAME RG_SWEEP_QUERY discover_live_rgs already filters on).
+#   (b) TYPE - exactly the two Insights types in ATTACHMENT_SWEEP_DCE_DCR_TYPES below, or
+#       Microsoft.OperationsManagement/solutions.
+#   (c) For the two Insights types ONLY, NAME PREFIX "NWTA-" (Microsoft's documented, stable
+#       prefix for this class - see above). The solutions type carries no name-prefix filter -
+#       the type itself is the discriminator (decision 4's own wording: "the type filter is what
+#       keeps this a sweep of a named class rather than a delete-everything-here").
+#
+# DISCOVERY, NOT ENUMERATION (ADR-062 discipline, decision 4's own instruction): list by type
+# within every estate-owned RG across all 5 subscriptions, never a hardcoded name - the NWTA
+# names are non-deterministic (they inherit the workspace's regenerated customerId,
+# docs/estate-bom.md finding 1), so a name-literal list would already be wrong on the very next
+# rebuild.
+#
+# API versions verified live against Microsoft Learn 2026-08-01 (this ADR's own context table):
+#   Microsoft.Insights/dataCollectionEndpoints and .../dataCollectionRules - 2024-03-11 is the
+#     current documented version (learn.microsoft.com/en-us/azure/templates/microsoft.insights/
+#     datacollectionendpoints lists Latest/2024-03-11/2023-03-11/2022-06-01/...).
+#   Microsoft.OperationsManagement/solutions - 2015-11-01-preview is the ONLY version Microsoft
+#     documents for this type (learn.microsoft.com/en-us/azure/templates/
+#     microsoft.operationsmanagement/solutions lists only Latest and 2015-11-01-preview) - it has
+#     never left preview, matching the AVM module's own pinned version for this resource.
+ATTACHMENT_SWEEP_DCE_DCR_TYPES=("Microsoft.Insights/dataCollectionEndpoints" "Microsoft.Insights/dataCollectionRules")
+ATTACHMENT_DCE_DCR_API_VERSION="2024-03-11"
+ATTACHMENT_SOLUTIONS_TYPE="Microsoft.OperationsManagement/solutions"
+ATTACHMENT_SOLUTIONS_API_VERSION="2015-11-01-preview"
+
+# attachment_sweep_cross_root_objects - runs the decision-4 sweep across all 5 estate
+# subscriptions. List-call failure: FAIL LOUD (section 9.4) - a live RG's own resource-type list
+# can never legitimately fail. Delete-submission failure: is_auth_error fails loud; anything
+# else warns and continues (idempotent retry on the next run), matching every other delete in
+# this codebase. Confirm-GET after every delete via confirm_gone_or_fail_primary (ADR-072
+# decision 4's own instruction) - this class has NO separate Phase 3 VERIFY step (VERIFY
+# enumerates known RG-scope classes - budgets, policy exemptions - but has no per-type resource
+# scan within a surviving RG), so this confirm-GET is the ONLY completion check this class will
+# ever get, the same "no separate VERIFY step" rationale that function's own comment documents
+# for MG scope. Zero matching objects anywhere is success, not an error - most RGs, most of the
+# time, have nothing here.
+#
+# NOT A HARD GATE (ADR-072 decision 4, mirrors ADR-066 decision 4's Databricks-precascade
+# wiring): this function's own non-zero return must be loud, but the CALLER (teardown.yml's
+# Phase 1.5 job) must never be read by `management`'s own `if:` - a residual left behind by a
+# failure here surfaces instead as platform/management's own
+# `prevent_deletion_if_contains_resources` error (a genuine, informative Phase 1 red) or a Phase
+# 2 RG-sweep / Phase 3 VERIFY 2 remnant, never as a silently-skipped mandatory layer.
+attachment_sweep_cross_root_objects() {
+  local overall_fail=0
+  local sub rg_names_out rg
+  for sub in $(teardown_subscriptions); do
+    if ! discover_live_rgs rg_names_out "$sub"; then
+      echo "::error::attachment sweep: RG list failed for subscription ${sub} - a failed list is never read as 'no RGs' (section 9.4): ${AZ_RUN_STDERR}"
+      overall_fail=1
+      continue
+    fi
+    local -a rg_names
+    mapfile -t rg_names <<< "$rg_names_out"
+    for rg in "${rg_names[@]:-}"; do
+      [ -z "$rg" ] && continue
+      if ! is_estate_owned --rg "$rg"; then
+        echo "::error::attachment sweep: RG ${rg} (sub ${sub}) returned by discover_live_rgs did not classify as estate-owned by is_estate_owned - structurally impossible for an RG_SWEEP_QUERY-matched row. Failing loud rather than silently skipping."
+        overall_fail=1
+        continue
+      fi
+      local rg_id="/subscriptions/${sub}/resourceGroups/${rg}"
+
+      # (b)+(c): the two Traffic Analytics types, filtered client-side to the NWTA- prefix.
+      local dce_dcr_type
+      for dce_dcr_type in "${ATTACHMENT_SWEEP_DCE_DCR_TYPES[@]}"; do
+        local dce_dcr_names_out
+        if ! az_run_retry dce_dcr_names_out resource list --resource-group "$rg" --subscription "$sub" \
+            --resource-type "$dce_dcr_type" --query "[].name" -o tsv; then
+          echo "::error::attachment sweep: ${dce_dcr_type} list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'none present' (section 9.4): ${AZ_RUN_STDERR}"
+          overall_fail=1
+          continue
+        fi
+        local -a dce_dcr_names
+        mapfile -t dce_dcr_names <<< "$dce_dcr_names_out"
+        local dce_dcr_name
+        for dce_dcr_name in "${dce_dcr_names[@]:-}"; do
+          [ -z "$dce_dcr_name" ] && continue
+          case "$dce_dcr_name" in
+            NWTA-*) ;;
+            *) continue ;;  # name-prefix predicate (c) - not this class
+          esac
+          echo "  Deleting attachment object ${dce_dcr_type}/${dce_dcr_name} (RG ${rg}, sub ${sub})"
+          local dce_dcr_url="${ARM_BASE}${rg_id}/providers/${dce_dcr_type}/${dce_dcr_name}?api-version=${ATTACHMENT_DCE_DCR_API_VERSION}"
+          local dce_dcr_del_out
+          if ! dce_dcr_del_out="$(az rest --method delete --url "$dce_dcr_url" --output none 2>&1)"; then
+            if is_auth_error "$dce_dcr_del_out"; then
+              echo "::error::attachment sweep: delete for ${dce_dcr_type}/${dce_dcr_name} (RG ${rg}, sub ${sub}) failed with an auth/transport error: ${dce_dcr_del_out}"
+              overall_fail=1
+            else
+              echo "  ::warning::attachment sweep: delete for ${dce_dcr_type}/${dce_dcr_name} failed or already gone (continuing - idempotent retry on next run): ${dce_dcr_del_out}"
+            fi
+            continue
+          fi
+          confirm_gone_or_fail_primary "attachment sweep: ${dce_dcr_type}/${dce_dcr_name} (RG ${rg}, sub ${sub})" "$dce_dcr_url" \
+            "this class has no separate Phase 3 VERIFY step - VERIFY has no per-type resource scan within a surviving RG" \
+            || overall_fail=1
+        done
+      done
+
+      # (b): Microsoft.OperationsManagement/solutions - no name-prefix filter (the type itself
+      # is the discriminator, decision 4).
+      local sol_names_out
+      if ! az_run_retry sol_names_out resource list --resource-group "$rg" --subscription "$sub" \
+          --resource-type "$ATTACHMENT_SOLUTIONS_TYPE" --query "[].name" -o tsv; then
+        echo "::error::attachment sweep: ${ATTACHMENT_SOLUTIONS_TYPE} list failed for RG ${rg} (sub ${sub}) - a failed list is never read as 'none present' (section 9.4): ${AZ_RUN_STDERR}"
+        overall_fail=1
+        continue
+      fi
+      local -a sol_names
+      mapfile -t sol_names <<< "$sol_names_out"
+      local sol_name
+      for sol_name in "${sol_names[@]:-}"; do
+        [ -z "$sol_name" ] && continue
+        echo "  Deleting attachment object ${ATTACHMENT_SOLUTIONS_TYPE}/${sol_name} (RG ${rg}, sub ${sub})"
+        local sol_url="${ARM_BASE}${rg_id}/providers/${ATTACHMENT_SOLUTIONS_TYPE}/${sol_name}?api-version=${ATTACHMENT_SOLUTIONS_API_VERSION}"
+        local sol_del_out
+        if ! sol_del_out="$(az rest --method delete --url "$sol_url" --output none 2>&1)"; then
+          if is_auth_error "$sol_del_out"; then
+            echo "::error::attachment sweep: delete for ${ATTACHMENT_SOLUTIONS_TYPE}/${sol_name} (RG ${rg}, sub ${sub}) failed with an auth/transport error: ${sol_del_out}"
+            overall_fail=1
+          else
+            echo "  ::warning::attachment sweep: delete for ${ATTACHMENT_SOLUTIONS_TYPE}/${sol_name} failed or already gone (continuing - idempotent retry on next run): ${sol_del_out}"
+          fi
+          continue
+        fi
+        confirm_gone_or_fail_primary "attachment sweep: ${ATTACHMENT_SOLUTIONS_TYPE}/${sol_name} (RG ${rg}, sub ${sub})" "$sol_url" \
+          "this class has no separate Phase 3 VERIFY step - VERIFY has no per-type resource scan within a surviving RG" \
+          || overall_fail=1
+      done
+    done
+  done
+  return "$overall_fail"
+}
+# ---------------------------------------------------------------------------
+
 # confirm_gone_by_get "<url>" - the confirm-GET pattern VERIFY 9 already established (ARG
 # proposes, ARM disposes: confirm liveness with a direct GET before trusting a list/discovery
 # result), promoted to a shared helper so the probe and FIX-1..FIX-5 do not each re-implement
@@ -841,6 +1013,47 @@ is_transient_error() {
   printf '%s' "$text" | grep -qiE 'Internal Server Error|InternalServerError|Bad Gateway|BadGateway|Service Unavailable|ServiceUnavailable|Gateway Timeout|GatewayTimeout|Too Many Requests|TooManyRequests|RetryableError|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b'
 }
 
+# is_storage_network_rule_error "<text>" - classifies captured az/curl stderr as a STORAGE-
+# ACCOUNT-FIREWALL PROPAGATION race (2026-08-01, live evidence: Phase 4 STATE RESET runs
+# `30707957054` and `30709287789`, plus one earlier occurrence - three reproductions, not one).
+# Matches Azure's own literal hint text, case-insensitive: "may be blocked by network rules of
+# storage account".
+#
+# THIS IS NOT is_transient_error (it is not an HTTP 5xx/429 server error) and it is deliberately
+# checked BEFORE is_auth_error even though it is very likely also 403-shaped - the SAME
+# precedence flip this codebase already uses once, for the SAME reason
+# (`_is_authz_denied_design_gap` in teardown-disarm.sh/teardown-az-sweep.sh): the two failure
+# shapes are structurally distinct. A genuine dead/expired OIDC token fails at the AUTHENTICATION
+# layer (AADSTS7xxxxx / "valid time range" - Azure AD rejects the token before Storage ever sees
+# the request). This error is a STORAGE-SERVICE-side response: the calling principal IS
+# authenticated and IS authorized (RBAC), and the account's `default_action` WAS flipped to
+# Allow moments earlier by THIS SAME job - it is rejected by the account's NETWORK rules
+# specifically, which is a materially different, and non-auth, failure.
+#
+# Live evidence this is a genuine PER-FRONT-END-NODE race, not an unpropagated rule caught
+# early (ADR-025/LESSON 30 already documents that the Allow flip is monotonic once propagated
+# but propagation itself is "not instant and not consistent across front-end nodes" - this is
+# that same behaviour recurring on a DIFFERENT call shape than the one LESSON 30 first found
+# it on): a `blob show` succeeded and the VERY NEXT `blob download` against the SAME blob,
+# seconds later, failed with this exact text - two consecutive requests landed on two different
+# front ends, one settled and one not. Reproduced at 153 bytes (the canonical empty document)
+# as well as 24 MB, so blob size is not the variable either.
+#
+# THE EXISTING 3-CONSECUTIVE-PROBE-SUCCESS GATE (`_tf-root.yml`/`teardown.yml`'s "Open state SA
+# firewall" step) IS INSUFFICIENT EVIDENCE AGAINST THIS, NOT BROKEN, AND MUST NOT BE WIDENED
+# FURTHER TO "FIX" IT: succeeding against whichever front end that probe happens to land on says
+# nothing about the front end an unrelated LATER request lands on - raising the probe count only
+# makes the SAME kind of claim more confidently, it does not change what the claim can prove.
+# The fix is retrying the INDIVIDUAL blocked operation instead: each retry re-rolls which front
+# end serves it, and the bounded wait gives Azure's own propagation (documented as taking "up to
+# a few minutes") real time to finish settling everywhere. This does not widen the firewall
+# model in any way - default_action is never touched here, only whether a single request is
+# retried before failing loud.
+is_storage_network_rule_error() {
+  local text="${1:-}"
+  printf '%s' "$text" | grep -qiE 'may be blocked by network rules of storage account'
+}
+
 # az_run <out_var> <az subcommand args...> - run `az <args>`, capturing STDOUT ONLY into the
 # named variable and STDERR into the global AZ_RUN_STDERR. Returns az's own exit code
 # unmolested.
@@ -901,18 +1114,45 @@ az_run() {
 # is only ever inspected on ITS OWN failure branch, never fed to a compare/mapfile as data (the
 # `az_run` Finding #2 discipline above) - retrying a write is a materially different and more
 # dangerous problem (the idempotency of the OPERATION, not just of reading its result) that this
-# helper does not attempt to solve. Do not wire it in at a delete call site.
+# helper does not attempt to solve. Do not wire it in at a delete call site. (The one exception in
+# this codebase, `retry_blob_action_on_network_rule` below, is a DIFFERENT helper for a DIFFERENT,
+# narrower reason - see its own comment for why retrying THOSE specific writes is safe.)
+#
+# AMENDED 2026-08-01 (Phase 4 firewall-race fix, three reproductions - see
+# is_storage_network_rule_error's own comment for the full incident). Added a SECOND, separately-
+# bounded retry branch, checked BEFORE is_auth_error: `is_storage_network_rule_error` needs a
+# LONGER window than a transient 5xx/429 (Azure's own firewall propagation is documented as
+# taking "up to a few minutes", not the seconds a server blip clears in), so it gets its own
+# attempt/sleep constants rather than sharing AZ_RUN_RETRY_ATTEMPTS/SLEEP_SECONDS. This is safe to
+# apply UNIVERSALLY to every `az_run_retry` caller in this codebase (not just
+# scripts/teardown-state-reset.sh, where it was found) because the exact matched text can only
+# ever be produced by an `az storage` call against a network-ACL'd account - no other command
+# family in this codebase (`az policy`, `az group`, `az keyvault`, `az databricks`, `az account
+# management-group`, `az rest` against ARM) can produce it, so no other caller's behaviour changes
+# at all.
 AZ_RUN_RETRY_ATTEMPTS="${AZ_RUN_RETRY_ATTEMPTS:-3}"
 AZ_RUN_RETRY_SLEEP_SECONDS="${AZ_RUN_RETRY_SLEEP_SECONDS:-10}"
+AZ_RUN_RETRY_STORAGE_NETWORK_ATTEMPTS="${AZ_RUN_RETRY_STORAGE_NETWORK_ATTEMPTS:-8}"
+AZ_RUN_RETRY_STORAGE_NETWORK_SLEEP_SECONDS="${AZ_RUN_RETRY_STORAGE_NETWORK_SLEEP_SECONDS:-20}"
 az_run_retry() {
   local __out_var="$1"
   shift
-  local __attempt=1 __rc
+  local __attempt=1 __network_attempt=1 __rc
   while :; do
     az_run "$__out_var" "$@"
     __rc=$?
     if [ "$__rc" -eq 0 ]; then
       return 0
+    fi
+    if is_storage_network_rule_error "$AZ_RUN_STDERR"; then
+      if [ "$__network_attempt" -ge "$AZ_RUN_RETRY_STORAGE_NETWORK_ATTEMPTS" ]; then
+        echo "  ::warning::az_run_retry: attempt ${__network_attempt}/${AZ_RUN_RETRY_STORAGE_NETWORK_ATTEMPTS} of 'az $*' still blocked by a storage-account network rule (front-end propagation race, not an auth failure - see is_storage_network_rule_error) - no attempts remain, returning the failure to the caller: ${AZ_RUN_STDERR}"
+        return "$__rc"
+      fi
+      echo "  ::warning::az_run_retry: attempt ${__network_attempt}/${AZ_RUN_RETRY_STORAGE_NETWORK_ATTEMPTS} of 'az $*' blocked by a storage-account network rule (front-end propagation race, not an auth failure) - retrying in ${AZ_RUN_RETRY_STORAGE_NETWORK_SLEEP_SECONDS}s: ${AZ_RUN_STDERR}"
+      sleep "$AZ_RUN_RETRY_STORAGE_NETWORK_SLEEP_SECONDS"
+      __network_attempt=$((__network_attempt + 1))
+      continue
     fi
     if is_auth_error "$AZ_RUN_STDERR"; then
       return "$__rc"
@@ -926,6 +1166,63 @@ az_run_retry() {
     fi
     echo "  ::warning::az_run_retry: attempt ${__attempt}/${AZ_RUN_RETRY_ATTEMPTS} of 'az $*' failed with a transient error (HTTP 5xx/429) - retrying in ${AZ_RUN_RETRY_SLEEP_SECONDS}s: ${AZ_RUN_STDERR}"
     sleep "$AZ_RUN_RETRY_SLEEP_SECONDS"
+    __attempt=$((__attempt + 1))
+  done
+}
+
+# retry_blob_action_on_network_rule <out_text_var> <az storage blob ... args...> - the
+# ACTION-call (download/upload) counterpart to az_run_retry's new is_storage_network_rule_error
+# branch above (2026-08-01, Phase 4 firewall-race fix). `az storage blob download`/`upload` are
+# not LIST/GET calls whose stdout is consumed as data (download writes to `--file`; upload passes
+# `--output none`), so they are captured directly with `2>&1` at every call site in this codebase
+# already, never through `az_run` - this helper preserves that same direct-capture shape (never
+# touches `az_run`'s separated-stream plumbing, which these calls do not need) and adds ONLY the
+# bounded retry, into `out_text_var`, matching `az_run`'s own "populate the named var, return az's
+# exit code" contract so callers change nothing beyond the function name.
+#
+# Retrying THESE specific writes is safe where az_run_retry's own header forbids retrying a write
+# in general: both call sites this helper exists for are IDEMPOTENT by construction - a download
+# of an existing blob into a fresh temp file, and an upload of the canonical empty state document
+# this same script just built with `--overwrite true` - re-running either produces the identical
+# result. This is a narrower guarantee than "never retry a write" needs to assume, not a
+# contradiction of it; a caller reaching for this helper for an ARM POST/DELETE with side effects
+# would be using it wrong.
+#
+# Same precedence and bound as az_run_retry's new branch: is_storage_network_rule_error is
+# checked FIRST (before this function would otherwise just fail on the first attempt), using the
+# SAME AZ_RUN_RETRY_STORAGE_NETWORK_ATTEMPTS/SLEEP_SECONDS constants so an operator reasons about
+# one number for this whole failure class regardless of which call shape hit it.
+#
+# CORRECTED 2026-08-01 at the code-review gate, before this ever ran live. The first version
+# wrote `if __out="$(az "$@" 2>&1)"; then ... ; fi` with no `else`, then read `__rc=$?`
+# immediately after the `fi`. Under POSIX/bash, an `if` construct whose condition is false and
+# which has no `else` clause has its OWN exit status defined as 0, regardless of the failing
+# condition's real exit code (`bash -c 'if false; then :; fi; echo $?'` prints `0`) - so `__rc`
+# was ALWAYS 0, and both failure branches below always returned success. Fixed by mirroring
+# `az_run_retry`'s own correct shape: assign in a plain statement, capture `$?` on the very next
+# line with no `if` in between, THEN branch on the captured value with an explicit numeric test.
+retry_blob_action_on_network_rule() {
+  local __out_var="$1"
+  shift
+  local __attempt=1 __rc __out
+  while :; do
+    __out="$(az "$@" 2>&1)"
+    __rc=$?
+    if [ "$__rc" -eq 0 ]; then
+      printf -v "$__out_var" '%s' "$__out"
+      return 0
+    fi
+    if ! is_storage_network_rule_error "$__out"; then
+      printf -v "$__out_var" '%s' "$__out"
+      return "$__rc"
+    fi
+    if [ "$__attempt" -ge "$AZ_RUN_RETRY_STORAGE_NETWORK_ATTEMPTS" ]; then
+      printf -v "$__out_var" '%s' "$__out"
+      echo "  ::warning::retry_blob_action_on_network_rule: attempt ${__attempt}/${AZ_RUN_RETRY_STORAGE_NETWORK_ATTEMPTS} of 'az $*' still blocked by a storage-account network rule (front-end propagation race, not an auth failure) - no attempts remain: ${__out}"
+      return "$__rc"
+    fi
+    echo "  ::warning::retry_blob_action_on_network_rule: attempt ${__attempt}/${AZ_RUN_RETRY_STORAGE_NETWORK_ATTEMPTS} of 'az $*' blocked by a storage-account network rule (front-end propagation race, not an auth failure) - retrying in ${AZ_RUN_RETRY_STORAGE_NETWORK_SLEEP_SECONDS}s: ${__out}"
+    sleep "$AZ_RUN_RETRY_STORAGE_NETWORK_SLEEP_SECONDS"
     __attempt=$((__attempt + 1))
   done
 }

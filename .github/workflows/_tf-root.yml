@@ -31,6 +31,14 @@
 # empty or absent, so a never-deployed or already-emptied root can never fail. This is the
 # root-level half of the teardown redesign; the workflow-level half (no cascade-skip on a
 # sibling root's failure) lives in teardown.yml.
+#
+# Bounded destroy (2026-08-01, DevSecOps fix - teardown run 30685705802): action=destroy
+# optionally wraps `terraform destroy` in coreutils `timeout` when the caller sets
+# `destroy_timeout_minutes` (see that input's own doc comment). Off (empty string) by default
+# for every root; teardown.yml sets it only for a single-root platform/management-groups
+# dispatch, the one root with an observed multi-hour silent-refresh-stall signature. A job-level
+# `timeout-minutes:` cannot be used here - GitHub Actions rejects that key outright on any job
+# whose body is `uses: <reusable workflow>`, which is the only way this file is ever called.
 name: _terraform-root
 
 on:
@@ -115,6 +123,27 @@ on:
         # silently mis-set a tenant-wide Conditional Access gate). deploy.yml only ever
         # threads a non-blank value into the identity job call.
         description: "'' (no override, code default true) | 'false' (Pass 1) | 'true' (Pass 2, explicit). Ignored by every root that does not declare enable_conditional_access."
+        required: false
+        type: string
+        default: ""
+      destroy_timeout_minutes:
+        # DevSecOps fix (teardown run 30685705802 - the platform/management-groups six-hour
+        # refresh-stall incident). '' (default) = no override, action=destroy behaves exactly as
+        # before this input existed (bounded only by the job's own 360-minute GitHub Actions
+        # default). A non-empty value wraps ONLY the `terraform destroy` command itself in the
+        # coreutils `timeout` utility (present on ubuntu-latest) - never plan/apply/untaint/
+        # force-unlock, and never the surrounding steps. This is deliberately a STEP-level shell
+        # timeout, not a job-level `timeout-minutes:` - GitHub Actions rejects `timeout-minutes`
+        # outright on any job whose body is `uses: <reusable workflow>` ("Unexpected value
+        # 'timeout-minutes'", confirmed against GitHub community discussion #50481, 2026-08-01),
+        # and this workflow is always called that way. A shell-level timeout is also the BETTER
+        # mechanism on its own merits: it kills only the stuck subprocess, so every later step in
+        # the same job - crucially "Restore state SA firewall to Deny" - still runs with a LIVE
+        # OIDC token, instead of the whole job (and the token with it) dying at the same instant,
+        # which is exactly what happened in the incident this fixes. Ignored by every action other
+        # than destroy. Any value must be a plain positive integer (minutes) - validated below
+        # before use, never interpolated unchecked into the `timeout` invocation.
+        description: "'' (no override, default) | a positive integer of minutes to bound `terraform destroy` by (coreutils `timeout`, not a job-level GH Actions timeout). Ignored by every action other than destroy."
         required: false
         type: string
         default: ""
@@ -391,10 +420,50 @@ jobs:
             echo "has_state=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # destroy_timeout_minutes (see that input's own doc comment for the full incident and
+      # rationale): '' (the default, every root except a bounded platform/management-groups
+      # single-root dispatch) runs the identical unbounded `terraform destroy` this step always
+      # ran. A non-empty value validates as a plain positive integer (never interpolated
+      # unchecked into `timeout`) and wraps ONLY this command in coreutils `timeout <N>m`. Exit
+      # code 124 (timeout's own SIGTERM signal) is treated as a genuine step failure - never
+      # silently swallowed - so a stalled destroy still fails the job loud, just far sooner and
+      # with every later step (notably the state-SA-firewall Restore-to-Deny) still able to run
+      # on a live token.
       - name: Terraform Destroy
         if: ${{ inputs.action == 'destroy' && steps.state_check.outputs.has_state == 'true' }}
         working-directory: ${{ inputs.root }}
-        run: terraform destroy -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve
+        env:
+          DESTROY_TIMEOUT_MINUTES: ${{ inputs.destroy_timeout_minutes }}
+        run: |
+          set -euo pipefail
+          cmd=(terraform destroy -var-file="${{ inputs.backend_rel }}envs/poc.tfvars" -input=false -auto-approve)
+          if [ -z "$DESTROY_TIMEOUT_MINUTES" ]; then
+            "${cmd[@]}"
+          else
+            case "$DESTROY_TIMEOUT_MINUTES" in
+              ''|*[!0-9]*)
+                echo "::error::destroy_timeout_minutes must be a plain positive integer (minutes) - got '${DESTROY_TIMEOUT_MINUTES}'."
+                exit 1
+                ;;
+            esac
+            # Reject a NUMERIC zero, not just the literal string "0" - "00"/"000" are all-digit
+            # and would pass the case pattern above, but GNU coreutils `timeout` treats ANY
+            # zero-valued duration as "no timeout", not only the exact string "0" (reproduced
+            # live: `timeout 0 sleep 5` runs the full 5 seconds and exits 0). A future
+            # parameterised caller landing on a zero-valued input would get an UNBOUNDED destroy
+            # while this step's own log claims it is bounded - the exact failure this mechanism
+            # exists to prevent. Dormant today (the only caller hardcodes "90"), fixed before it
+            # could ever fire (code-review BLOCK, 2026-08-01). `10#` forces base-10 interpretation
+            # so a zero-padded value (e.g. "010") is never misread as octal by bash arithmetic
+            # (the same discipline scripts/teardown-state-reset.sh already uses for its own
+            # serial-increment, for the identical reason).
+            if [ "$((10#$DESTROY_TIMEOUT_MINUTES))" -le 0 ]; then
+              echo "::error::destroy_timeout_minutes must be a positive integer greater than zero (minutes) - GNU 'timeout' treats any zero-valued duration as no timeout at all. Got '${DESTROY_TIMEOUT_MINUTES}'."
+              exit 1
+            fi
+            echo "Bounding this destroy to ${DESTROY_TIMEOUT_MINUTES} minute(s) (coreutils timeout, not a job-level GH Actions timeout - see destroy_timeout_minutes' own doc comment)."
+            timeout "${DESTROY_TIMEOUT_MINUTES}m" "${cmd[@]}"
+          fi
 
       # ADR-029 recovery. `terraform untaint` clears the taint marker on ONE resource so
       # the next apply KEEPS it (Read/refresh) instead of destroying-and-replacing it. This

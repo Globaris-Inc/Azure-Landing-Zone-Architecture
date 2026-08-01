@@ -48,6 +48,20 @@
 # for a transient 5xx/429 that is not also auth-shaped, never for the blob upload/download calls
 # (writes, already captured directly with `az ... 2>&1`, unchanged).
 #
+# AMENDED AGAIN 2026-08-01 (Phase 4 firewall-race fix - three live reproductions: runs
+# `30707957054`/`30709287789` plus one earlier occurrence). `az storage blob show` succeeding
+# immediately followed by `az storage blob download` failing on the SAME blob, seconds later,
+# with Azure's own "may be blocked by network rules of storage account" text - a per-front-end-
+# node propagation race on the JIT firewall flip (ADR-025/LESSON 30), not the transient-5xx class
+# the previous amendment fixed, and reproduced at both 153 bytes and 24 MB (size is not the
+# variable). Sources two more `teardown-common.sh` primitives now: `is_storage_network_rule_error`
+# (the classifier - see its own comment for why it is checked BEFORE `is_auth_error` despite
+# looking 403-shaped) and `retry_blob_action_on_network_rule` (the write-shaped counterpart to
+# `az_run_retry`'s now-extended network-rule branch, used for the upload and both download call
+# sites below - see that helper's own comment for why retrying these specific idempotent writes
+# is safe). No caller-visible behaviour changes for a genuine auth failure or a transient 5xx -
+# both branches are unchanged and still checked in the same relative order.
+#
 # Reads three inputs from the environment, all set by the calling job
 # (.github/workflows/teardown.yml "state-reset" job):
 #   TEARDOWN_MODE          - "terraform" or "az-sweep" (from inputs.mode). Required.
@@ -56,33 +70,58 @@
 #                             read each Phase 1 root job's own `.result` without a second API
 #                             call anywhere. Required, must be valid JSON.
 #
-# ELIGIBILITY (ADR-068 decision 4) - per state key, in order:
-#   - CARVE-OUT A (permanent): platform/identity is NEVER reset when TEARDOWN_MODE=az-sweep.
-#     That root declares azuread_conditional_access_policy (x8), azuread_named_location,
-#     azurerm_pim_eligible_role_assignment and azurerm_role_management_policy (platform/
-#     identity/main.tf, pim.tf) - all Entra/Graph-plane objects the ARM-only az-sweep cannot
-#     delete and teardown-verify.sh (VERIFY 0-10, ARM-plane only) cannot check. A green VERIFY
-#     says nothing about them, so resetting this root's state on that evidence would be FM-1
-#     by construction, landing on an object class Entra tolerates as silent duplicates rather
-#     than a loud collision. In TEARDOWN_MODE=terraform this carve-out does not apply -
-#     identity's own terraform destroy deletes those objects through the azuread provider and
-#     its Phase 1 job result is direct evidence, so normal eligibility (below) governs.
+# ELIGIBILITY (ADR-068 decision 4, AMENDED 2026-08-01 - see the dated note below) - per state
+# key, in order:
 #   - CARVE-OUT B (conditional): platform/management-groups is reset ONLY when
 #     REMOVE_MG_HIERARCHY=true. When false the MG tree survives and VERIFY 4 explicitly SKIPS
 #     its MG-existence check in that case - resetting on a skipped check is resetting on no
 #     evidence.
-#   - TEARDOWN_MODE=terraform (every other key, and management-groups/identity once their
-#     carve-outs are cleared): eligible only if THIS key's own Phase 1 terraform-destroy job
-#     result (read from PHASE1_RESULTS_JSON) is exactly "success". A "failure" or "skipped"
-#     result excludes the key and prints a loud ::warning::. This is redundant belt over the
-#     job-level VERIFY gate (see .github/workflows/teardown.yml's state-reset job) and cheap -
-#     the pre-registered FIX-6 invariant's limb 1 ("terraform state list empty from a Phase 1
-#     success"), honoured literally.
-#   - TEARDOWN_MODE=az-sweep (every other key): eligible unconditionally. Phase 1 never ran in
-#     this mode (every root's own state is fully populated going in), so per-root job results
-#     carry no signal here - eligibility is entirely the calling job's own hard gate on
-#     `needs.verify.result == 'success'` at target=all (FIX-6 invariant limb 2: "a completed
-#     az-sweep with confirm-GET 404 on every class", which is exactly what a green VERIFY is).
+#   - EVERY KEY: eligible if THIS key's own Phase 1 terraform-destroy job result (read from
+#     PHASE1_RESULTS_JSON) is exactly "success". This is the cheapest, most specific evidence
+#     and wins when it is available - the pre-registered FIX-6 invariant's limb 1 ("terraform
+#     state list empty from a Phase 1 success"), honoured literally, in EITHER mode (in
+#     TEARDOWN_MODE=az-sweep every Phase 1 job reports "skipped", so this branch never fires
+#     there and every key falls through to the next rule below).
+#   - IDENTITY_KEY, if its own job did NOT report "success": PERMANENTLY EXCLUDED regardless of
+#     mode (CARVE-OUT A). platform/identity declares azuread_conditional_access_policy (x8),
+#     azuread_named_location, azurerm_pim_eligible_role_assignment and
+#     azurerm_role_management_policy (platform/identity/main.tf, pim.tf) - Entra/Graph/PIM-plane
+#     objects teardown-verify.sh (VERIFY 0-10, ARM-plane only) cannot see at all. A green VERIFY
+#     says nothing about whether those objects are still live, so resetting on that evidence
+#     alone would be FM-1 by construction, landing on an object class Entra tolerates as silent
+#     duplicates rather than a loud collision - identity may ONLY be reset on its own direct job
+#     evidence (the rule immediately above), in any mode.
+#   - EVERY OTHER KEY, if its own job did NOT report "success": eligible anyway, on the
+#     whole-estate VERIFY evidence. The calling workflow job (teardown.yml's `state-reset`) hard-
+#     gates this entire script's invocation on `needs.verify.result == 'success'` at target=all,
+#     so by the time this script ever runs, VERIFY has ALREADY certified the ARM plane clean
+#     across every subscription (ADR-068 decision 2: "A green whole-estate VERIFY is STRONGER
+#     evidence than a per-root empty terraform state list ... It is not, however, a COMPLETE
+#     oracle for every root" - identity, handled above, is the only root that is not fully
+#     covered by it). Verified 2026-08-01 (grep-confirmed across every root's providers.tf, not
+#     just checked for identity): `platform/identity` is the ONLY root anywhere in this estate
+#     that declares the `azuread` provider - every other root's provider set is some mix of
+#     `azurerm`/`azapi` (both ARM-plane) plus purely local/no-API providers (`modtm`, `random`,
+#     `archive`, `null`, `time`, `tls`, `alz` - `alz` only emits further `azurerm`/`azapi`
+#     resources itself, and `time`/`tls` make no remote Azure calls at all). No other root has a
+#     non-ARM-plane footprint VERIFY cannot see. This is what makes az-sweep's prior
+#     "unconditional eligibility" claim sound, and what was missing for mode=terraform before
+#     this amendment.
+#
+# AMENDED 2026-08-01 (ADR-072-adjacent DevSecOps fix, teardown run 30685705802). The ORIGINAL
+# ADR-068 decision 4 gated TEARDOWN_MODE=terraform on job success ALONE, with no VERIFY
+# fallback, so a root whose Phase 1 job failed or was skipped stayed excluded even when the
+# whole-estate VERIFY had independently proven its entire (ARM-plane-only) footprint gone -
+# exactly what happened to `platform/management` (blocked by three cross-root orphans, since
+# fixed by ADR-072 decision 4's attachment sweep) and `platform/management-groups` (which no
+# longer runs under mode=terraform at target=all at all - ADR-072 decision 6) in that run: both
+# blobs stayed populated after a run whose Phase 3 VERIFY had PASSED, blocking the next
+# rebuild's plan (the exact FM-2 condition this ADR exists to close). The fix above unifies the
+# two modes' eligibility into one rule set: a key's own job success is the cheap, specific
+# belt; whole-estate VERIFY (which the job-level gate already requires) is the fallback for
+# every key except identity, in EITHER mode, matching what decision 2's own text already said
+# VERIFY was for. No blanket removal of the conditionality - identity's carve-out is preserved
+# in full, unconditionally, in both modes.
 #
 # IDEMPOTENCY: resetting an already-canonical-empty blob (including the three blobs the owner
 # reset by hand on 2026-07-30 under the ADR-068 decision-6 one-time exception,
@@ -143,10 +182,13 @@ declare -a STATE_KEYS_WORKLOAD=(
   "synthetic/terraform.tfstate"
 )
 
-# State key -> teardown.yml Phase 1 job id. Used ONLY in TEARDOWN_MODE=terraform to read each
-# key's own destroy-job result out of PHASE1_RESULTS_JSON. Kept in lock-step BY HAND with the
-# job ids in .github/workflows/teardown.yml's Phase 1 chain and this job's own `needs:` list -
-# if a Phase 1 job is ever renamed, update both together.
+# State key -> teardown.yml Phase 1 job id. Read in EITHER mode (2026-08-01 amendment) to
+# resolve each key's own destroy-job result out of PHASE1_RESULTS_JSON - in TEARDOWN_MODE=
+# az-sweep every one of these jobs reports "skipped" (gated on inputs.mode == 'terraform'), so
+# the lookup always falls through to the VERIFY-fallback rule for every non-identity key, the
+# same effective behaviour az-sweep had before this amendment. Kept in lock-step BY HAND with
+# the job ids in .github/workflows/teardown.yml's Phase 1 chain and this job's own `needs:`
+# list - if a Phase 1 job is ever renamed, update both together.
 declare -A STATE_KEY_PHASE1_JOB=(
   ["platform/management-groups/terraform.tfstate"]="management-groups"
   ["platform/management/terraform.tfstate"]="management"
@@ -206,42 +248,47 @@ fi
 
 echo "== Phase 4 STATE RESET: SA=${SA_NAME} container=${CONTAINER} mode=${TEARDOWN_MODE} remove_mg_hierarchy=${REMOVE_MG_HIERARCHY} =="
 
-# determine_action <key> - ADR-068 decision 4 eligibility, in order: carve-out A, carve-out B,
-# then mode-dependent Phase-1-job-result / unconditional-on-VERIFY. Echoes one of:
-#   ELIGIBLE | SKIPPED-carveout-A | SKIPPED-carveout-B | SKIPPED-not-destroyed:<result> |
-#   SKIPPED-no-job-mapping (structural bug guard, should be unreachable)
+# determine_action <key> - the AMENDED 2026-08-01 eligibility (see the header ELIGIBILITY note
+# above for the full rationale). Order: carve-out B, this key's own Phase 1 job result, then
+# (identity only) permanent exclusion / (every other key) VERIFY-fallback. Mode-independent by
+# construction - TEARDOWN_MODE is read only for the summary banner, never branched on here.
+# Echoes one of:
+#   ELIGIBLE | ELIGIBLE-via-verify:<result> | SKIPPED-carveout-A:<result> |
+#   SKIPPED-carveout-B | SKIPPED-no-job-mapping (structural bug guard, should be unreachable)
 determine_action() {
   local key="$1"
-
-  if [ "$key" = "$IDENTITY_KEY" ] && [ "$TEARDOWN_MODE" = "az-sweep" ]; then
-    printf 'SKIPPED-carveout-A'
-    return 0
-  fi
 
   if [ "$key" = "$MANAGEMENT_GROUPS_KEY" ] && [ "$REMOVE_MG_HIERARCHY" != "true" ]; then
     printf 'SKIPPED-carveout-B'
     return 0
   fi
 
-  if [ "$TEARDOWN_MODE" = "terraform" ]; then
-    local job="${STATE_KEY_PHASE1_JOB[$key]:-}"
-    if [ -z "$job" ]; then
-      printf 'SKIPPED-no-job-mapping'
-      return 0
-    fi
-    local result
-    result="$(printf '%s' "$PHASE1_RESULTS_JSON" | jq -r --arg j "$job" '.[$j].result // "missing"')"
-    if [ "$result" = "success" ]; then
-      printf 'ELIGIBLE'
-    else
-      printf 'SKIPPED-not-destroyed:%s' "$result"
-    fi
+  local job="${STATE_KEY_PHASE1_JOB[$key]:-}"
+  if [ -z "$job" ]; then
+    printf 'SKIPPED-no-job-mapping'
+    return 0
+  fi
+  local result
+  result="$(printf '%s' "$PHASE1_RESULTS_JSON" | jq -r --arg j "$job" '.[$j].result // "missing"')"
+  if [ "$result" = "success" ]; then
+    printf 'ELIGIBLE'
     return 0
   fi
 
-  # TEARDOWN_MODE=az-sweep, no carve-out applies: eligibility is entirely the calling job's own
-  # hard gate on needs.verify.result == 'success' at target=all - nothing further to check here.
-  printf 'ELIGIBLE'
+  # This key's own Phase 1 destroy job did not succeed (mode=terraform: failure/skipped;
+  # mode=az-sweep: always skipped there, Phase 1 never runs). CARVE-OUT A: platform/identity is
+  # the ONE permanent exception - see the header ELIGIBILITY note for the full Entra/Graph/PIM
+  # rationale. Every other key falls through to the VERIFY-fallback rule below.
+  if [ "$key" = "$IDENTITY_KEY" ]; then
+    printf 'SKIPPED-carveout-A:%s' "$result"
+    return 0
+  fi
+
+  # VERIFY-fallback (2026-08-01 amendment): the calling workflow job already hard-gates this
+  # whole script's invocation on needs.verify.result == 'success' at target=all, and every key
+  # reaching this line is verified (grep, 2026-08-01) to declare only ARM-plane providers - so
+  # that gate is already sufficient, independent evidence this key's entire footprint is gone.
+  printf 'ELIGIBLE-via-verify:%s' "$result"
 }
 
 # Globals set by reset_one_key / _reset_write_and_confirm for the calling loop iteration to
@@ -286,14 +333,17 @@ _reset_write_and_confirm() {
   local utc_now
   utc_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+  # retry_blob_action_on_network_rule (teardown-common.sh, 2026-08-01 firewall-race fix): this
+  # upload is idempotent (identical bytes, --overwrite true), so a bounded retry on the
+  # is_storage_network_rule_error class alone is safe - see that helper's own comment.
   local up_err
-  if ! up_err="$(az storage blob upload \
+  if ! retry_blob_action_on_network_rule up_err storage blob upload \
       --account-name "$SA_NAME" --container-name "$CONTAINER" --name "$key" \
       --file "$doc_tmpfile" --auth-mode login --overwrite true --content-type application/json \
       --metadata tf_state_reset=true "tf_state_reset_run_id=${GITHUB_RUN_ID:-unknown}" \
                  "tf_state_reset_utc=${utc_now}" "tf_state_reset_mode=${TEARDOWN_MODE}" \
                  "tf_state_reset_ref=${GITHUB_SHA:-unknown}" \
-      --output none 2>&1)"; then
+      --output none; then
     echo "::error::${key}: blob upload (reset overwrite) failed: ${up_err}"
     rm -f "$doc_tmpfile"
     return 1
@@ -320,10 +370,14 @@ _reset_write_and_confirm() {
     return 1
   fi
 
+  # retry_blob_action_on_network_rule (teardown-common.sh, 2026-08-01 firewall-race fix): a
+  # re-download to a fresh temp file is idempotent, so a bounded retry on the
+  # is_storage_network_rule_error class alone is safe - see that helper's own comment.
   local confirm_tmpfile confirm_dl_err
   confirm_tmpfile="$(mktemp)"
-  if ! confirm_dl_err="$(az storage blob download --account-name "$SA_NAME" --container-name "$CONTAINER" \
-      --name "$key" --file "$confirm_tmpfile" --auth-mode login --output none 2>&1)"; then
+  if ! retry_blob_action_on_network_rule confirm_dl_err storage blob download \
+      --account-name "$SA_NAME" --container-name "$CONTAINER" \
+      --name "$key" --file "$confirm_tmpfile" --auth-mode login --output none; then
     echo "::error::${key}: confirm read-back download failed immediately after reset: ${confirm_dl_err}"
     rm -f "$confirm_tmpfile"
     return 1
@@ -393,11 +447,18 @@ reset_one_key() {
     return 1
   fi
 
+  # retry_blob_action_on_network_rule (teardown-common.sh, 2026-08-01 firewall-race fix): a
+  # download to a fresh temp file is idempotent, so a bounded retry on the
+  # is_storage_network_rule_error class alone is safe - see that helper's own comment. This is
+  # the exact call shape the fix was found on live: a `show` immediately before this succeeded,
+  # confirming the blob present, and this `download`, seconds later, failed with the
+  # network-rule text - two consecutive requests landing on two different front ends.
   local tmpfile dl_err
   tmpfile="$(mktemp)"
-  if ! dl_err="$(az storage blob download --account-name "$SA_NAME" --container-name "$CONTAINER" \
-      --name "$key" --file "$tmpfile" --auth-mode login --output none 2>&1)"; then
-    echo "::error::${key}: blob download failed (confirmed present by the preceding show call, so this is an anomaly, not absence): ${dl_err}"
+  if ! retry_blob_action_on_network_rule dl_err storage blob download \
+      --account-name "$SA_NAME" --container-name "$CONTAINER" \
+      --name "$key" --file "$tmpfile" --auth-mode login --output none; then
+    echo "::error::${key}: blob download failed (confirmed present by the preceding show call, so this is an anomaly, not absence) after exhausting the network-rule retry budget: ${dl_err}"
     rm -f "$tmpfile"
     return 1
   fi
@@ -436,18 +497,24 @@ for key in "${STATE_KEYS_WORKLOAD[@]}"; do
         SUMMARY_ROWS+=("${key}|FAILED|${bytes_before}|-")
       fi
       ;;
-    SKIPPED-carveout-A)
-      echo "  INFO  ${key}: CARVE-OUT A - never reset under mode=az-sweep (Entra/PIM objects the ARM-only sweep cannot delete and VERIFY 0-10 cannot check; ADR-068 decision 4)."
-      SUMMARY_ROWS+=("${key}|SKIPPED-carveout-A|-|-")
+    ELIGIBLE-via-verify:*)
+      reason="${action#ELIGIBLE-via-verify:}"
+      echo "  ::warning::${key}: own Phase 1 destroy job result was '${reason}' (not 'success'), but resetting anyway on whole-estate VERIFY evidence (ADR-068 decision 2/4, amended 2026-08-01) - this key has no non-ARM-plane footprint outside VERIFY's coverage."
+      if reset_one_key "$key"; then
+        SUMMARY_ROWS+=("${key}|RESET-via-verify(${reason})|${bytes_before}|${bytes_after}")
+      else
+        overall_fail=1
+        SUMMARY_ROWS+=("${key}|FAILED|${bytes_before}|-")
+      fi
+      ;;
+    SKIPPED-carveout-A:*)
+      reason="${action#SKIPPED-carveout-A:}"
+      echo "  INFO  ${key}: CARVE-OUT A - own Phase 1 destroy job result was '${reason}' (not 'success'), and this is the one key VERIFY cannot fall back to certify (Entra/PIM objects the ARM-only sweep cannot delete and VERIFY 0-10 cannot check; ADR-068 decision 4). Not reset."
+      SUMMARY_ROWS+=("${key}|SKIPPED-carveout-A(${reason})|-|-")
       ;;
     SKIPPED-carveout-B)
       echo "  INFO  ${key}: CARVE-OUT B - remove_mg_hierarchy=false, so the MG tree survives and VERIFY 4 skipped its MG check; not reset on no evidence (ADR-068 decision 4)."
       SUMMARY_ROWS+=("${key}|SKIPPED-carveout-B|-|-")
-      ;;
-    SKIPPED-not-destroyed:*)
-      reason="${action#SKIPPED-not-destroyed:}"
-      echo "  ::warning::${key}: excluded from Phase 4 - its own Phase 1 terraform-destroy job result is '${reason}', not 'success' (ADR-068 decision 4 - a failure or skipped Phase 1 result excludes the key even if the whole-estate VERIFY passed)."
-      SUMMARY_ROWS+=("${key}|SKIPPED-not-destroyed(${reason})|-|-")
       ;;
     SKIPPED-no-job-mapping)
       echo "::error::${key}: no Phase 1 job mapping found in STATE_KEY_PHASE1_JOB - this is a structural bug in teardown-state-reset.sh, not a runtime condition."
