@@ -49,6 +49,252 @@
 
 <!-- Newest at the top. -->
 
+### ADR-073: The Log Analytics soft-delete RECOVERY KEY is a FOUR-part key that includes REGION, established from Microsoft's own documentation and the REST contract, so two soft-deleted workspaces sharing one ARM resource ID are individually addressable and a `centralus` create CANNOT silently recover the `eastus2` entry. The rebuild's pre-Step-2 disposition is nevertheless PURGE BOTH via CI, because the two-entry case itself is undocumented and a recovered workspace is an ADR-067 FM-1 shape. OQ-063's single-name purge generalises to a DISCOVERY-based sweep across all five estate subscriptions, gated by containment plus a blast-radius cap, whose per-entry completion check must be a `deletedWorkspaces` RE-LIST and never an ARM GET on the shared ID. Root cause is a one-line provider-features asymmetry between `platform/security` and `platform/management`
+
+- **Date:** 2026-08-01
+- **Section:** 8 (Standard Platform Components, where the workspace lives) / 10 (Pipeline and Tooling,
+  where the purge and the gate live). **Resolves OQ-069** in full. **Generalises OQ-063** and the
+  step 7b mechanism ADR-066 records. **Applies ADR-062's ruling** that "an enumerated list plus a
+  written promise to maintain it is not a control" to the soft-deleted-workspace class. **Applies
+  ADR-067** (a rebuild creates fresh objects, it does not adopt recovered ones) as the tie-breaker in
+  decision 3. **Applies ADR-068 decision 6** (estate mutation is CI-only) to reject the console path.
+  Relates to ADR-069 (region flip to `centralus` primary), which is the invariant decision 6's
+  assertion protects, and to ADR-061 (`PLATFORM_LAW_CUSTOMER_ID` is re-set unconditionally, never
+  verified). Does NOT touch ADR-072, the attachment sweep, the refresh ceiling or the state-reset work.
+- **Status:** Accepted (architect ruling; the operator gathered the live evidence and routed the
+  finding rather than disposing of it operationally).
+- **Landed:** NOT IMPLEMENTED. Decisions 1 and 2 are findings. Decision 3 is an operator action
+  executed through an existing CI mechanism. Decisions 4 and 5 are a written spec for DevSecOps
+  (`scripts/teardown-az-sweep.sh` step 7b, `scripts/teardown-common.sh` constants). Decision 6 is a
+  one-block change to `platform/management/providers.tf` for the Cloud Engineer. Decision 7 is doc
+  amendments. Update this field by dated addendum when each PR merges.
+- **Decision makers:** claude (architect); user (gathered the live `deletedWorkspaces` evidence on
+  2026-08-01, identified the shared-ARM-ID collision that OQ-069 did not anticipate, and named the
+  silent-wrong-region failure mode this ADR had to rule out rather than reason about).
+
+**Context:**
+
+**The live evidence, read-only, 2026-08-01.** Soft-deleted Log Analytics workspaces across the five
+estate subscriptions: connectivity 0, identity 0, landingzones 0, security 0, management 2. OQ-063's
+security purge therefore works. The class it does not cover has exactly two members, both named
+`law-platform-globaris-poc` in `rg-management-globaris-poc`: one created 2026-07-07 in `eastus2` (the
+pre-region-flip build) and soft-deleted 2026-07-31, one created 2026-07-31 in `centralus` (the
+just-completed build) and soft-deleted 2026-08-01.
+
+**The finding OQ-069 did not anticipate.** Both entries carry the IDENTICAL ARM resource ID, verified
+against the raw `Microsoft.OperationalInsights/deletedWorkspaces` response at api-version 2023-09-01.
+Region is not a segment of a Log Analytics workspace's ARM resource ID, so the deleted-workspaces list
+holds two records distinguishable only by their `location` field, not by identity.
+
+**Why that mattered enough to route here.** `platform/management`'s Step 2 apply creates that same
+workspace name in that same resource group in `centralus`. Azure's documented behaviour is that such a
+create RECOVERS a soft-deleted workspace rather than creating fresh, which the rebuild runbook's Step 2
+already tells the operator to expect. With two candidates sharing one ID, the feared outcome was that
+the `eastus2` entry is recovered: the estate's central logging workspace silently returns in the DR
+region, behind a clean plan and a green apply, undoing ADR-069 for the one workspace every spoke's
+Traffic Analytics and every diagnostic setting points at. No plan-scan rule would show it. That is a
+silent correctness failure, which is the one class this estate has ruled must never be reasoned about
+when it can be read.
+
+**What the documentation actually says (read live 2026-08-01, "Delete and Recover a Log Analytics
+Workspace", `ms.date` 2024-10-31, page updated 2026-06-11).** Verbatim, under "Recover a workspace in a
+soft-delete state": "The workspace recovery is performed by re-creating the Log Analytics workspace with
+the details of the deleted workspace, including: Subscription ID / Resource group name / Workspace name
+/ **Region**." The REST tab states the mechanism directly: recovery is
+`PUT .../providers/Microsoft.OperationalInsights/workspaces/{WorkspaceName}?api-version=2025-07-01` with
+body `{"location": "<AzureRegion>"}`, described as recovering the workspace "by recreating it with the
+same name, resource group, and location". `Restore-AzOperationalInsightsWorkspace` declares `-Location`
+as **Mandatory: True**. The `deletedWorkspaces` list contract confirms the records are not keyed by ARM
+ID: each entry carries its own `location` and its own read-only `properties.customerId`.
+
+**Decision:**
+
+**1. The recovery target is selected by a FOUR-part key that INCLUDES region, and that is ESTABLISHED
+from Microsoft's documentation and the REST contract, not inferred.** Subscription ID, resource group
+name, workspace name and region together identify the entry to recover. Region is carried in the
+request BODY, not the URL, which is precisely why two entries can share one ARM resource ID and still be
+individually addressable. `platform/management` creates the workspace through
+`avm-res-operationalinsights-workspace` with `location` bound to the primary region, so its create is
+exactly the documented recovery PUT with `location: centralus` in the body. Under the documented
+contract that PUT can only match the `centralus` entry. **The `eastus2` entry cannot be the recovery
+target of a `centralus` PUT.** The severe silent failure mode is not supported by the contract, and
+this ADR records that as a finding so it is not re-feared later.
+
+**2. What is NOT established, stated as a limit rather than glossed.** Microsoft documents the recovery
+key. It does NOT document the case where `deletedWorkspaces` holds two entries under one ARM resource
+ID. Nothing on Learn addresses it, and I will not assert service behaviour in an undocumented case.
+Two residual outcomes remain possible for a `centralus` PUT, and **neither of them is a wrong-region
+recovery**: (i) the PUT matches on region and recovers the `centralus` entry, which is the documented
+contract and the expected outcome; or (ii) the PUT is rejected as a name conflict, which is the
+documented outcome for a create against a reserved name that does not constitute a recovery (the
+troubleshooting section "Resolve the 'This workspace name is already in use' or 'conflict' error
+message", whose stated resolution is recover, then permanently delete, then create). Both are loud.
+(i) is a green apply with a correct-region workspace carrying a stale `customerId` and old data, which
+the estate already absorbs because PC-2X re-sets `PLATFORM_LAW_CUSTOMER_ID` unconditionally right after
+Step 2 (ADR-061). (ii) is a hard failure at Step 2 with a documented remedy. **The unverifiable case
+does not contain the severe case.** A related documented fact that does NOT save us and should not be
+misread as a safeguard: a recovery whose resource group no longer exists fails 404, and
+`rg-management-globaris-poc` is currently gone, but Terraform creates the RG earlier in the same apply,
+so the PUT will be evaluated rather than 404ing.
+
+**3. The pre-Step-2 disposition: PURGE BOTH ENTRIES, through CI, before `platform/management` is
+planned or applied.** Decision 2 leaves a coin-flip between (i) and (ii), and this decision removes the
+coin rather than betting on it. After both entries are purged the name is released and Step 2's PUT is
+an unambiguous fresh create, which is what the estate actually wants for three independent reasons.
+First, ADR-067's teardown-and-restart posture: a rebuild creates fresh objects, it does not adopt an
+object whose real history the state does not reflect, which is the FM-1 shape. Second, a recovered
+workspace keeps its original `customerId`, and that is the exact value the NWTA naming inheritance in
+`docs/estate-bom.md` finding 1 (re-attributed to Traffic Analytics by ADR-072 decision 1) rides on;
+purging removes the question instead of managing it. Third, the documentation is explicit that installed
+solutions and linked services are permanently removed at delete time and are NOT recovered, so a
+recovered workspace is a partially reconstituted object in every case, never a restored one. The cost is
+that up to 14 days of teardown-era log data are destroyed permanently. That cost is accepted and
+intended: this is a POC estate that has just been torn down, the data has no consumer, and ADR-066's
+greenfield-proof posture requires the estate to be genuinely greenfield.
+
+**4. The generalisation: step 7b becomes DISCOVERY-based across all five estate subscriptions, with a
+four-part safety bar.** This is the ADR-062-shaped fix OQ-069 option B anticipated, now written against
+real objects rather than assumed ones. DevSecOps owns it. The spec:
+
+- **Discovery.** Iterate `teardown_subscriptions()` (all five), not `SECURITY_SUBSCRIPTION_ID`. Call
+  `az monitor log-analytics workspace list-deleted-workspaces --subscription <sub>` with NO name
+  filter, projecting `[].{name:name, location:location, id:id, customerId:properties.customerId}`.
+  `SECURITY_LAW_WORKSPACE_NAME` and `SECURITY_LAW_RESOURCE_GROUP_NAME` stop being purge selectors.
+  A failed list stays FAIL LOUD (section 9.4, unchanged).
+- **Safety bar gate A, containment.** Each discovered entry must pass
+  `is_estate_owned --resource-id "$law_id"`, the existing T1 predicate, which extracts the
+  `/resourceGroups/<rg>/` segment from the ID string and tests it against the same naming pattern
+  `RG_SWEEP_QUERY` encodes. String-based containment is the correct test here precisely BECAUSE the
+  resource group is already gone, so no live lookup is possible. An entry that fails the gate is
+  SKIPPED with a `::warning::` naming it, not deleted and not a hard failure: a foreign workspace in
+  an estate subscription is not this script's business, but it must be visible. This reuses the
+  containment rule the FIX-1/2/4 sub-steps and the ADR-072 attachment sweep already share rather than
+  inventing a second one.
+- **Safety bar gate B, blast-radius cap.** If discovery returns more than a small fixed number of
+  purge-eligible entries across the whole estate (specify 10; DevSecOps may argue the number, not the
+  existence of the cap), ABORT the step with `::error::` and purge nothing. A sweep that suddenly finds
+  forty workspaces is a signal that the containment predicate or the subscription list is wrong, not an
+  instruction to permanently destroy forty workspaces. This is the direct answer to "a discovery-based
+  purge that over-reaches would permanently destroy a workspace that something still needs": containment
+  bounds WHICH, and the cap bounds HOW MANY, and only both together make the mechanism safe to run
+  unattended.
+- **Safety bar gate C, deterministic selection, and it is a REAL DEFECT in the current step.**
+  `az monitor log-analytics workspace recover` takes only `--workspace-name` and `--resource-group`;
+  verified against the current CLI reference, **it has no `--location` parameter at all**, so it
+  physically cannot address one of two entries that share an ARM ID. The recover call must therefore
+  become the REST PUT with an explicit `location` body, issued through `az rest` at
+  `SECURITY_LAW_API_VERSION` (already pinned `2025-07-01`, which matches the current documented
+  version; rename the constant, it is no longer security-specific). One purge cycle is keyed on the
+  pair `(id, location)`, with `customerId` logged as evidence.
+- **Safety bar gate D, the per-entry completion check, and this is the second REAL DEFECT.** The
+  current step confirms the purge with `confirm_gone_or_fail_primary` against an ARM GET on `law_id`.
+  That URL is keyed on the ARM ID ALONE and therefore cannot distinguish the two entries: after purging
+  one of them the GET returns 404 while the other is still soft-deleted, producing a FALSE "purged"
+  confirmation. The completion check must become a `deletedWorkspaces` RE-LIST asserting that no entry
+  with that `(id, location)` pair remains. Fail loud on a remaining pair, unchanged from today (there is
+  still no separate Phase 3 VERIFY step for this class).
+- **Ordering, mandatory.** Purge cycles for entries sharing an ARM ID must be STRICTLY SEQUENTIAL: fully
+  recover, force-delete and re-list-confirm entry A before recovering entry B. Two recoveries of the
+  same ARM ID must never be in flight, because after recovering A a LIVE workspace occupies that ID and
+  a PUT for B would be a location change on an existing resource, which ARM rejects.
+- **Placeholder resource group.** The existing recreate-then-delete dance is retained and generalised:
+  the placeholder RG name comes from the entry's own ID, not a constant, and its location may be taken
+  from the first entry's location. A resource group's location is independent of the locations of the
+  resources inside it, so ONE placeholder RG can serve both entries; DevSecOps may rely on that only
+  after verifying it live in the run log, otherwise create one placeholder per cycle and wait for each
+  delete to complete between cycles.
+
+**5. The residual gates.** (a) A new pre-clearance gate **PC-1M** generalises PC-1SEC: before Step 2,
+`deletedWorkspaces` must read EMPTY in all five estate subscriptions, not only security, and PC-1M
+BLOCKS Step 2 exactly as PC-1SEC blocks Step 3. (b) A cheap post-apply region assertion is added
+immediately after Step 2's apply, alongside the PC-2X `workspace show` that already runs at that exact
+point: assert the workspace's `location` reads `centralus`. It is adopted as a SECONDARY detector, not
+as the control; decision 3 is the control, and an assertion that fires after the workspace and its
+diagnostic settings exist is a detector by definition. It costs one query and it is the only thing that
+would catch a wrong-region workspace at all.
+
+**6. The root cause, and it is one block.** `platform/security/providers.tf` sets
+`features { log_analytics_workspace { permanently_delete_on_destroy = true } }`.
+`platform/management/providers.tf` has a bare `features {}`. That asymmetry is the entire explanation
+for why the security subscription holds zero soft-deleted workspaces and management holds two. Exactly
+two roots in this repo declare a Log Analytics workspace, verified by search, and only one sets the
+flag. The Cloud Engineer adds the same block to `platform/management/providers.tf` so the platform
+workspace purges natively on its own `terraform destroy`, which makes decision 4 a genuine backstop for
+this workspace rather than the only mechanism that will ever reach it. **The general rule, which is the
+part that outlives these two workspaces: any root that declares a Log Analytics workspace must set
+`permanently_delete_on_destroy = true` in its own provider features block.** That is a reviewable
+property of a root's `providers.tf`, checkable at review time against the roots that exist, which is
+what ADR-062 means by a control as opposed to a list.
+
+**7. Documentation corrections, both mandatory before the rebuild is run.** (a) The rebuild runbook's
+Step 2 currently tells the operator to expect the platform workspace as "the documented soft-delete
+recovery PUT, not a fresh workspace". Once decision 3 lands that sentence is WRONG, and an operator
+following it would read a real anomaly as expected. It must be amended by dated addendum to say the
+opposite: with PC-1M holding, the add is a genuinely fresh create, and any evidence of a recovery is a
+STOP. (b) PC-1SEC's entry gains PC-1M as its estate-wide generalisation. Both are technical-writer or
+Cloud Engineer edits, not architect ones.
+
+**Alternatives considered:**
+
+- **Purge only the `eastus2` entry, leaving the correct-region candidate to be recovered.** Rejected.
+  It reduces the case to the documented single-candidate path, which is genuinely safe on the region
+  question, but it deliberately CHOOSES a recovery: the stale `customerId`, the partially reconstituted
+  object, and the FM-1 shape ADR-067 rules against, for no benefit over purging both. The data it
+  preserves has no consumer.
+- **Recover deliberately, then verify the region afterwards.** Rejected on two grounds. It makes the
+  rebuild depend on the exact undocumented behaviour decision 2 declines to assert, and the CLI verb
+  that would perform it has no `--location` parameter, so it cannot even express which entry to
+  recover. Verifying afterwards is decision 5(b), which is worth having as a detector and is not worth
+  building a plan around.
+- **Accept, and gate only on a post-apply region assertion.** Rejected as the primary control, adopted
+  as the secondary one. A detector that fires after the workspace exists leaves an incorrect-region
+  workspace live with diagnostic settings already pointed at it, and the remedy at that point is a
+  destroy and a second soft-delete, which is the same problem one cycle later.
+- **Purge them by hand from the portal.** Rejected. Teardown and estate mutation are CI-only by
+  standing ruling, and this is exactly the ADR-068 decision 6 shape: if a mutation must happen before a
+  code change lands, it is an explicitly authorised, dated, scoped operator exception, not a console
+  habit. Decision 3 routes it through the existing `teardown.yml` `mode=az-sweep` dispatch, which is
+  idempotent by construction (every class in that script treats "not present" as success) and already
+  carries its own re-run pre-clearance in `docs/preclearance/teardown-az-sweep-rerun.md`.
+- **Keep step 7b enumerated and just add the platform workspace name next to the security one.**
+  Rejected, and it is the specific thing ADR-062 forbids. A two-item list is the same mechanism as a
+  one-item list, and this class has now demonstrated it grows. It would also leave both defects in
+  gates C and D unfixed, since neither is about which name is listed.
+- **Rely on decision 6 alone and skip decision 4.** Rejected. The provider feature only fires on a
+  `terraform destroy` that actually runs, and `mode=az-sweep` (the state-gone fallback, ADR-065
+  decision 4) never runs one. The two entries currently sitting in the management subscription are the
+  proof: they exist because a path that does not run `terraform destroy` deleted the resource group out
+  from under the workspace.
+
+**Consequences:**
+
+- Positive: the load-bearing question is answered from Microsoft's own contract rather than from
+  reasoning, and the answer is that the severe silent failure mode is not reachable. That finding is now
+  citable instead of being re-derived under time pressure at the next rebuild.
+- Positive: two real defects in the EXISTING step 7b are exposed by the two-entry case and specified
+  for fix, independent of the generalisation. The ARM-GET completion check can currently return a false
+  "purged" whenever more than one entry shares an ID, and the CLI recover verb cannot select between
+  them at all.
+- Positive: the purge stops being a single-instance enumerated list and gains a containment predicate it
+  shares with every other sweep in the script, plus a blast-radius cap that bounds the one way a
+  discovery sweep can do irreversible harm.
+- Positive: the root cause is a one-block asymmetry with exactly two candidate roots, so it is closable
+  in full rather than mitigated.
+- Negative / trade-off: decision 3 permanently destroys up to 14 days of log data from the torn-down
+  estate. Accepted explicitly above; it is unrecoverable once done.
+- Negative / trade-off: the rebuild gains a blocking pre-Step-2 gate (PC-1M) and one extra CI dispatch
+  before Step 2 can start. That is real added time on the rebuild day and it is the price of Step 2
+  being an unambiguous create.
+- Negative / trade-off: the blast-radius cap in gate B is a magic number. A cap that is too low turns a
+  legitimate large teardown into a manual escalation. That is the correct direction to fail, and the
+  number should be revisited if it ever fires.
+- Follow-ups required: (1) DevSecOps implements decision 4 in `scripts/teardown-az-sweep.sh` and the
+  constants in `scripts/teardown-common.sh`. (2) Cloud Engineer implements decision 6 in
+  `platform/management/providers.tf`. (3) Operator executes decision 3 through CI and records PC-1M's
+  result in the rebuild pre-clearance. (4) Technical-writer or Cloud Engineer lands decision 7's two
+  runbook amendments as dated addenda. (5) OQ-069 is resolved by this ADR; any further finding about
+  the state storage account's stale `ip_rules` entry stays in its own open item and is untouched here.
+
 ### ADR-072: A cross-root RP-ATTACHED OBJECT is owned by the root that DECLARES the attachment, never by the root that owns the container it lands in. `prevent_deletion_if_contains_resources` stays TRUE on `platform/management` and is rejected permanently; the three orphans are cleared by a PRE-DESTROY ATTACHMENT SWEEP whose ordering constraint is the exact MIRROR of ADR-063 G-1; two of the three were mis-attributed to AMBA and are in fact Traffic Analytics; and ADR-066's designation of `mode=terraform` as the primary `target=all` path is AMENDED to exclude `platform/management-groups`
 
 - **Date:** 2026-08-01
