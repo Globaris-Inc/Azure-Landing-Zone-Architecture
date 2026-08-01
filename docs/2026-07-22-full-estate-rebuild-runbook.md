@@ -380,9 +380,35 @@ Both must read `DoNotEnforce`. If either reads `Default`, matrix C1.
 gh workflow run deploy.yml -R Globaris-Inc/Azure-Architecture --ref banking -f target="platform/management" -f action="plan"
 ```
 Scan per Rule 1. Expected: **pure adds, 0 change, 0 destroy, 0 replace, 0 import, roughly 36 adds.**
-Confirm the platform Log Analytics workspace appears as an ADD (this is the documented soft-delete
-recovery PUT, not a fresh workspace). STOP conditions: matrix U1, B1, B2 (indirectly, if the plan
-surfaces an import guard on a survivor), B4.
+Confirm the platform Log Analytics workspace appears as an ADD. STOP conditions: matrix U1, B1, B2
+(indirectly, if the plan surfaces an import guard on a survivor), B4.
+
+> **CORRECTED 2026-08-01 (ADR-073).** This line previously read "this is the documented soft-delete
+> recovery PUT, not a fresh workspace". **That is no longer true and following it would mask a real
+> failure.** ADR-073 decision 6 added `permanently_delete_on_destroy = true` to
+> `platform/management/providers.tf`, so the platform workspace is now PURGED on destroy rather than
+> soft-deleted. A create here must be a **genuinely fresh workspace**. If anything indicates a
+> soft-delete RECOVERY - a returning `customerId`, orphaned children, or an "already exists / needs to
+> be imported" on any workspace child - that is an ADR-067 Class 2 condition and a **STOP**, not the
+> expected behaviour. It means the purge did not happen and **PC-1M** was not satisfied.
+>
+> **PC-1M is the gate that must pass before this step is planned:** zero soft-deleted Log Analytics
+> workspaces across **all five** estate subscriptions, not just security. PC-1SEC only ever checked
+> the security subscription, which is precisely how two soft-deleted copies of
+> `law-platform-globaris-poc` accumulated in the management subscription unnoticed (one from before
+> the ADR-069 region flip, one from the build after it, both under the identical ARM resource id).
+>
+> ```bash
+> for S in <the five estate subscriptions>; do
+>   echo -n "$S: "
+>   az monitor log-analytics workspace list-deleted-workspaces --subscription "$S" \
+>     --query "length(@)" -o tsv
+> done
+> ```
+>
+> Every line must read `0`. If any does not, purge via a `teardown.yml target=all mode=az-sweep`
+> dispatch (ADR-073 decision 4 made step 7b discovery-based across all five subscriptions) and
+> re-check. Never purge by hand.
 
 ```bash
 gh workflow run deploy.yml -R Globaris-Inc/Azure-Architecture --ref banking -f target="platform/management" -f action="apply"
