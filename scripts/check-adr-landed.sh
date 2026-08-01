@@ -77,11 +77,16 @@ function flush_block() {
   # has_landed tracks the LINE, landed tracks its VALUE, so "field absent" and "field
   # present but empty" stay distinguishable. Collapsing them made one branch unreachable
   # and its message wrong about which condition fired.
-  if (!has_landed) {
-    has_landed = 1
-    landed = $0
-    sub(/^- \*\*Landed:\*\*[[:space:]]*/, "", landed)
-  }
+  #
+  # Take the LAST such line in the block, not the first. DECISIONS.md updates are made by
+  # dated, append-only addendum - the body is never edited - so a later Landed line
+  # supersedes an earlier one. Keeping the first line reported an ADR as NOT IMPLEMENTED
+  # forever even after an addendum recorded its landing commit: confirmed against ADR-069,
+  # whose body (written pre-implementation) still reads NOT IMPLEMENTED while its
+  # 2026-07-31 addendum records Landed: 91523dc (PR #60).
+  has_landed = 1
+  landed = $0
+  sub(/^- \*\*Landed:\*\*[[:space:]]*/, "", landed)
 }
 
 END {

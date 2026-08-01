@@ -17,6 +17,7 @@
 | `DECISIONS.md` ADR-060 | Sequential single-target dispatch is mandatory; `target=all` is not an apply path. |
 | `DECISIONS.md` ADR-061 | Cross-root Secret determinism contract (what PC-2X / PC-3X actually are). |
 | `DECISIONS.md` ADR-059 | Import-block fix that unblocked identity Pass 1 (closed as of today). |
+| `DECISIONS.md` ADR-070, `OPEN-QUESTIONS.md` OQ-067 | Diagnostic-setting and private-endpoint DNS zone group DINE/Terraform ownership; the two-applies pattern in Steps 5-9 below (matrix 3d rows S6/S7). |
 | `docs/preclearance/b0a-redeploy.md` | PC-1R..PC-7R for management-groups / management / security, refresh addendum. |
 | `docs/preclearance/platform-identity.md` | PC-1G..PC-8G plus the A10 addendum for identity's two-pass. |
 | `docs/identity-two-pass-dispatch-runbook.md` | The full identity dispatch procedure. Step 10/11 below hand off to it; do not re-derive it from here. |
@@ -221,6 +222,8 @@ document.
 | S3 | APIM create running past 90 minutes (bank-app-p1, Step 9) | **Do not cancel.** The provider's own timeout is 3 hours; cancelling early leaves a soft-deleted APIM instance behind and reproduces the exact PC-4S condition for the NEXT rebuild. Let it run to either success or its own timeout. |
 | S4 | AKS node bootstrap failing (bank-app-p1, Step 9) | Before touching anything else, confirm the primary firewall private IP is `10.0.0.4` (re-run PC-3X) and that the `rcg-aks-egress-primary` collection group is live on the primary firewall policy. Nodes cannot bootstrap through a blackholed default route (ADR-044). |
 | S5 | Any spoke plan is missing an expected class from its table in Step 5-9 below, even though the tally looks plausible | Treat as a shape failure per Rule 1, not a pass. Investigate before applying. |
+| S6 | Spoke apply fails `already exists ... needs to be imported` on an `azurerm_monitor_diagnostic_setting`, while that resource is absent from Terraform state | This is matrix **B1**: delete the specific survivor, re-dispatch the same `apply`, do not import. Cause NOT confirmed to be ALZ DINE - ruled out for at least the AKS case (no covering DINE policy exists), open as OQ-067 item B. Observed on bank-data-p1 and bank-app-p1 (two applies each, second one clean, all provisioned Azure-side work banked). NOT the ADR-067 teardown/state class - see ADR-070 decision 4. |
+| S7 | Spoke apply fails `already exists` on a private-endpoint DNS zone group, while that resource is absent from Terraform state | Confirmed DINE: `Deploy-Private-DNS-Zones` carries no `existenceCondition`, so it can win the race and create the zone group before Terraform does, and Azure allows only one zone group per private endpoint. Same disposition as S6: matrix **B1**, delete the policy-created survivor, re-dispatch, do not import. See ADR-070 decision 2 (the RG-scoped `Mitigated` exemption fix) and the PC-8S correction above. |
 
 ### 3e. Steps 10-11 (identity)
 
@@ -484,13 +487,25 @@ If anything is missing, matrix C3.
 
 ### STEPS 5-9 - the five landing-zone spokes
 
-**Read this before dispatching any of them.** Unlike Steps 1-4, none of these five roots have ever been
-dry-planned against a genuinely empty estate; their private DNS zone data sources 404 until connectivity
-is live, so no clean precedent plan has ever existed. **The magnitudes in the table below are derived
-estimates (summed from historical per-wave increments), not verified precedent.** Treat the SHAPE rules
-(pure creates, 0 change, 0 destroy, 0 replace, the listed classes present) as the real bar per Rule 1,
-and the magnitude only as a sanity check that nothing is wildly wrong. **Record the actual `Plan: N to
-add` you see for each spoke; that number becomes the verified precedent for the next rebuild.**
+**Read this before dispatching any of them.** Unlike Steps 1-4, these five roots were dry-planned for the
+first time against a genuinely empty estate during the 2026-07-31 rebuild (their private DNS zone data
+sources 404 until connectivity is live, so no clean precedent plan existed before that). **The magnitudes
+in the table below are now the verified `Plan: N to add` tally actually observed for each spoke** -
+previously this table carried only derived estimates.
+
+**State the unit, or the bar cannot gate anything.** The number in the table is the RAW Terraform plan
+tally - the same `N` in `Plan: N to add, 0 to change, 0 to destroy` - and that tally **includes AVM
+module telemetry pseudo-resources** (`modtm_telemetry` and `random_uuid.telemetry`), not just real Azure
+infrastructure. Without saying so, a bar is ambiguous and a correct plan can look like a false STOP:
+bank-data-p1's first observed count (73) read as a 13-over STOP against the table's prior `~50-60`
+estimate until the unit was made explicit - 73 = **49 real resources + 24 telemetry** (12
+`modtm_telemetry` + 12 `random_uuid.telemetry`; the `datalake` module alone contributes 10 telemetry
+resources across five `diagnostic_setting_*` sub-modules while producing exactly one real diagnostic
+setting). corp-a1 and online-p1 measured UNDER their prior estimate ranges, for the opposite and
+unrelated reason: gated-off optional features (flags left `false` in `envs/poc.tfvars`), not a missing
+unit. Treat the SHAPE rules (pure creates, 0 change, 0 destroy, 0 replace, the listed classes present) as
+the real bar per Rule 1, always; the magnitude below remains a sanity check, never a hard gate on its
+own, and telemetry counts are read-only noise you cannot influence by editing the root.
 
 They may be dispatched in any order relative to each other (Steps 5-9 do not depend on one another), but
 each individually needs Step 4 done (all five) and Step 3 done (all five, for the platform LAW). Step 9
@@ -499,13 +514,42 @@ each individually needs Step 4 done (all five) and Step 3 done (all five, for th
 by Step 4. The order below (shortest first, longest last) is the gate's own recommendation so the four
 short spokes prove the shared spoke contract before you commit to the long one.
 
-| Spoke | Key classes that must appear | Magnitude (first observation, not a bar) |
+**Expect TWO applies on any root that creates `azurerm_monitor_diagnostic_setting` resources (ADR-070,
+OQ-067 item B).** Established live across bank-data-p1 and bank-app-p1: the first apply fails with
+`already exists` on some of those settings while they are absent from Terraform state. **The cause is
+NOT confirmed to be ALZ DINE** - do not restate that as the explanation. The AKS diagnostic setting hit
+the identical failure in bank-app-p1's Step 9 even though AKS has no covering DINE diagnostics policy
+in this tenant at all, which rules DINE out for at least that case. OQ-067 item B leaves two open
+candidates (an orphaned object from a lost PUT acknowledgement, or a `RequiresImport` false positive on
+the azurerm provider's pre-check GET - a reported class on that provider) and the discriminating read is
+not yet done. **The disposition does not depend on resolving it**: this is runbook matrix **B1** (delete
+the specific survivor, rerun, never import) - it is **NOT** the ADR-067 teardown/state class, and it does
+not mean the root is broken. Delete the orphaned diagnostic setting(s), re-dispatch the same `apply`, and
+expect it to go green quickly the second time. Observed: bank-data-p1 (3 settings; first two attempts
+`30661012325` / `30662610292` failed, recovered by `30671577938` in 3m36s) and bank-app-p1 (5 settings,
+run `30672301220` failed the same way at 33m50s, all provisioned Azure-side work banked and not
+repeated by the retry). See ADR-070 decision 4 and OQ-067 item B for the live investigation, and matrix
+3d row S6.
+
+**Correction: `Deploy-Private-DNS-Zones` DINE can block a spoke CREATE, not just cause post-apply
+drift (ADR-070, correcting `docs/preclearance/2026-07-22-full-estate-rebuild.md` PC-8S).** Unlike the
+diagnostic-setting class above, this one IS confirmed DINE: the assignment carries **no
+`existenceCondition`**, so it fires on any private endpoint that lacks a zone group, and Azure permits
+only **one** private DNS zone group per private endpoint. That document's PC-8S row previously read this
+policy as "post-apply drift only, never a create blocker" - the architect established that is false. A
+private endpoint whose zone group Terraform has not yet created (exactly the state a failed apply leaves
+behind) is exactly the case this policy can block. This bites hardest on the Foundry account private
+endpoint in bank-data-p1, whose three-zone group is authored natively rather than by a module. If a
+spoke apply fails on a private-endpoint DNS zone group collision, treat it as a live create-blocker, not
+a QA-only finding - see matrix 3d row S7.
+
+| Spoke | Key classes that must appear | Verified `Plan: N to add` (raw tally, INCLUDES telemetry - sanity check only, not the Rule-1 bar) |
 |---|---|---|
-| corp-a1 | 4 RGs; spoke VNet 3 subnets (`snet-integration` carries NSG + route table); route table default route to `10.0.0.4`; 2 peerings; RSV ZoneRedundant; flow-log SA + Traffic Analytics; 1 DNS zone VNet link; 2 policy exemptions + 1 `time_sleep` | ~25-45 adds |
-| corp-a2 | same shape, secondary region; RSV GeoRedundant; route to `10.1.0.4`; Traffic Analytics DISABLED on the DR flow log (no centralus LAW) | ~25-45 adds |
-| online-p1 | 4 RGs; spoke VNet 3 subnets, all with NSGs; route table on workload/PE subnets ONLY, never the App Gateway subnet; 2 peerings; Standard zonal public IP; WAF policy (OWASP 3.2, Prevention); App Gateway WAF_v2 capacity 1; Static Web App Standard; flow-log SA + 2 flow logs | ~30-45 adds |
-| bank-data-p1 | 4 RGs; spoke VNet with 2 Databricks-delegated subnets; 2 peerings; 7 private DNS zone links; **subscription-scoped dbstorage exemption + 300s sleep as a fresh CREATE** (PC-1S must have landed); Databricks workspace + access connector; ADLS Gen2 + PEs; Fabric F2 capacity; Foundry account + gpt-5.4-nano deployment + PE; AI Search basic + PE | ~50-60 adds |
-| bank-app-p1 Pass 1 | 4 RGs; spoke VNet (`snet-aks-nodes` / `snet-apim` / `snet-private-endpoints`); UDR; dedicated `snet-apim` route table; 2 peerings; 3 private DNS zone links; control-plane UAI + 2 role assignments + 300s RBAC sleep; AKS cluster; Premium ACR + PE **with NO `kubelet_acr_pull` role assignment** (flag is false this pass, by design); Service Bus Premium + PE; Event Hubs Standard + PE; APIM Developer_1 + scoped gateway-FQDN zone | ~60-70 adds |
+| corp-a1 | 4 RGs; spoke VNet 3 subnets (`snet-integration` carries NSG + route table); route table default route to `10.0.0.4`; 2 peerings; RSV ZoneRedundant; flow-log SA + Traffic Analytics; 1 DNS zone VNet link; 2 policy exemptions + 1 `time_sleep` | 24 (run recorded 2026-07-31, 0 change / 0 destroy) |
+| corp-a2 | same shape, secondary region; RSV GeoRedundant; route to `10.1.0.4`; Traffic Analytics DISABLED on the DR flow log (no centralus LAW) | 24 (run recorded 2026-07-31, 0 change / 0 destroy) |
+| online-p1 | 4 RGs; spoke VNet 3 subnets, all with NSGs; route table on workload/PE subnets ONLY, never the App Gateway subnet; 2 peerings; Standard zonal public IP; WAF policy (OWASP 3.2, Prevention); App Gateway WAF_v2 capacity 1; Static Web App Standard; flow-log SA + 2 flow logs | 26 (run recorded 2026-07-31, 0 change / 0 destroy) |
+| bank-data-p1 | 4 RGs; spoke VNet with 2 Databricks-delegated subnets; 2 peerings; 7 private DNS zone links; **subscription-scoped dbstorage exemption + 300s sleep as a fresh CREATE** (PC-1S must have landed); Databricks workspace + access connector; ADLS Gen2 + PEs; Fabric F2 capacity; Foundry account + gpt-5.4-nano deployment + PE; AI Search basic + PE | 73 = 49 real + 24 telemetry (Step 8 plan, 2026-07-31; that apply then hit S6 on 3 diagnostic settings, recovered by retry run `30671577938` in 3m36s) |
+| bank-app-p1 Pass 1 | 4 RGs; spoke VNet (`snet-aks-nodes` / `snet-apim` / `snet-private-endpoints`); UDR; dedicated `snet-apim` route table; 2 peerings; 3 private DNS zone links; control-plane UAI + 2 role assignments + 300s RBAC sleep; AKS cluster; Premium ACR + PE **with NO `kubelet_acr_pull` role assignment** (flag is false this pass, by design); Service Bus Premium + PE; Event Hubs Standard + PE; APIM Developer_1 + scoped gateway-FQDN zone | 67 (first measurement, 0 change / 0 destroy / 0 replace / 0 import, taken AFTER the ADR-070 exemptions merged) |
 
 **Pre-flight immediately before dispatching corp-a1, corp-a2, or online-p1:** none beyond Step 4's gates.
 
