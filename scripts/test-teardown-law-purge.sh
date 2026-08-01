@@ -76,10 +76,20 @@ body_location() {
 
 # stub_live_get "<marker-file>" - shared handler for the law_get_live GET
 # ("rest --method get" ... "properties.provisioningState"), reused by every case's az() stub
-# below. If <marker-file> exists it is expected to contain "location<TAB>provisioningState" and
-# is echoed verbatim (simulating a currently-live workspace); otherwise this simulates a clean
-# 404 (ResourceGroupNotFound-shaped, matching what a not-yet-recovered or already-purged entry's
-# GET actually returns) and returns 1.
+# below. If <marker-file> exists it is expected to contain "location<NEWLINE>provisioningState"
+# and is echoed verbatim (simulating a currently-live workspace); otherwise this simulates a
+# clean 404 (ResourceGroupNotFound-shaped, matching what a not-yet-recovered or already-purged
+# entry's GET actually returns) and returns 1.
+#
+# THE SEPARATOR IS NEWLINE, NOT TAB, AND THAT IS THE WHOLE POINT OF THIS FIXTURE.
+# `az ... --query "[location, properties.provisioningState]" -o tsv` projects a top-level array
+# of SCALARS, which the CLI renders as one value PER LINE. Tab separation is what it emits for a
+# table of rows (an array of arrays/objects), which this query is not. The original fixture wrote
+# a tab, so the suite passed 28/28 against a fake that could not reproduce the live failure in
+# teardown run 30722259306: Azure reported Succeeded within ~30s and held it for 5 minutes, while
+# law_get_live handed the caller "centralus\nSucceeded" in BOTH out-vars and the poll timed out
+# against a workspace that had been ready the entire time. A stub that does not match the real
+# tool's output shape is not a test of the parser. Do not "simplify" this back to a tab.
 stub_live_get() {
   local marker="$1"
   if [ -f "$marker" ]; then
@@ -129,7 +139,7 @@ az() {
       ;;
     *"rest --method put"*)
       echo "recover:$(arg_value --url "$@")" >> "$log1"
-      printf 'eastus2\tSucceeded\n' > "$live1"
+      printf 'eastus2\nSucceeded\n' > "$live1"
       return 0
       ;;
     *"log-analytics workspace delete"*)
@@ -223,12 +233,12 @@ az() {
       ;;
     *"rest --method put"*"rg-p-globaris-poc"*)
       echo "recover:law-p" >> "$log2b"
-      printf 'eastus2\tSucceeded\n' > "$live2b_a"
+      printf 'eastus2\nSucceeded\n' > "$live2b_a"
       return 0
       ;;
     *"rest --method put"*"rg-q-globaris-poc"*)
       echo "recover:law-q" >> "$log2b"
-      printf 'eastus2\tSucceeded\n' > "$live2b_b"
+      printf 'eastus2\nSucceeded\n' > "$live2b_b"
       return 0
       ;;
     *"log-analytics workspace delete"*"law-p"*)
@@ -325,7 +335,7 @@ az() {
       ;;
     *"rest --method put"*)
       echo "recover" >> "$log4"
-      printf 'eastus2\tSucceeded\n' > "$live4"
+      printf 'eastus2\nSucceeded\n' > "$live4"
       return 0
       ;;
     *"log-analytics workspace delete"*)
@@ -384,11 +394,11 @@ az() {
     *"rest --method put"*)
       loc="$(body_location "$(arg_value --body "$@")")"
       echo "recover:$loc" >> "$log5"
-      printf '%s\tSucceeded\n' "$loc" > "$live5"
+      printf '%s\nSucceeded\n' "$loc" > "$live5"
       return 0
       ;;
     *"log-analytics workspace delete"*)
-      loc="$(cut -f1 "$live5" 2>/dev/null || true)"
+      loc="$(sed -n '1p' "$live5" 2>/dev/null || true)"
       echo "delete:$loc" >> "$log5"
       touch "$gone_dir/$loc"
       rm -f "$live5"
@@ -417,7 +427,7 @@ unset -f az
 # ---------------------------------------------------------------------------------------------
 log6="$tmp/case6.log"; : > "$log6"
 live6="$tmp/case6_live"
-printf 'eastus2\tSucceeded\n' > "$live6"   # pre-populated: already live BEFORE this run starts
+printf 'eastus2\nSucceeded\n' > "$live6"   # pre-populated: already live BEFORE this run starts
 az() {
   case "$*" in
     *"list-deleted-workspaces"*"properties.customerId"*)
@@ -484,7 +494,7 @@ az() {
       ;;
     *"rest --method put"*)
       echo "recover:law-w" >> "$log7"
-      printf 'eastus2\tRestoring\n' > "$live7"   # NEVER advances past Restoring
+      printf 'eastus2\nRestoring\n' > "$live7"   # NEVER advances past Restoring
       return 0
       ;;
     *"log-analytics workspace delete"*)
@@ -506,6 +516,20 @@ record "gap 1: never force-deletes a workspace whose state was never confirmed" 
 record "gap 1: the recovery PUT itself DID run (the failure is in the poll, not upstream)" \
   "$(grep -qF 'recover:law-w' "$log7" && echo 1 || echo 0)"
 unset -f az
+
+# LAW_TEST_DEBUG=1 dumps every case's captured return code and output. The assertions above
+# deliberately grep for specific markers, so a failure tells you WHICH marker was absent but not
+# what the mechanism actually said instead. Without this, diagnosing a failure means hand-editing
+# the suite, which is how a debugging session starts introducing its own defects.
+if [ "${LAW_TEST_DEBUG:-0}" = "1" ]; then
+  echo
+  echo "===== LAW_TEST_DEBUG: captured output per case ====="
+  for c in 1 2 2b 3 4 5 6 7; do
+    rcv="rc${c}"; outv="out${c}"
+    [ -n "${!rcv+x}" ] || continue
+    printf -- '----- case %s (rc=%s) -----\n%s\n' "$c" "${!rcv}" "${!outv}"
+  done
+fi
 
 echo
 echo "test-teardown-law-purge: $pass passed, $failed failed"
