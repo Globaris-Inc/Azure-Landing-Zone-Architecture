@@ -108,6 +108,22 @@
 # fixes (a false-positive completion check when two entries share an ARM ID, and a CLI recover
 # verb that cannot select between them at all).
 #
+# AMENDED a tenth time 2026-08-01 (convergence fast-follow, live incident: teardown runs
+# 30719487245 and 30719803427, both target=all mode=az-sweep, identical failure both times -
+# "Workspace cannot be deleted while current provisioning state is 'Restoring' please retry in a
+# few minutes"). The ninth amendment's own "KNOWN RESIDUAL RISK" note (the recovery PUT does not
+# poll provisioningState) fired on first contact, and - because the failed cycle left the
+# workspace LIVE rather than soft-deleted - a naive retry was a FIXED POINT, not a transient: the
+# next run's own general RG sweep (step 2, teardown-az-sweep.sh) deleted the RG holding the live
+# workspace, soft-deleting it again, and step 7b recovered it again and raced the identical
+# window. Two fixes, both in `law_purge_soft_deleted_workspaces`: `law_wait_provisioned`, a
+# bounded poll for provisioningState="Succeeded" before every force-delete (fails loud, never
+# loops forever, never proceeds on an unconfirmed state); and `law_get_live`, an already-live
+# pre-check that skips a redundant, race-reintroducing recovery PUT when a prior cycle already
+# recovered the workspace at the same location. See LAW_PROVISION_POLL_ATTEMPTS's own comment for
+# the poll bound and law_purge_soft_deleted_workspaces's own "FORMER RESIDUAL RISK, NOW CLOSED"
+# note for the full incident account.
+#
 # AMENDED an eighth time 2026-07-30 (transient-list-failure fix round): added `is_transient_error`
 # and `az_run_retry` below. Root cause: teardown run 30597640251 died at Phase 2 step 4-pre on a
 # single ARM 500 (Internal Server Error) returned for one MG-scope budget LIST call - `az_run` has
@@ -230,6 +246,102 @@ LAW_PURGE_API_VERSION="2025-07-01"
 # not the existence of the cap; revisit if it ever fires on a legitimate run.
 LAW_PURGE_BLAST_RADIUS_CAP=10
 
+# LAW_PROVISION_POLL_ATTEMPTS / LAW_PROVISION_POLL_SLEEP_SECONDS - convergence fast-follow
+# (2026-08-01, live incident: teardown runs 30719487245 and 30719803427, both target=all
+# mode=az-sweep, identical failure both times: "Workspace cannot be deleted while current
+# provisioning state is 'Restoring' please retry in a few minutes"). The recovery PUT (gate C)
+# is asynchronous - Microsoft's own sample response for this exact PUT shows provisioningState
+# "Creating" even on a 200/201 - and a raw `az rest` call does not poll for completion the way
+# the CLI's `recover` verb's default behaviour (called without `--no-wait`) would have. This was
+# named and consciously deferred as a residual risk when ADR-073 decision 4 landed, and it fired
+# on first contact with the live estate, exactly as flagged. No documented Microsoft SLA for this
+# transition was found (live-searched 2026-08-01); the bound below is a judgment call, sized the
+# same way LAW_PURGE_BLAST_RADIUS_CAP was - generous enough for what the live evidence shows (a
+# metadata-level workspace re-creation, not a data restore: the 409 fired within seconds of the
+# PUT, not minutes), short enough that a genuinely stuck operation fails loud within a few
+# minutes rather than consuming a meaningful slice of the job's own ceiling. 20 attempts, 15s
+# apart = 5 minutes total. Revisit if it ever fires on a legitimate run.
+LAW_PROVISION_POLL_ATTEMPTS="${LAW_PROVISION_POLL_ATTEMPTS:-20}"
+LAW_PROVISION_POLL_SLEEP_SECONDS="${LAW_PROVISION_POLL_SLEEP_SECONDS:-15}"
+
+# law_get_live <out_location_var> <out_state_var> "<url>" - GET the LIVE (non-deleted) workspace
+# at <url> (the identical ARM-id URL law_recover_url already builds - live and soft-deleted share
+# one URL shape, only the deletedWorkspaces LIST endpoint is different). Populates
+# <out_location_var>/<out_state_var> with the resource's current `location` and
+# `properties.provisioningState` on success. Return codes:
+#   0 = found - the two out-vars are populated.
+#   1 = CONFIRMED NOT FOUND (404/NotFound-shaped, including a ResourceGroupNotFound when the RG
+#       itself does not exist yet) - safe to read as "not currently live".
+#   2 = auth-shaped or INDETERMINATE failure - caller MUST treat as fail loud, never as "not
+#       live", the same section-9.4 discipline confirm_gone_by_get already enforces for the
+#       mirror-image "confirmed gone" question.
+# Shared by two call sites in law_purge_soft_deleted_workspaces below - the already-live
+# pre-check (gap 2, decides whether to skip the recovery PUT) and the provisioning-state poll
+# (gap 1, law_wait_provisioned) - both need the identical GET, so there is one implementation
+# rather than two that could drift.
+LAW_GET_LIVE_ERR=""
+law_get_live() {
+  local __loc_var="$1" __state_var="$2" url="$3"
+  local out
+  LAW_GET_LIVE_ERR=""
+  if out="$(az rest --method get --url "$url" --query "[location, properties.provisioningState]" -o tsv 2>&1)"; then
+    printf -v "$__loc_var" '%s' "$(printf '%s' "$out" | cut -f1)"
+    printf -v "$__state_var" '%s' "$(printf '%s' "$out" | cut -f2)"
+    return 0
+  fi
+  if is_auth_error "$out"; then
+    LAW_GET_LIVE_ERR="$out"
+    return 2
+  fi
+  if is_not_found_error "$out"; then
+    return 1
+  fi
+  LAW_GET_LIVE_ERR="$out"
+  return 2
+}
+
+# law_wait_provisioned "<url>" "<description>" - GATE C-POLL, the gap-1 fast-follow fix
+# (LAW_PROVISION_POLL_ATTEMPTS's own comment has the full incident and the bound's
+# justification). Bounded poll for the live workspace at <url> to reach provisioningState
+# "Succeeded" before the caller force-deletes it. Runs UNCONDITIONALLY before every force-delete
+# below, regardless of whether this cycle just issued a fresh recovery PUT or found the
+# workspace already live (gap 2) - either path can leave the resource mid-transition, and
+# force-deleting one that has not reached a terminal state is the exact 409 the live incident
+# hit verbatim. Returns 0 once Succeeded; returns 1 on EVERY other outcome (Failed, not-found
+# mid-poll, an auth/indeterminate GET, or the attempt ceiling reached) - all FAIL LOUD, never a
+# silent proceed-anyway and never an unbounded loop.
+law_wait_provisioned() {
+  local url="$1" desc="$2"
+  local attempt=1 loc state rc
+  while [ "$attempt" -le "$LAW_PROVISION_POLL_ATTEMPTS" ]; do
+    law_get_live loc state "$url"
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      echo "::error::${desc}: checking provisioningState failed with an auth/transport error or an indeterminate result (attempt ${attempt}/${LAW_PROVISION_POLL_ATTEMPTS}) - cannot safely proceed to delete: ${LAW_GET_LIVE_ERR}"
+      return 1
+    fi
+    if [ "$rc" -eq 1 ]; then
+      echo "::error::${desc}: the workspace was not found while polling for provisioningState (expected to be live at this point) - cannot safely proceed to delete."
+      return 1
+    fi
+    if [ "$state" = "Succeeded" ]; then
+      return 0
+    fi
+    if [ "$state" = "Failed" ]; then
+      echo "::error::${desc}: provisioningState reported Failed - the recovery did not complete successfully, cannot safely proceed to delete."
+      return 1
+    fi
+    if [ "$attempt" -ge "$LAW_PROVISION_POLL_ATTEMPTS" ]; then
+      break
+    fi
+    echo "    ${desc}: provisioningState is ${state} (attempt ${attempt}/${LAW_PROVISION_POLL_ATTEMPTS}) - waiting ${LAW_PROVISION_POLL_SLEEP_SECONDS}s"
+    sleep "$LAW_PROVISION_POLL_SLEEP_SECONDS"
+    attempt=$((attempt + 1))
+  done
+  echo "::error::${desc}: provisioningState never reached Succeeded within ${LAW_PROVISION_POLL_ATTEMPTS} attempts (${LAW_PROVISION_POLL_SLEEP_SECONDS}s apart) - failing loud rather than looping forever or proceeding to delete on an unconfirmed state."
+  return 1
+}
+
 # law_confirm_purged "<sub>" "<id>" "<location>" "<description>" - ADR-073 decision 4 gate D,
 # the per-entry completion check `law_purge_soft_deleted_workspaces` (below) calls after every
 # permanent delete. Re-lists deletedWorkspaces in <sub> and fails loud unless NO row matches
@@ -289,13 +401,30 @@ law_confirm_purged() {
 # acted on unattended - ADR-073 is explicit that only both together make a discovery-based sweep
 # safe to run without a human in the loop.
 #
-# GATE C - RECOVER BY REST PUT, NOT THE CLI VERB: `az monitor log-analytics workspace recover`
-# takes only `--workspace-name` and `--resource-group` - verified live against the current CLI
-# reference 2026-08-01, it has NO `--location` parameter at all, so it physically cannot select
-# between two soft-deleted entries that share an ARM ID. Recovery is therefore issued as a raw
-# `az rest --method put` at LAW_PURGE_API_VERSION with an explicit `{"location": "<loc>"}` body,
-# matching Microsoft's own documented recovery contract verbatim ("Delete and Recover a Log
-# Analytics Workspace", the REST tab, re-verified live 2026-08-01).
+# GATE C - RECOVER BY REST PUT, NOT THE CLI VERB, ONLY WHEN NOT ALREADY LIVE: `az monitor
+# log-analytics workspace recover` takes only `--workspace-name` and `--resource-group` -
+# verified live against the current CLI reference 2026-08-01, it has NO `--location` parameter
+# at all, so it physically cannot select between two soft-deleted entries that share an ARM ID.
+# Recovery is therefore issued as a raw `az rest --method put` at LAW_PURGE_API_VERSION with an
+# explicit `{"location": "<loc>"}` body, matching Microsoft's own documented recovery contract
+# verbatim ("Delete and Recover a Log Analytics Workspace", the REST tab, re-verified live
+# 2026-08-01). BEFORE issuing this PUT, `law_get_live` checks whether the workspace is already
+# live at this exact (rg, name, location) - convergence fast-follow, 2026-08-01, live incident:
+# a prior interrupted cycle can leave the workspace already recovered, and re-issuing another PUT
+# on an already-live resource only re-triggers a fresh, unnecessary state transition. When
+# already live at a MATCHING location, the PUT is skipped entirely and the cycle goes straight
+# to the poll below. A live workspace at a DIFFERENT location is not treated as a match (region
+# is part of ADR-073 decision 1's four-part key) - the normal PUT still fires, and Azure's own
+# conflict rejection is the safety net if that is genuinely unsafe.
+#
+# GATE C-POLL, convergence fast-follow (2026-08-01, live incident: teardown runs 30719487245 and
+# 30719803427, target=all mode=az-sweep, identical failure both times: "Workspace cannot be
+# deleted while current provisioning state is 'Restoring' please retry in a few minutes"): a
+# bounded poll (`law_wait_provisioned`) for provisioningState to reach "Succeeded" runs BEFORE
+# every force-delete, regardless of whether this cycle just recovered the workspace or found it
+# already live - either path can leave it mid-transition. See LAW_PROVISION_POLL_ATTEMPTS's own
+# comment for the incident and the bound's justification. FAILS LOUD (never loops forever, never
+# proceeds to delete on an unconfirmed state) when the poll is exhausted.
 #
 # GATE D - COMPLETION CHECK BY RE-LIST: see law_confirm_purged above.
 #
@@ -321,16 +450,19 @@ law_confirm_purged() {
 # entry's own location), recovers the workspace into it, force-purges the workspace, then deletes
 # the placeholder RG and waits for it to be confirmed gone.
 #
-# KNOWN RESIDUAL RISK, DELIBERATELY NOT CLOSED HERE: the recovery PUT is a raw `az rest` call,
-# which does not poll the resulting resource's `provisioningState` the way the CLI's own
-# `recover` verb's default behaviour (called without `--no-wait`) would have. Microsoft's own
-# sample response for this exact PUT shows `provisioningState: "Creating"` even on a 200/201 - so the
-# permanent-delete call immediately afterward could in principle race a still-provisioning
-# resource. Accepted, not fixed, in this pass: a resulting conflict fails LOUD (the existing
-# non-auth-failure branch below, unchanged), never silently, and this whole mechanism is safe to
-# idempotently re-dispatch. Flagged for the architect rather than solved speculatively here - it
-# is not in ADR-073 decision 4's own spec, and this class has no live evidence of the race
-# actually occurring.
+# FORMER RESIDUAL RISK, NOW CLOSED (2026-08-01): the original version of this function accepted,
+# as a documented but unclosed risk, that the recovery PUT (a raw `az rest` call) does not poll
+# `provisioningState` the way the CLI's own `recover` verb's default behaviour would have. That
+# risk fired on first contact with the live estate (teardown runs 30719487245 and 30719803427,
+# both target=all mode=az-sweep) - the force-delete raced a still-"Restoring" workspace, 409'd,
+# and because the workspace was left LIVE (not soft-deleted) by the failed cycle, a naive retry
+# was a FIXED POINT rather than a transient: the next run's own general RG sweep (step 2,
+# teardown-az-sweep.sh) deleted the RG containing the live workspace, soft-deleting it again,
+# and step 7b recovered it again and raced the exact same "Restoring" window, byte-identical to
+# the first failure. The gate C-POLL above (waits for Succeeded before every delete) and the
+# already-live check (skips a redundant, race-reintroducing PUT when a prior cycle already
+# recovered the workspace) together close this. See LAW_PROVISION_POLL_ATTEMPTS's own comment
+# for the poll bound's justification and its own documented limits.
 #
 # List-call failure: a SUBSCRIPTION-scoped list can never legitimately be gone (section 9.4
 # design boundary), so ANY non-zero is FAIL LOUD. Recover/purge-call failure: classify with
@@ -345,6 +477,7 @@ law_purge_soft_deleted_workspaces() {
   local law_rg_exists_out law_purge_rg_created law_rg_create_out
   local law_recover_url law_recover_out law_purge_out
   local law_rg_del_out law_wait_rc
+  local law_live_loc law_live_state law_live_rc
 
   for law_sub in $(teardown_subscriptions); do
     if ! az_run_retry law_sub_rows_out monitor log-analytics workspace list-deleted-workspaces \
@@ -426,18 +559,53 @@ law_purge_soft_deleted_workspaces() {
       echo "    RG ${law_rg} already exists - reusing it (not created by this cycle, will not be deleted after purge)"
     fi
 
-    # GATE C: recover by REST PUT (not the CLI verb - see this function's own comment for why),
-    # carrying the entry's own location in the body, matching Microsoft's documented recovery PUT.
     law_recover_url="${ARM_BASE}${law_id}?api-version=${LAW_PURGE_API_VERSION}"
-    if ! law_recover_out="$(az rest --method put --url "$law_recover_url" \
-        --body "{\"location\": \"${law_loc}\"}" --output none 2>&1)"; then
-      if is_auth_error "$law_recover_out"; then
-        echo "::error::recovering ${law_name} (rg ${law_rg}, sub ${law_sub}) via REST PUT failed with an auth/transport error: ${law_recover_out}"
-        return 1
-      fi
-      echo "::error::recovering ${law_name} (rg ${law_rg}, sub ${law_sub}) via REST PUT failed - cannot purge without first recovering it (Microsoft's own documented recover-then-purge sequence): ${law_recover_out}"
+
+    # GAP 2, convergence fast-follow (2026-08-01, live incident): check whether a LIVE workspace
+    # already sits at this exact (rg, name, location) BEFORE issuing a recovery PUT. A prior
+    # interrupted cycle - this exact live incident: the force-delete below 409'd on 'Restoring'
+    # and the function returned 1, leaving the just-recovered workspace live - means the entry
+    # discovery found (from a STALE deletedWorkspaces snapshot, or because this estate's own
+    # step 2 RG sweep re-soft-deleted a leftover live workspace on a later run) may already be
+    # live by the time this cycle reaches it. Re-issuing another recovery PUT on an
+    # already-existing resource only re-triggers a FRESH state transition (Updating, not
+    # Restoring, but the identical race) for no reason - this is what turned two consecutive live
+    # runs into a byte-identical failure instead of forward progress. A live workspace found at a
+    # DIFFERENT location than this entry is deliberately NOT treated as a match (ADR-073
+    # decision 1: region is part of the four-part recovery key) - falls through to the normal
+    # recovery PUT below, which Azure itself will reject as a conflict if that is genuinely
+    # unsafe, rather than this function guessing which entry a mismatched live object belongs to.
+    law_get_live law_live_loc law_live_state "$law_recover_url"
+    law_live_rc=$?
+    if [ "$law_live_rc" -eq 2 ]; then
+      echo "::error::checking whether ${law_name} (rg ${law_rg}, sub ${law_sub}) is already live failed with an auth/transport error or an indeterminate result: ${LAW_GET_LIVE_ERR}"
       return 1
     fi
+    if [ "$law_live_rc" -eq 0 ] && [ "$law_live_loc" = "$law_loc" ]; then
+      echo "    ${law_name} is already LIVE at ${law_loc} (provisioningState ${law_live_state}) - a prior cycle recovered it but did not finish purging it. Skipping the recovery PUT (gate C) and proceeding straight to the provisioning-state wait and force-delete."
+    else
+      # GATE C: recover by REST PUT (not the CLI verb - see this function's own comment for
+      # why), carrying the entry's own location in the body, matching Microsoft's documented
+      # recovery PUT.
+      if ! law_recover_out="$(az rest --method put --url "$law_recover_url" \
+          --body "{\"location\": \"${law_loc}\"}" --output none 2>&1)"; then
+        if is_auth_error "$law_recover_out"; then
+          echo "::error::recovering ${law_name} (rg ${law_rg}, sub ${law_sub}) via REST PUT failed with an auth/transport error: ${law_recover_out}"
+          return 1
+        fi
+        echo "::error::recovering ${law_name} (rg ${law_rg}, sub ${law_sub}) via REST PUT failed - cannot purge without first recovering it (Microsoft's own documented recover-then-purge sequence): ${law_recover_out}"
+        return 1
+      fi
+    fi
+
+    # GAP 1, convergence fast-follow (2026-08-01, live incident): bounded poll for
+    # provisioningState to reach Succeeded BEFORE force-deleting - see
+    # LAW_PROVISION_POLL_ATTEMPTS's own comment for the full incident and the bound's
+    # justification. This is the direct fix for the exact error the live runs hit verbatim:
+    # "Workspace cannot be deleted while current provisioning state is 'Restoring' please retry
+    # in a few minutes". Runs regardless of which branch above fired - an already-live workspace
+    # can be just as mid-transition as a freshly-recovered one.
+    law_wait_provisioned "$law_recover_url" "${law_name} (rg ${law_rg}, sub ${law_sub})" || return 1
 
     echo "    Force-purging (permanent delete, releases the name) ${law_name} (rg ${law_rg}, sub ${law_sub})"
     if ! law_purge_out="$(az monitor log-analytics workspace delete \
