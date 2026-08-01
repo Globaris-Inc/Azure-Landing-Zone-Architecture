@@ -92,6 +92,22 @@
 # built around, and why it is now a BACKSTOP (`platform/security/providers.tf` purges the LAW
 # natively on terraform destroy as of 2026-07-30, Cloud Engineer fix).
 #
+# AMENDED a ninth time 2026-08-01 (ADR-073 decision 4, generalises OQ-063/ADR-066 - resolves
+# OQ-069): the SECURITY_LAW_* constants above are RETIRED. Live evidence found a second
+# soft-deleted-workspace class member the old single-hardcoded-name purge structurally cannot
+# reach: two entries in the management subscription, both named law-platform-globaris-poc,
+# sharing ONE ARM resource ID because region is not part of a Log Analytics workspace's ARM
+# identity (ADR-073's own context has the full live evidence). SECURITY_LAW_WORKSPACE_NAME and
+# SECURITY_LAW_RESOURCE_GROUP_NAME are REMOVED (ADR-062: "an enumerated list plus a promise to
+# maintain it is not a control" - this class has now demonstrated a second member).
+# SECURITY_LAW_API_VERSION is RENAMED to LAW_PURGE_API_VERSION (same "2025-07-01" value,
+# re-verified live 2026-08-01 against Microsoft's own recovery PUT example - it was never
+# actually security-specific). Added LAW_PURGE_BLAST_RADIUS_CAP. See the constants' own comment
+# block below (where SECURITY_LAW_* used to sit) for the full discovery-based mechanism, and
+# teardown-az-sweep.sh's own "step 7b" comment for the two real defects this generalisation also
+# fixes (a false-positive completion check when two entries share an ARM ID, and a CLI recover
+# verb that cannot select between them at all).
+#
 # AMENDED an eighth time 2026-07-30 (transient-list-failure fix round): added `is_transient_error`
 # and `az_run_retry` below. Root cause: teardown run 30597640251 died at Phase 2 step 4-pre on a
 # single ARM 500 (Internal Server Error) returned for one MG-scope budget LIST call - `az_run` has
@@ -171,20 +187,302 @@ DEFENDER_PLANS_TO_FREE=(VirtualMachines StorageAccounts AppServices SqlServers \
 # entirely, per LESSON 54).
 RP_NAMESPACES_TO_UNREGISTER=(Microsoft.CostManagementExports)
 
-# Security Log Analytics workspace purge (OQ-063, ADR-066) - fixed identifiers,
-# not a naming-pattern match, because this step targets exactly ONE known object by name, not
-# a discovered class. Sourced from platform/security/main.tf's own naming
-# ("law-security-${var.org_prefix}-${var.environment}" / "rg-security-${var.org_prefix}-${var.
-# environment}") and envs/poc.tfvars (org_prefix=globaris, environment=poc) - MUST be kept in
-# lock-step with those two files if either ever renames the security root's workspace or RG
-# (same coupling discipline RG_SWEEP_QUERY and DEFENDER_PLANS_TO_FREE above already carry).
-# api-version matches the REST example in Microsoft's own "Delete and recover an Azure Log
-# Analytics workspace" doc (learn.microsoft.com/en-us/azure/azure-monitor/logs/delete-workspace,
-# ms.date verified live 2026-07-29) - used only for the post-purge confirm-GET below; every
-# CLI command (recover/delete) uses the CLI's own bundled api-version, never this constant.
-SECURITY_LAW_WORKSPACE_NAME="law-security-globaris-poc"
-SECURITY_LAW_RESOURCE_GROUP_NAME="rg-security-globaris-poc"
-SECURITY_LAW_API_VERSION="2025-07-01"
+# Log Analytics workspace soft-delete purge (ADR-073 decision 4, 2026-08-01) - generalises the
+# OQ-063/ADR-066 mechanism (originally a fixed-identifier purge of exactly ONE known object,
+# law-security-<org>-<env> in rg-security-<org>-<env>) into a DISCOVERY-based sweep across every
+# estate subscription, after live evidence showed a second class member the single-name filter
+# structurally cannot reach: two soft-deleted workspaces in the management subscription, both
+# named law-platform-globaris-poc, sharing ONE ARM resource ID (region is not part of a Log
+# Analytics workspace's ARM identity - see ADR-073's own context). There is no per-workspace
+# name/RG constant here any more - teardown-az-sweep.sh step 7b calls
+# `list-deleted-workspaces --subscription <sub>` with NO name filter, for every subscription
+# `teardown_subscriptions` returns, and decides what to purge with the two safety-bar gates
+# below, never with an enumerated list (ADR-062: "an enumerated list plus a promise to maintain
+# it is not a control").
+#
+# Gate A (containment) is NOT a new constant - it reuses `is_estate_owned --resource-id`
+# (the existing T1(c) predicate, above) unchanged. This is the correct test specifically BECAUSE
+# a soft-deleted workspace's resource group is already gone, so no live RG-existence lookup is
+# possible - only a string test on the ARM ID itself is possible.
+#
+# LAW_PURGE_API_VERSION - Microsoft.OperationalInsights/workspaces (the Create Or Update /
+# recovery PUT and the deletedWorkspaces list). "2025-07-01" is the version Microsoft's own
+# "Delete and Recover a Log Analytics Workspace" doc uses verbatim in its REST recovery example
+# (learn.microsoft.com/en-us/azure/azure-monitor/logs/delete-workspace, ms.date 2024-10-31, page
+# re-verified live 2026-08-01). RENAMED from SECURITY_LAW_API_VERSION (same value, unchanged) -
+# it was never actually security-specific, it is the Log Analytics workspace API version, used
+# for BOTH the recovery PUT (issued via `az rest`, since `az monitor log-analytics workspace
+# recover` has no `--location` parameter and cannot select between two entries sharing one ARM
+# ID - verified live against the current CLI reference 2026-08-01) and the post-purge
+# deletedWorkspaces re-list that replaces the old ARM-GET completion check (that GET is keyed on
+# the ARM ID ALONE, so it cannot tell two same-ID entries apart and would report a false
+# "purged" the moment either one is gone - ADR-073 decision 4 gate D).
+LAW_PURGE_API_VERSION="2025-07-01"
+
+# LAW_PURGE_BLAST_RADIUS_CAP - ADR-073 decision 4 gate B. If discovery (post-containment)
+# returns MORE purge-eligible entries than this across the WHOLE estate, step 7b aborts with
+# `::error::` and purges NOTHING, rather than acting on a result that large unattended. Set to
+# 10: five estate subscriptions, and the live incident this generalisation was built for found at
+# most 2 entries in any one subscription (both in `management`) - 10 gives a 5x margin over the
+# worst case actually observed while still being small enough that a real over-reach (a wrong
+# subscription list, a containment predicate gone wrong) trips it long before it could reach
+# double digits. Not derived from a formula - ADR-073 itself says DevSecOps may argue the number,
+# not the existence of the cap; revisit if it ever fires on a legitimate run.
+LAW_PURGE_BLAST_RADIUS_CAP=10
+
+# law_confirm_purged "<sub>" "<id>" "<location>" "<description>" - ADR-073 decision 4 gate D,
+# the per-entry completion check `law_purge_soft_deleted_workspaces` (below) calls after every
+# permanent delete. Re-lists deletedWorkspaces in <sub> and fails loud unless NO row matches
+# BOTH <id> and <location>. This replaces the PRIOR version's ARM GET on the shared resource ID
+# alone, which was a REAL DEFECT once two entries can share an ID: purging ONE of them made that
+# GET 404 while the other was still soft-deleted, a FALSE "purged" confirmation. Same
+# "caller must treat non-zero as fail loud" contract as confirm_gone_or_fail_primary above.
+law_confirm_purged() {
+  local sub="$1" id="$2" loc="$3" desc="$4"
+  local relist_out
+  if ! az_run_retry relist_out monitor log-analytics workspace list-deleted-workspaces \
+      --subscription "$sub" --query "[].[id, location]" -o tsv; then
+    echo "::error::${desc}: post-purge deletedWorkspaces re-list failed for subscription ${sub} - a failed list is never read as 'purged' (section 9.4): ${AZ_RUN_STDERR}"
+    return 1
+  fi
+  # shellcheck disable=SC2154  # relist_out is assigned indirectly by az_run's printf -v
+  local -a relist_rows
+  mapfile -t relist_rows <<< "$relist_out"
+  local rrow rid rloc
+  for rrow in "${relist_rows[@]:-}"; do
+    [ -z "$rrow" ] && continue
+    rid="$(printf '%s' "$rrow" | cut -f1)"
+    rloc="$(printf '%s' "$rrow" | cut -f2)"
+    if [ "$rid" = "$id" ] && [ "$rloc" = "$loc" ]; then
+      echo "::error::${desc}: still present in the post-purge deletedWorkspaces re-list (id ${id}, location ${loc}) - this class has no separate Phase 3 VERIFY step, so this re-list is the ONLY completion check it will ever get. Treating a remaining match as a hard remnant, not a warning."
+      return 1
+    fi
+  done
+  return 0
+}
+
+# law_purge_soft_deleted_workspaces - ADR-073 decision 4 (2026-08-01), generalises the
+# OQ-063/ADR-066 mechanism (originally a fixed-identifier purge of exactly ONE known object)
+# into a DISCOVERY-based sweep across every estate subscription. Called from
+# teardown-az-sweep.sh's step 7b - see that call site for WHY it runs where it does (after step
+# 7's reconcile). Shared here, not left inline in that flat script, so it can be sourced and
+# exercised in isolation with a stubbed `az` (the same reason databricks_force_delete_cascade and
+# attachment_sweep_cross_root_objects above are functions rather than inline steps). Returns 0 on
+# success (including "nothing found" - idempotent, matching every other class in this codebase),
+# 1 on any failure; the caller's own `if ! law_purge_soft_deleted_workspaces; then exit 1; fi`
+# turns that into the flat script's usual fail-loud exit.
+#
+# Root cause this generalisation closes: live evidence found a SECOND soft-deleted-workspace
+# class member the old single-name filter structurally could not reach - two entries in the
+# management subscription, both named law-platform-globaris-poc, sharing ONE ARM resource ID
+# because region is not part of a Log Analytics workspace's ARM identity (ADR-073's own context).
+#
+# GATE A - CONTAINMENT: every discovered entry is tested with `is_estate_owned --resource-id`
+# (the existing T1(c) predicate) before it is eligible for anything below. Correct specifically
+# because the entry's resource group is already gone - no live RG-existence lookup is possible,
+# only a string test on the ARM ID itself. An entry that fails is SKIPPED with `::warning::`
+# naming it - not deleted, not a hard failure.
+#
+# GATE B - BLAST-RADIUS CAP: if the number of entries that PASS gate A, summed across the whole
+# estate, exceeds LAW_PURGE_BLAST_RADIUS_CAP (above), this function ABORTS with `::error::` and
+# purges NOTHING. Containment bounds WHICH object is eligible; the cap bounds HOW MANY can be
+# acted on unattended - ADR-073 is explicit that only both together make a discovery-based sweep
+# safe to run without a human in the loop.
+#
+# GATE C - RECOVER BY REST PUT, NOT THE CLI VERB: `az monitor log-analytics workspace recover`
+# takes only `--workspace-name` and `--resource-group` - verified live against the current CLI
+# reference 2026-08-01, it has NO `--location` parameter at all, so it physically cannot select
+# between two soft-deleted entries that share an ARM ID. Recovery is therefore issued as a raw
+# `az rest --method put` at LAW_PURGE_API_VERSION with an explicit `{"location": "<loc>"}` body,
+# matching Microsoft's own documented recovery contract verbatim ("Delete and Recover a Log
+# Analytics Workspace", the REST tab, re-verified live 2026-08-01).
+#
+# GATE D - COMPLETION CHECK BY RE-LIST: see law_confirm_purged above.
+#
+# ORDERING, MANDATORY: purge cycles are STRICTLY SEQUENTIAL. Every eligible entry runs its full
+# recover -> permanently-delete -> re-list-confirm cycle, including its own placeholder RG
+# create/delete/confirm-gone, before the next entry's cycle starts. This holds structurally (one
+# single-threaded `for` loop, never backgrounded) rather than by detecting which entries share an
+# ID - after recovering entry A a LIVE workspace occupies the shared ARM ID, so starting entry
+# B's recovery PUT before A is fully purged would be an immutable LOCATION CHANGE on an existing
+# resource, which ARM rejects. Placeholder resource groups are created and torn down PER CYCLE,
+# and this function WAITS (`wait_for_rgs_gone`) for each placeholder's delete to be confirmed
+# gone before the next cycle begins - ADR-073 permits ONE placeholder RG to serve every cycle
+# sharing a name (a resource group's own location is independent of what is inside it), but only
+# after that is verified live in a run log, which has not happened; this takes the conservative
+# fallback the ADR itself names instead of assuming it.
+#
+# RESOURCE-GROUP-RECREATION CAVEAT (Microsoft's own documented behaviour, unchanged from the
+# original single-workspace version): recovering an already soft-deleted workspace is a PUT that
+# recreates the workspace inside its ORIGINAL resource group, and fails "ResourceGroupNotFound"
+# if that RG no longer exists - which it will not, here, since the owning root's own destroy (or
+# teardown-az-sweep.sh's own RG sweep) already removed it. Each cycle recreates a minimal
+# placeholder RG (the entry's own RG name, parsed from its ARM ID - never a constant - at the
+# entry's own location), recovers the workspace into it, force-purges the workspace, then deletes
+# the placeholder RG and waits for it to be confirmed gone.
+#
+# KNOWN RESIDUAL RISK, DELIBERATELY NOT CLOSED HERE: the recovery PUT is a raw `az rest` call,
+# which does not poll the resulting resource's `provisioningState` the way the CLI's own
+# `recover` verb's default behaviour (called without `--no-wait`) would have. Microsoft's own
+# sample response for this exact PUT shows `provisioningState: "Creating"` even on a 200/201 - so the
+# permanent-delete call immediately afterward could in principle race a still-provisioning
+# resource. Accepted, not fixed, in this pass: a resulting conflict fails LOUD (the existing
+# non-auth-failure branch below, unchanged), never silently, and this whole mechanism is safe to
+# idempotently re-dispatch. Flagged for the architect rather than solved speculatively here - it
+# is not in ADR-073 decision 4's own spec, and this class has no live evidence of the race
+# actually occurring.
+#
+# List-call failure: a SUBSCRIPTION-scoped list can never legitimately be gone (section 9.4
+# design boundary), so ANY non-zero is FAIL LOUD. Recover/purge-call failure: classify with
+# is_auth_error - auth-shaped fails loud; anything else is ALSO fail loud (no separate Phase 3
+# VERIFY step exists for this class), same discipline as the original single-workspace version.
+law_purge_soft_deleted_workspaces() {
+  local law_sub law_sub_rows_out row row_name row_loc row_id row_cid
+  local -a law_sub_rows
+  local -a law_elig_subs=() law_elig_names=() law_elig_locs=() law_elig_ids=() law_elig_cids=()
+  local law_skipped_count=0 law_elig_count
+  local law_idx law_name law_loc law_id law_cid law_rg
+  local law_rg_exists_out law_purge_rg_created law_rg_create_out
+  local law_recover_url law_recover_out law_purge_out
+  local law_rg_del_out law_wait_rc
+
+  for law_sub in $(teardown_subscriptions); do
+    if ! az_run_retry law_sub_rows_out monitor log-analytics workspace list-deleted-workspaces \
+        --subscription "$law_sub" \
+        --query "[].[name, location, id, properties.customerId]" -o tsv; then
+      echo "::error::list-deleted-workspaces failed for subscription ${law_sub} - a failed list is never read as 'not soft-deleted' (section 9.4): ${AZ_RUN_STDERR}"
+      return 1
+    fi
+    # shellcheck disable=SC2154  # law_sub_rows_out is assigned indirectly by az_run's printf -v
+    mapfile -t law_sub_rows <<< "$law_sub_rows_out"
+    for row in "${law_sub_rows[@]:-}"; do
+      [ -z "$row" ] && continue
+      row_name="$(printf '%s' "$row" | cut -f1)"
+      row_loc="$(printf '%s' "$row" | cut -f2)"
+      row_id="$(printf '%s' "$row" | cut -f3)"
+      row_cid="$(printf '%s' "$row" | cut -f4)"
+      case "$row_id" in
+        /subscriptions/*/resourceGroups/*) ;;
+        *)
+          echo "::error::deleted-workspace id '${row_id}' for ${row_name} (sub ${law_sub}) does not contain a /resourceGroups/ segment - cannot determine which RG to recreate for recovery. Aborting rather than guessing."
+          return 1
+          ;;
+      esac
+      if ! is_estate_owned --resource-id "$row_id"; then
+        echo "::warning::LAW purge gate A: soft-deleted workspace ${row_name} (location ${row_loc}, sub ${law_sub}, id ${row_id}, customerId ${row_cid}) did NOT pass containment (is_estate_owned --resource-id) - skipping, not this script's business."
+        law_skipped_count=$((law_skipped_count + 1))
+        continue
+      fi
+      law_elig_subs+=("$law_sub")
+      law_elig_names+=("$row_name")
+      law_elig_locs+=("$row_loc")
+      law_elig_ids+=("$row_id")
+      law_elig_cids+=("$row_cid")
+    done
+  done
+
+  law_elig_count="${#law_elig_ids[@]}"
+  echo "  LAW purge discovery: ${law_elig_count} purge-eligible soft-deleted workspace(s) across the estate (${law_skipped_count} skipped at gate A)."
+
+  if [ "$law_elig_count" -gt "$LAW_PURGE_BLAST_RADIUS_CAP" ]; then
+    echo "::error::LAW purge gate B: ${law_elig_count} purge-eligible entries exceeds the blast-radius cap of ${LAW_PURGE_BLAST_RADIUS_CAP} (ADR-073 decision 4) - aborting WITHOUT purging anything. This is a signal the containment predicate or the subscription list is wrong, not an instruction to destroy this many workspaces unattended."
+    return 1
+  fi
+
+  if [ "$law_elig_count" -eq 0 ]; then
+    echo "  No purge-eligible soft-deleted Log Analytics workspaces found in any estate subscription - nothing to do."
+    return 0
+  fi
+
+  for law_idx in "${!law_elig_ids[@]}"; do
+    law_sub="${law_elig_subs[$law_idx]}"
+    law_name="${law_elig_names[$law_idx]}"
+    law_loc="${law_elig_locs[$law_idx]}"
+    law_id="${law_elig_ids[$law_idx]}"
+    law_cid="${law_elig_cids[$law_idx]}"
+    law_rg="${law_id#*/resourceGroups/}"
+    law_rg="${law_rg%%/*}"
+
+    echo "  [$((law_idx + 1))/${law_elig_count}] Purging ${law_name} (sub ${law_sub}, rg ${law_rg}, location ${law_loc}, customerId ${law_cid})"
+
+    if ! az_run_retry law_rg_exists_out group exists --name "$law_rg" --subscription "$law_sub" -o tsv; then
+      echo "::error::checking existence of ${law_rg} (sub ${law_sub}) failed - an auth/transport error, not a clean true/false: ${AZ_RUN_STDERR}"
+      return 1
+    fi
+    law_purge_rg_created=0
+    if [ "$law_rg_exists_out" != "true" ]; then
+      echo "    RG ${law_rg} does not exist (expected - the owning root's own destroy or teardown-az-sweep.sh's own RG sweep already removed it) - recreating as a placeholder so the recover PUT has a container"
+      if ! law_rg_create_out="$(az group create --name "$law_rg" --location "$law_loc" \
+          --subscription "$law_sub" --tags "Purpose=teardown-law-purge-scratch" --output none 2>&1)"; then
+        if is_auth_error "$law_rg_create_out"; then
+          echo "::error::creating placeholder RG ${law_rg} (sub ${law_sub}) failed with an auth/transport error: ${law_rg_create_out}"
+          return 1
+        fi
+        echo "::error::creating placeholder RG ${law_rg} (sub ${law_sub}) failed - cannot recover the workspace without it: ${law_rg_create_out}"
+        return 1
+      fi
+      law_purge_rg_created=1
+    else
+      echo "    RG ${law_rg} already exists - reusing it (not created by this cycle, will not be deleted after purge)"
+    fi
+
+    # GATE C: recover by REST PUT (not the CLI verb - see this function's own comment for why),
+    # carrying the entry's own location in the body, matching Microsoft's documented recovery PUT.
+    law_recover_url="${ARM_BASE}${law_id}?api-version=${LAW_PURGE_API_VERSION}"
+    if ! law_recover_out="$(az rest --method put --url "$law_recover_url" \
+        --body "{\"location\": \"${law_loc}\"}" --output none 2>&1)"; then
+      if is_auth_error "$law_recover_out"; then
+        echo "::error::recovering ${law_name} (rg ${law_rg}, sub ${law_sub}) via REST PUT failed with an auth/transport error: ${law_recover_out}"
+        return 1
+      fi
+      echo "::error::recovering ${law_name} (rg ${law_rg}, sub ${law_sub}) via REST PUT failed - cannot purge without first recovering it (Microsoft's own documented recover-then-purge sequence): ${law_recover_out}"
+      return 1
+    fi
+
+    echo "    Force-purging (permanent delete, releases the name) ${law_name} (rg ${law_rg}, sub ${law_sub})"
+    if ! law_purge_out="$(az monitor log-analytics workspace delete \
+        --resource-group "$law_rg" --workspace-name "$law_name" \
+        --subscription "$law_sub" --force --yes --output none 2>&1)"; then
+      if is_auth_error "$law_purge_out"; then
+        echo "::error::force-purging ${law_name} (rg ${law_rg}, sub ${law_sub}) failed with an auth/transport error: ${law_purge_out}"
+        return 1
+      fi
+      echo "::error::force-purging ${law_name} (rg ${law_rg}, sub ${law_sub}) failed - no separate VERIFY step covers this class, so this is the only completion check it will ever get: ${law_purge_out}"
+      return 1
+    fi
+
+    # GATE D: re-list, not an ARM GET on the shared id - see law_confirm_purged's own comment.
+    law_confirm_purged "$law_sub" "$law_id" "$law_loc" "LAW purge (${law_name}, rg ${law_rg}, sub ${law_sub})" || return 1
+
+    if [ "$law_purge_rg_created" -eq 1 ]; then
+      echo "    Deleting placeholder RG ${law_rg} (sub ${law_sub}, created by this cycle) and waiting for it to be confirmed gone before the next cycle"
+      if ! law_rg_del_out="$(az group delete --name "$law_rg" --subscription "$law_sub" --yes --no-wait --output none 2>&1)"; then
+        if is_auth_error "$law_rg_del_out"; then
+          echo "::error::deleting placeholder RG ${law_rg} (sub ${law_sub}) failed with an auth/transport error: ${law_rg_del_out}"
+          return 1
+        fi
+        echo "    ::warning::deleting placeholder RG ${law_rg} (sub ${law_sub}) failed (continuing - VERIFY 2's RG naming-pattern scan will catch it as a remnant if it survives): ${law_rg_del_out}"
+      else
+        # Ordering, mandatory (see this function's own comment): wait for the placeholder to be
+        # confirmed gone before the NEXT cycle in this loop can try to recreate the same-named
+        # RG. A ceiling straggler (rc=1) is a warn-and-continue, matching every other RG wait in
+        # this codebase - the next cycle's own `az group create` will simply surface a clean,
+        # loud failure if the straggler is still mid-delete, rather than this wait silently
+        # papering over it.
+        wait_for_rgs_gone "$law_sub" "$law_rg"
+        law_wait_rc=$?
+        if [ "$law_wait_rc" -eq 2 ]; then
+          echo "::error::waiting for placeholder RG ${law_rg} (sub ${law_sub}) to be confirmed gone hit an auth/transport failure - failing loud (section 9.4)."
+          return 1
+        elif [ "$law_wait_rc" -ne 0 ]; then
+          echo "    ::warning::placeholder RG ${law_rg} (sub ${law_sub}) did not confirm gone within the wait ceiling - continuing (idempotent retry / VERIFY 2 remain the safety net)."
+        fi
+      fi
+    fi
+  done
+
+  return 0
+}
 
 # is_owned_policy_object "<name>" "<policyAssignmentId>" - the ADR-062 decision 2 ownership
 # predicate (docs/teardown-redesign.md section 14.2), shared by Phase 2 sub-step 6d (what gets
