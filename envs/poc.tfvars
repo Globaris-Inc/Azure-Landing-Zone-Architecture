@@ -247,7 +247,13 @@ enable_kubernetes_platform = true
 # destroy. Anything touching the cluster or the registry itself is a STOP. Same
 # ADR-055 two-pass precedent as the identity root, LESSON 42 flag default, ADR-044
 # reviewed-commit flag supply.
-enable_acr_kubelet_binding = true
+#
+# RESET TO false 2026-08-01 (PC-1TF) because the estate is greenfield again after the
+# teardown in run 30723580651. `false` is identical to the ABSENT line described above -
+# the root default is false either way - and it keeps this comment attached to a live
+# entry instead of orphaning it. Flip back to true only for Pass 2, once the Pass 1 apply
+# is green and the AKS cluster is live.
+enable_acr_kubelet_binding = false
 
 # ---------------------------------------------------------------------------
 # Banking wave B3 - messaging platform (ADR-045 / ADR-046)
@@ -377,7 +383,13 @@ enable_ai_platform = true
 #
 # Re-landing on a green estate follows the ORDERING above: platform/management first,
 # verify id-amba-prod-001 is live, then platform/management-groups.
-enable_om_phase1 = true
+#
+# RESET TO false 2026-08-01 (PC-1TF) because the estate is greenfield again after the
+# teardown in run 30723580651, which is precisely the empty-tenant condition the circular
+# dependency above describes. This is the documented bail-out state, not a new decision.
+# Re-land it only after platform/management is applied and id-amba-prod-001 is verified
+# live, per the ORDERING note above.
+enable_om_phase1 = false
 
 # ---------------------------------------------------------------------------
 # Private DNS + NSG Flow Logs  (Section 4)
