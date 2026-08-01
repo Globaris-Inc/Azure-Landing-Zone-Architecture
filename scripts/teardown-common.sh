@@ -124,6 +124,21 @@
 # the poll bound and law_purge_soft_deleted_workspaces's own "FORMER RESIDUAL RISK, NOW CLOSED"
 # note for the full incident account.
 #
+# AMENDED 2026-08-01, SAME DAY, because the two fixes above SHIPPED NON-FUNCTIONAL. Run
+# 30722259306 failed a third time, but NOT on the Restoring race - that part worked. The recovery
+# PUT succeeded, Azure reported provisioningState=Succeeded within ~30s and held it for 5 minutes,
+# and the poll timed out anyway without ever attempting the delete. Cause: `law_get_live` parsed
+# `az --query "[location, properties.provisioningState]" -o tsv` as TAB-separated columns, but
+# that projection is an array of SCALARS and the CLI emits it one value PER LINE, so `cut -f1` and
+# `cut -f2` (which pass delimiter-free lines through untouched without `-s`) both returned the
+# whole "centralus\nSucceeded" blob. The poll never matched "Succeeded", and the already-live
+# pre-check never matched a plain location, so gap 2 had NEVER fired in any run. The regression
+# suite scored 28/28 throughout because its `az` stub emitted a tab; corrected to newline, that
+# same suite fails 13 assertions against the pre-fix code. Both call sites are fixed by parsing
+# per line, plus a short-read guard that returns indeterminate rather than an empty out-var.
+# Class-swept: every other `cut -f` in these scripts reads a `[].[a, b, c]` row projection, which
+# IS genuinely tab-separated. This was the only instance.
+#
 # AMENDED an eighth time 2026-07-30 (transient-list-failure fix round): added `is_transient_error`
 # and `az_run_retry` below. Root cause: teardown run 30597640251 died at Phase 2 step 4-pre on a
 # single ARM 500 (Internal Server Error) returned for one MG-scope budget LIST call - `az_run` has
@@ -274,29 +289,70 @@ LAW_PROVISION_POLL_SLEEP_SECONDS="${LAW_PROVISION_POLL_SLEEP_SECONDS:-15}"
 #       itself does not exist yet) - safe to read as "not currently live".
 #   2 = auth-shaped or INDETERMINATE failure - caller MUST treat as fail loud, never as "not
 #       live", the same section-9.4 discipline confirm_gone_by_get already enforces for the
-#       mirror-image "confirmed gone" question.
+#       mirror-image "confirmed gone" question. A response that parses into fewer than two
+#       non-empty fields is INDETERMINATE and returns 2, never a silent empty-string out-var.
 # Shared by two call sites in law_purge_soft_deleted_workspaces below - the already-live
 # pre-check (gap 2, decides whether to skip the recovery PUT) and the provisioning-state poll
 # (gap 1, law_wait_provisioned) - both need the identical GET, so there is one implementation
 # rather than two that could drift.
+#
+# OUTPUT SHAPE, THE DEFECT THAT COST TEARDOWN RUN 30722259306, AND WHY THIS PARSES BY LINE.
+# `--query "[location, properties.provisioningState]"` projects a top-level array of SCALARS.
+# `-o tsv` renders that as ONE VALUE PER LINE. It emits TAB-separated columns only for a table of
+# rows (an array of arrays or objects) - which is why the `[].[id, location]` deletedWorkspaces
+# LIST elsewhere in this file IS legitimately tab-separated and read with `cut`. The two shapes
+# are different and must be parsed differently.
+#
+# The original implementation assumed columns and used `cut -f1` / `cut -f2`. POSIX `cut` passes a
+# line containing NO delimiter through untouched unless `-s` is given, so on newline-separated
+# input BOTH calls returned the entire two-line blob and BOTH out-vars were set to
+# "centralus\nSucceeded". Live consequences, both silent:
+#   - law_wait_provisioned compared that against "Succeeded" and never matched. Azure reached
+#     Succeeded in ~30s and held it for 5 minutes while the poll timed out on a workspace that
+#     was ready the whole time, then failed loud without ever attempting the delete.
+#   - the gap-2 already-live pre-check compared it against the entry's plain location and could
+#     therefore NEVER be true. The mechanism added specifically to break the recover-delete fixed
+#     point was dead on arrival and had never once fired.
+# The regression suite scored 28/28 throughout, because its `az` stub emitted a TAB. A stub that
+# does not reproduce the real tool's output shape does not test the parser at all. The fixture is
+# now newline-separated and fails 13 assertions against the pre-fix code.
 LAW_GET_LIVE_ERR=""
 law_get_live() {
   local __loc_var="$1" __state_var="$2" url="$3"
-  local out
+  # EVERY local here is __law_get_-prefixed ON PURPOSE. This function assigns to CALLER-NAMED
+  # variables via `printf -v`, and bash locals are dynamically scoped: a local named `loc` or
+  # `state` would SHADOW the caller's out-var of the same name, so `printf -v loc` would write to
+  # the shadow and the caller would see nothing (an unbound-variable abort under `set -u`, which
+  # is exactly what a plain `local out loc state` caused here). The two call sites in
+  # law_purge_soft_deleted_workspaces pass `loc`/`state` and `law_live_loc`/`law_live_state`, so
+  # any short generic name is unsafe. Do not rename these to something convenient.
+  local __law_get_out __law_get_loc __law_get_state
   LAW_GET_LIVE_ERR=""
-  if out="$(az rest --method get --url "$url" --query "[location, properties.provisioningState]" -o tsv 2>&1)"; then
-    printf -v "$__loc_var" '%s' "$(printf '%s' "$out" | cut -f1)"
-    printf -v "$__state_var" '%s' "$(printf '%s' "$out" | cut -f2)"
+  if __law_get_out="$(az rest --method get --url "$url" --query "[location, properties.provisioningState]" -o tsv 2>&1)"; then
+    __law_get_loc="$(printf '%s\n' "$__law_get_out" | sed -n '1p')"
+    __law_get_state="$(printf '%s\n' "$__law_get_out" | sed -n '2p')"
+    # A 200 that does not yield BOTH fields is indeterminate, not "found". Falling through with an
+    # empty state would read as a non-Succeeded value and silently exhaust the poll; an empty
+    # location would read as a location mismatch and silently re-issue the racy recovery PUT.
+    # Both are exactly the class of quiet misread this function exists to prevent.
+    if [ -z "$__law_get_loc" ] || [ -z "$__law_get_state" ]; then
+      LAW_GET_LIVE_ERR="the GET returned success but the response did not parse into both a location and a provisioningState (raw response: ${__law_get_out})"
+      return 2
+    fi
+    printf -v "$__loc_var" '%s' "$__law_get_loc"
+    printf -v "$__state_var" '%s' "$__law_get_state"
     return 0
   fi
-  if is_auth_error "$out"; then
-    LAW_GET_LIVE_ERR="$out"
+  # is_auth_error is checked BEFORE is_not_found_error deliberately (ADR-062 section 9.4): an
+  # indeterminate or auth-shaped read must never be misread as "not currently live".
+  if is_auth_error "$__law_get_out"; then
+    LAW_GET_LIVE_ERR="$__law_get_out"
     return 2
   fi
-  if is_not_found_error "$out"; then
+  if is_not_found_error "$__law_get_out"; then
     return 1
   fi
-  LAW_GET_LIVE_ERR="$out"
+  LAW_GET_LIVE_ERR="$__law_get_out"
   return 2
 }
 
