@@ -234,6 +234,21 @@ bank_data_p1_spoke_address_space = "10.32.0.0/16"
 enable_firewall            = true
 enable_kubernetes_platform = true
 
+# PC-2S Pass 2 - the second half of the two-pass ACR/AKS sequence (rebuild runbook
+# STEP 12). This line is deliberately ABSENT during Pass 1 and must never be added
+# before the Pass 1 apply is green. The AcrPull principal id comes from
+# data.azurerm_kubernetes_cluster.aks_lookup in landing-zones/bank-app-p1/acr.tf, a
+# same-root lookup whose arguments are all static, so Terraform resolves it in the
+# PLAN phase. On a greenfield estate the cluster does not exist yet: the read 404s
+# and the plan exits non-zero before anything can be created. Pass 1 therefore runs
+# with the flag unset (root default false) and creates the cluster and the Premium
+# ACR; this entry turns the binding on for Pass 2, with the cluster live, and plans
+# as exactly 1 to add (the kubelet_acr_pull role assignment), 0 to change, 0 to
+# destroy. Anything touching the cluster or the registry itself is a STOP. Same
+# ADR-055 two-pass precedent as the identity root, LESSON 42 flag default, ADR-044
+# reviewed-commit flag supply.
+enable_acr_kubelet_binding = true
+
 # ---------------------------------------------------------------------------
 # Banking wave B3 - messaging platform (ADR-045 / ADR-046)
 # ---------------------------------------------------------------------------
