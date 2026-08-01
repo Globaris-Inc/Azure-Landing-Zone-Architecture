@@ -49,6 +49,346 @@
 
 <!-- Newest at the top. -->
 
+### ADR-072: A cross-root RP-ATTACHED OBJECT is owned by the root that DECLARES the attachment, never by the root that owns the container it lands in. `prevent_deletion_if_contains_resources` stays TRUE on `platform/management` and is rejected permanently; the three orphans are cleared by a PRE-DESTROY ATTACHMENT SWEEP whose ordering constraint is the exact MIRROR of ADR-063 G-1; two of the three were mis-attributed to AMBA and are in fact Traffic Analytics; and ADR-066's designation of `mode=terraform` as the primary `target=all` path is AMENDED to exclude `platform/management-groups`
+
+- **Date:** 2026-08-01
+- **Section:** 8 (Standard Platform Components, where the shared workspace lives) / 9 (Landing Zone
+  Spokes, where every attachment is declared) / 10 (Pipeline & Tooling, where the sweep runs).
+  **AMENDS ADR-066** decision 1 and INV-1 (the eleven-layer `mode=terraform` primacy at `target=all`).
+  **EXTENDS ADR-063** decision 5 / finding G-1 with its mirror-image ordering class, and extends
+  ADR-071's Phase 0.5 precascade shape with a second, differently-ordered sweep. **REJECTS** for
+  `platform/management` the provider-feature trade that ADR-066's 2026-07-30 addendum item 3 accepted
+  for `platform/security`, and says why the two cases are not alike. Corrects `docs/estate-bom.md`
+  finding 1 and the 2026-08-01 operator WORKLOG entry on provenance. Builds on ADR-057 (the governing
+  teardown-completeness principle), ADR-062 (discovery beats enumeration), ADR-038 (AVM consumed
+  directly in composition roots). Does NOT supersede ADR-071, ADR-070 or ADR-068.
+- **Status:** Accepted (architect ruling; the operator brought two teardown defects from run
+  `30685705802` and then narrowed the referral to the ownership and blast-radius questions, routing the
+  workflow-mechanics half to DevSecOps in parallel).
+- **Landed:** NOT IMPLEMENTED. Decision 4 is a written spec for DevSecOps (one shared function, one new
+  chain-positioned teardown job). Decisions 1, 2, 3, 5 and 6 are rulings and doc amendments that need no
+  `.tf` or `.yml`. Update this field by dated addendum when the DevSecOps PR merges.
+- **Decision makers:** claude (architect); operator (measured the live estate, produced the three-object
+  inventory, and identified the cross-root coupling as the question worth answering).
+
+**Scope note, stated first because it bounds everything below.** This ADR rules on OWNERSHIP and on
+WHICH MECHANISM owns which root. It does NOT rule on the `platform/management-groups` refresh-stall
+mechanism, the six-hour job and OIDC ceilings, any `terraform` invocation flag including
+`-refresh=false`, Phase 4 state-blob eligibility, the run-level conclusion signal, or whether a
+finishing dispatch is warranted. Those were referred to DevSecOps in the same pass and are deliberately
+absent here so the two lanes cannot produce conflicting rulings. Decision 6 touches ADR-066 because
+"which mechanism destroys which root" is a topology decision; its workflow expression is not.
+
+**Context:**
+
+Teardown run `30685705802` (`target=all mode=terraform remove_mg_hierarchy=true`) failed
+`platform/management`'s Phase 1 destroy. The resource-group delete was refused by the provider's
+`prevent_deletion_if_contains_resources` guard, and exactly three resources remained in
+`rg-management-globaris-poc` after the Log Analytics workspace itself had destroyed cleanly:
+
+| Object | Attributed in the brief and the BOM to | Actually created by, verified |
+|---|---|---|
+| `Microsoft.Insights/dataCollectionEndpoints/NWTA-<derived from LAW customerId>` | AMBA | **Traffic Analytics** |
+| `Microsoft.Insights/dataCollectionRules/NWTA-<derived from LAW customerId>` | AMBA | **Traffic Analytics** |
+| `Microsoft.OperationsManagement/solutions/ContainerInsights(<platform LAW name>)` | the AKS monitoring addon in `landing-zones/bank-app-p1` | confirmed, and the mechanism is narrower than stated |
+
+**The provenance correction matters more than it looks, because it changes who owns the cleanup.**
+Microsoft's own "Manage virtual network flow logs" reference states, verbatim: *"Traffic analytics
+creates and manages data collection rule (DCR) and data collection endpoint (DCE) resources in the same
+resource group as the Log Analytics workspace, prefixed with NWTA. If you perform any operation on these
+resources, traffic analytics might not function as expected."* (learn.microsoft.com,
+`azure/network-watcher/vnet-flow-logs-manage`, web-verified 2026-08-01.) The estate enables Traffic
+Analytics on four spoke flow logs, each pointing at the platform workspace:
+`landing-zones/{corp-a1,online-p1,bank-app-p1,bank-data-p1}/dns_links.tf`, every one of them a
+`traffic_analytics` block carrying `workspace_id = var.platform_law_customer_id` and
+`workspace_resource_id = var.platform_law_workspace_id`. `corp-a2` has the block commented out (no
+centralus workspace at the time). Traffic Analytics creates ONE NWTA pair per workspace, not per flow
+log, which is exactly why the live count was one DCE and one DCR rather than four of each. So the two
+`Microsoft.Insights` objects are **not AMBA and have nothing to do with `platform/management`'s own
+declarations at all** - they are a side effect of four SPOKE roots' configuration, landing in the
+platform root's resource group.
+
+The third object has the same shape and a narrower mechanism than "the AKS addon".
+`landing-zones/bank-app-p1/aks.tf` sets `addon_profile_oms_agent` with **`use_aad_auth = false`**, the
+legacy workspace-key Container Insights path, chosen deliberately and documented in the file (the
+module's `onboard_monitoring` path "drags in managed Prometheus resources - deferred to the B7 O&M
+wave"). It is specifically the legacy path that materialises a
+`Microsoft.OperationsManagement/solutions` object in the workspace's resource group; the
+`use_aad_auth = true` MSCI data-collection-rule path does not. That is a live, revisitable estate choice
+with a teardown cost nobody priced at the time.
+
+**So all three orphans are one class, not two.** Every one of them is an object that an Azure resource
+provider created inside `platform/management`'s resource group as a side effect of a configuration
+declared in a DIFFERENT root, and that neither root's `terraform destroy` accounts for: the declaring
+root does not manage it, and the container-owning root does not know it exists. The provider error names
+`prevent_deletion_if_contains_resources = false` as the remedy, which is the same category of trade as
+the `permanently_delete_on_destroy` decision recorded in ADR-066's 2026-07-30 addendum item 3.
+
+**And the class will recur on every teardown, unchanged, because nothing in the estate expresses the
+coupling.** `platform/management`'s workspace is consumed by at least six declarations across five other
+roots. The only expression of that surface today is two output values passed as spoke inputs.
+
+**Decision:**
+
+**1. The provenance record is corrected. The two `Microsoft.Insights` NWTA objects are Traffic
+Analytics, not AMBA.** `docs/estate-bom.md` finding 1 (and its section 1.4 note and its closing summary
+bullet) and the 2026-08-01 operator WORKLOG entry both attribute them to AMBA. The BOM's substantive
+observation is CORRECT and stands - the names inherit volatility from the workspace `customerId` with no
+`random_*` resource anywhere in the chain, which is a real and well-found gap. Only the attribution
+changes, and it changes the answer to "who cleans them up": under decision 5 they belong to the four
+Traffic-Analytics-enabled spoke roots, not to the AMBA module in `platform/management`. Amend by dated
+addendum in both files; do not edit the original finding text.
+
+**2. `prevent_deletion_if_contains_resources = false` is REJECTED for `platform/management`, and the
+rejection is permanent rather than "not yet".** Five reasons, the first two decisive on their own:
+
+- **It is a provider-level, root-wide, forever setting, on the one root where the guard is doing the
+  most work.** Like `permanently_delete_on_destroy`, it lives in the `provider "azurerm" { features {} }`
+  block and therefore applies to every resource group that root manages, including groups added later,
+  including a mis-targeted destroy. `platform/management` is the estate's SHARED TELEMETRY root: its
+  resource group is by design the place other roots' resource providers attach things. It is, of every
+  resource group in the estate, the one most likely to contain objects this root does not own. Disabling
+  the "am I about to delete something I do not own" check precisely there is disabling it where it is
+  most load-bearing.
+- **It suppresses the signal without touching the cause.** The three objects are created by other roots
+  and would be created again on the next rebuild. The flag does not remove them, does not stop them
+  appearing, and does not make anyone aware of them; it makes the destroy stop reporting them. This
+  estate has already ruled once that a control which cannot discover what nobody told it about is not a
+  control (ADR-062). A guard that has been configured to stop firing is the same defect with the
+  polarity reversed.
+- **The vendor's own description is the blast-radius argument.** With the flag false, Terraform "will
+  succeed with the destruction of the resource group and any resource that happens to be part of it".
+  That converts an RG delete from *delete what I own* into *delete whatever is here*, which is exactly
+  the name-and-containment ownership semantics ADR-063 decision 6 was written to replace with an explicit
+  predicate.
+- **The strongest-sounding argument for it is actually against it.** Phase 2's API-level `az group
+  delete` already bypasses the guard, which is how the orphans were in fact removed on 2026-08-01. The
+  capability therefore already exists in the belt. Buying it a second time at Phase 1, at the price of a
+  permanent root-wide widening, purchases no new capability at all.
+- **The `platform/security` precedent does not transfer, and the difference is principled.**
+  `permanently_delete_on_destroy` was accepted there because the object it acts on is one this root
+  DECLARES and OWNS (the Security workspace), the widening is confined to future objects of that same
+  declared type, and the alternative was a documented 90-day rebuild blocker (OQ-063). Here the objects
+  are ones this root explicitly does NOT own, the widening is unbounded in type, and the alternative is
+  a bounded sweep that already has a proven shape in this repository. Same syntax, opposite trade.
+
+**3. "Phase 1 fails, Phase 2 catches it, the estate ends clean" is REJECTED as the standing design.**
+It is an accurate description of what happened and a perfectly good description of a BELT. It is not
+acceptable as the DESIGN, for one reason that is a first-class user requirement and one that is a
+signal-integrity argument:
+
+- ADR-066 INV-1 exists because the user required that a full teardown run every per-layer destroy and
+  that each go green, so that a real regression in any layer is visible as that layer's red rather than
+  masked. A `platform/management` that is red on every single teardown by construction has a red that
+  carries zero information. The next genuine management-layer regression arrives indistinguishable from
+  the standing one, which is the exact masking failure INV-1 was written to prevent, reintroduced at a
+  different layer.
+- A design whose correctness depends on a downstream belt catching a predictable upstream failure has
+  made the belt load-bearing. ADR-066 decision 3 deliberately DEMOTED az-sweep to a thin remnant catch
+  precisely so it would stop being the mechanism. Accepting this would promote it back for one layer,
+  silently.
+
+Phase 1 must therefore stop failing. Decision 4 is how.
+
+**4. The mechanism is a PRE-DESTROY ATTACHMENT SWEEP, and its ordering constraint is the exact MIRROR
+of ADR-063 G-1. This is the design content of this ADR and the reason it is not simply "add another
+precascade".**
+
+The estate now has two sweep-ordering classes, and they pull in opposite directions. Naming both is what
+stops the next implementer putting the second one in the first one's phase:
+
+| | **G-1 class** (ADR-063 decision 5, ADR-071 decision 4b) | **Attachment class** (this ADR) |
+|---|---|---|
+| Example | resource-scoped diagnostic settings; `diag-aa-to-law` | NWTA DCE/DCR; the ContainerInsights solution |
+| Keyed to | its HOST resource's URI | its CONTAINER resource group |
+| Fails if swept too LATE | host gone, object unreachable and undiscoverable (403, not 404) | container-delete refused, or the object is cascaded away silently |
+| Fails if swept too EARLY | nothing | the still-live creator's RP simply RECREATES it |
+| Correct position | **before** its host is destroyed (Phase 0.5, ahead of Phase 1) | **after** every declaring root is destroyed and **before** the container-owning root destroys |
+
+The attachment class cannot go in Phase 0.5. Traffic Analytics is documented as actively MANAGING its
+NWTA pair, and the AKS addon owns its solution object; deleting either while its creator is still live
+invites immediate recreation, and Microsoft explicitly warns that operating on the NWTA resources while
+Traffic Analytics is live breaks it. The window is genuinely mid-chain.
+
+Spec for DevSecOps, precise enough to implement without re-deriving:
+
+- **Position.** One new job in the ADR-066 serialized `target=all` chain, inserted between `identity`
+  and `management`. The existing reverse-dependency order (`synthetic` -> `bank-data-p1` ->
+  `bank-app-p1` -> `online-p1` -> `corp-a2` -> `corp-a1` -> `security` -> `connectivity` -> `identity`
+  -> `management` -> `management-groups`) already places all four Traffic-Analytics spokes and
+  `bank-app-p1` before that point, so a single insertion satisfies both ordering constraints with no
+  re-linearization. Call it Phase 1.5 for symmetry with 0.5, or whatever name reads best in the file;
+  the position is the requirement, the label is not.
+- **Gating.** `target=all` and `mode=terraform` only, mirroring `databricks-precascade`. `mode=az-sweep`
+  is deliberately NOT wired: Phase 1 never runs there and the API-level RG delete already cascades these
+  objects, so a second mechanism would be a duplicate rather than a fix. Same reasoning, same words, as
+  the Databricks and ADR-071 precascade headers.
+- **Not a gate.** A failure is loud but does not skip `platform/management`'s destroy. Identical to
+  ADR-066 decision 4's wiring and ADR-071 decision 4b: the layer must still run, and a residual must
+  surface as a loud Phase 3 VERIFY failure rather than a silently skipped mandatory layer.
+- **Scope, as a three-part predicate, in this order.** (a) CONTAINMENT: the resource group is
+  estate-owned, which `is_estate_owned` already decides (ADR-063 decision 6 T1(a)). (b) TYPE: exactly
+  `Microsoft.Insights/dataCollectionEndpoints`, `Microsoft.Insights/dataCollectionRules`,
+  `Microsoft.OperationsManagement/solutions`. (c) For the two `Microsoft.Insights` types only, NAME
+  PREFIX `NWTA-`, which is Microsoft's documented and stable prefix for this class. The type filter is
+  what keeps this a sweep of a named class rather than a delete-everything-here, which is what decision
+  2 rejected; do not replace it with a bare RG enumeration.
+- **Discovery, not enumeration.** List by type within the resource group and delete what is found. Do
+  not hardcode the derived names: the whole point of `docs/estate-bom.md` finding 1 is that the NWTA
+  names are non-deterministic by inheritance from a regenerated workspace `customerId`, so any
+  name-literal list is wrong the first time the workspace is recreated.
+- **Confirm-GET after every delete**, via the existing `confirm_gone_or_fail_primary` primary-evidence
+  helper. Auth-fail-loud throughout: a failed LIST is never read as "nothing there" (ADR-062 section
+  9.4). No new conventions.
+- **Shared function in `scripts/teardown-common.sh`**, called from the new script, exactly as
+  `databricks_force_delete_cascade` and ADR-071's `sweep_resource_diagnostic_settings` are shared, so a
+  future second call site cannot drift.
+- **Acceptance.** The next `target=all mode=terraform` teardown shows `platform/management`'s Phase 1
+  destroy GREEN with no `prevent_deletion_if_contains_resources` error, and Phase 2 finds nothing to
+  catch in that resource group.
+
+**5. THE GENERAL RULE, which is what the operator actually asked for and what will still be true after
+this teardown is forgotten.**
+
+> **The attachment-declares-ownership rule.** When an Azure resource provider or a platform addon
+> creates an object inside root B's container, or attached to root B's resource, as a side effect of a
+> configuration declared in root A, that object belongs to **root A** - the root that declared the
+> attachment. Root B owns the container. It does not own the contents.
+
+Three reasons, and the third is the one that makes it binding rather than tasteful:
+
+- **Only root A knows the object exists.** Root A's author wrote the line that causes it. Root B cannot
+  enumerate what other roots have attached to it except by live discovery, and ADR-062 already ruled
+  that a class list maintained by a written promise is not a control.
+- **Only root A's lifecycle explains the object's lifecycle.** It appears when root A applies and should
+  disappear when root A destroys. Root B's lifecycle is orthogonal: `platform/management` can be
+  redeployed end to end without any spoke changing.
+- **The alternative IS the flag decision 2 rejects.** "Root B owns everything in its resource group" is
+  precisely `prevent_deletion_if_contains_resources = false` written as a principle. Having rejected the
+  flag, the estate is not free to adopt its semantics under another name.
+
+Corollaries, which is where the rule becomes actionable:
+
+- **C1. A root that attaches to another root's shared resource must declare the attachment's CLEANUP,
+  not just the attachment.** Where the provider models the side-effect object, declare it and let
+  Terraform own it. Where the RP owns it and Terraform structurally cannot (both classes here), the
+  root's teardown obligation is discharged by the decision-4 sweep, and the root's own README must say
+  which of its declarations produces which side-effect object, in whose resource group. An attachment
+  whose cleanup is nobody's stated job is an incomplete design, not an operational surprise.
+- **C2. A shared platform resource is an ATTACHMENT SURFACE and must be documented as one.** The
+  platform workspace currently expresses its surface as two output values. Add to
+  `platform/management/README.md` and to `ARCHITECTURE.md` a table with one row per consumer:
+  consuming root, what it attaches, what side-effect object the RP creates, in whose resource group, and
+  which mechanism removes it. Known rows today: four spokes' Traffic Analytics (one shared NWTA DCE +
+  DCR pair, in the platform RG, removed by the decision-4 sweep); `bank-app-p1`'s AKS Container Insights
+  addon (one `Microsoft.OperationsManagement/solutions` object, in the platform RG, removed by the same
+  sweep); and the diagnostic settings every root points at the workspace (removed by the ADR-071 Phase
+  0.5 sweep, different ordering class, cite it as such).
+- **C3. Where the platform offers an attachment mode that creates NO cross-root object, prefer it, but
+  never flip one mid-estate inside a teardown ADR.** Container Insights has exactly such a choice:
+  `use_aad_auth = true` uses the MSCI data-collection-rule path and creates no
+  `Microsoft.OperationsManagement/solutions` object at all. The estate chose `false` for stated build
+  reasons. Changing it is a live-behaviour change to a deployed workload, needs a plan bar, and belongs
+  to a wave. **Raised as OQ-068, explicitly not decided here.**
+- **C4. Traffic Analytics has no such alternative, so for it the sweep is the PERMANENT mechanism, not a
+  stopgap.** Microsoft creates and manages the NWTA pair and warns against operating on it. There is no
+  configuration that suppresses it while Traffic Analytics is on, and no Terraform resource that can own
+  it. Do not spend effort looking for one.
+
+**6. ADR-066's designation of `mode=terraform` as the primary `target=all` path is AMENDED to exclude
+`platform/management-groups`. That root is destroyed by the Phase 2 management-group cascade.**
+
+Taken as a design ruling rather than left to DevSecOps because it decides WHICH MECHANISM OWNS WHICH
+ROOT, which is the same ownership question as decision 5, one level up. The mechanics of why the
+terraform path could not complete are DevSecOps's and are deliberately not restated.
+
+- **`platform/management-groups` is structurally unlike the other ten roots.** Its objects are
+  overwhelmingly CHILD objects of eleven container scopes, and the ARM control plane offers a cascading
+  container delete as the natural unit of removal. The other ten roots hold resources with no cascading
+  container above them inside the root's own scope, so per-object destroy there is both faithful and
+  necessary. ADR-066's governing argument - owning providers should destroy their own objects and
+  az-sweep should be a belt - is correct exactly where per-object destruction is the only mechanism
+  available. It does not generalise to a root where the platform provides a correct bulk primitive.
+- **The cascade already exists, is already gated, and is already ordered.** Phase 2 step 4 deletes the
+  hierarchy bottom-up via `MG_DELETE_ORDER` under `remove_mg_hierarchy`, and Phase 0 already performs
+  the ADR-063 G-1 extension sweep at every MG scope BEFORE any of it. This decision selects an existing,
+  designed, reviewed mechanism. It does not invent one.
+- **The estate has live evidence that the cascade discharges the obligation that actually matters.**
+  Across the 2026-07-30 and 2026-07-31 rebuild cycles, Step 1 planned and applied **exactly 537**
+  objects following an MG-tree deletion, with no `already exists` collision on any policy definition or
+  set definition. By ADR-057's governing principle - if leaving it makes the next greenfield apply fail
+  or drift, teardown owns it - the cascade owns it. **Stated precisely and not over-claimed:** this is
+  evidence that the objects do not COLLIDE with a rebuild, which is the operative property. It is not a
+  proof that every ARM object is purged, and this ADR does not claim one.
+- **Single-root `terraform destroy` of `platform/management-groups` remains supported and available**
+  for an operator who wants provider-faithful, state-exact removal and is willing to own the wall clock.
+  Nothing about that path is withdrawn.
+- **The honest consequence, which the user should see stated rather than discover.** ADR-066 INV-1 was
+  "all eleven Phase-1 layer destroys run and go green". It becomes **INV-1'**: *every root that Phase 1
+  owns runs and goes green; `platform/management-groups` is owned by the Phase 2 cascade and its
+  completion is asserted by Phase 3 VERIFY.* That is a real narrowing of a requirement the user stated
+  as first-class, and it is bought deliberately. The alternative is worse and less honest: leaving a
+  layer designated as the primary path when it does not complete, which produces a permanently red job
+  and is the same information-free red that decision 3 rejects for `platform/management`.
+
+**Alternatives considered:**
+
+- **`prevent_deletion_if_contains_resources = false` on `platform/management`.** Rejected, decision 2,
+  five reasons.
+- **Accept the standing "Phase 1 red, Phase 2 catches".** Rejected, decision 3. It is the correct
+  description of the belt and an unacceptable description of the design.
+- **Declare the three objects in Terraform so a root owns them.** Rejected on verified fact for two of
+  three and on judgement for the third. The NWTA DCE/DCR are created and managed by Traffic Analytics
+  with Microsoft warning against operating on them, so no root can own them. The ContainerInsights
+  solution is modelable (`azurerm_log_analytics_solution`), but it is RP-created first, so a declaring
+  root would meet `already exists` on every apply - the ADR-071 class, manufactured deliberately - and
+  the only root entitled to declare it under decision 5 is `bank-app-p1`, which would need a
+  cross-subscription provider alias into the management subscription to do it. Worse in every dimension
+  than a sweep.
+- **A config-driven `import` of the three objects into `platform/management`.** Rejected on the standing
+  rule (ADR-067 addendum, LESSON 52) and on decision 5: importing them would make `platform/management`
+  the owner of objects other roots create, which is the ownership error this ADR exists to correct,
+  written into state.
+- **Put the sweep in Phase 0.5 alongside the ADR-071 diagnostic precascade.** Rejected, decision 4: the
+  ordering constraints are mirror images. Phase 0.5 runs while creators are live, and a live Traffic
+  Analytics or AKS addon simply recreates what Phase 0.5 deleted.
+- **A bare "delete everything in `rg-management-globaris-poc` before destroying it" sweep.** Rejected: it
+  is `prevent_deletion_if_contains_resources = false` implemented in bash, with the same blast radius and
+  none of the type discipline. The three-part predicate in decision 4 is the point.
+- **Leave `platform/management-groups` on the terraform path and tune it.** Rejected as a design
+  position, decision 6: a mechanism that is over its budget by a multiple is not tuned into range, and
+  the platform already offers the right primitive. The tuning question itself belongs to DevSecOps and
+  this ADR takes no position on any specific flag.
+
+**Consequences:**
+
+- Positive: `platform/management`'s Phase 1 destroy can go green again, restoring the information
+  content of its red, without widening any root's destroy blast radius.
+- Positive: the estate gains a named, citable ownership rule for a coupling that will recur with every
+  future addon that attaches to the shared workspace, plus the mirror-image ordering table that stops
+  the next sweep being placed in the wrong phase.
+- Positive: the provenance correction removes a wrong causal story from the BOM before the BOM is used
+  as the rebuild regression baseline, which is the one job the BOM exists to do.
+- Negative / trade-off: ADR-066 INV-1 narrows to INV-1' (decision 6). One layer is no longer proven by
+  its own green job.
+- Negative / trade-off: the estate now runs two ordering-opposite sweeps around Phase 1. That is
+  genuine added complexity in `teardown.yml`, and it is the price of the two classes being genuinely
+  different rather than one class implemented twice. The decision-4 table exists so the complexity is
+  legible.
+- Negative / trade-off: the decision-4 sweep is discovery-based within a fixed type list, so a NEW
+  cross-root attachment of a type not in that list will still surprise a teardown once. C1 and C2 are
+  the controls that shrink that window; they are documentation obligations, which ADR-062 correctly
+  distrusts. The honest position is that the type list is a smaller enumerated surface than the
+  alternative, not that enumeration was avoided.
+- Follow-ups required: (1) DevSecOps implements decision 4. (2) Cloud Engineer or technical-writer lands
+  C2's attachment-surface table in `platform/management/README.md` and `ARCHITECTURE.md`, and the
+  decision-1 dated addenda in `docs/estate-bom.md`. (3) OQ-068 (the Container Insights `use_aad_auth`
+  trade) is a wave decision, not a teardown one. (4) OQ-069 records two soft-deleted Log Analytics
+  workspaces found live in the management subscription on 2026-08-01 and the coverage gap they expose;
+  it must be dispositioned in the rebuild pre-clearance before `platform/management` is re-applied.
+  (5) The decision-6 amendment must be reflected in `docs/teardown-redesign.md` and
+  `docs/cicd-deploy-teardown.md` when DevSecOps expresses it in the workflow.
+
 ### ADR-071: The ORPHANED DIAGNOSTIC SETTING is a named failure class whose mechanism is already established in this estate (ADR-063 decision 5, G-1, live proof `diag-aa-to-law`): a `microsoft.insights/diagnosticSettings` object is keyed to its host's URI, outlives the host, outlives the state, and is invisible to every greenfield proof, so it re-collides on the first apply that recreates a same-named host. The two-applies expectation is RATIFIED but only as an INTERIM operating rule; the permanent fix is a Phase 0.5 live-host sweep at TEARDOWN, not an apply-side change. Separately: teardown is CONTRAINDICATED while a Service Health `ServiceIssue` is Active against a service the destroy inventory must delete, and a blocking pre-teardown health gate is specified
 
 - **Date:** 2026-07-31
