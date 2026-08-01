@@ -8,10 +8,24 @@
 #      core/provider required_version floors, so a local version below any module's
 #      floor fails here.
 #   4. actionlint on .github/workflows (best-effort; skipped if not installed).
-#   5. check-adr-landed.sh - Accepted ADRs from ADR-068 on must say where they landed.
+#   5. shellcheck on scripts/*.sh (best-effort; skipped if not installed). Added
+#      2026-07-31: a PR #59 draft deleted a `cut -f3` extraction and left a lowercasing on
+#      the now-unassigned variable. Under `set -u` that is a fatal abort at the next
+#      teardown, not a misread, and `bash -n` (syntactically valid) plus a clean preflight
+#      caught nothing - only a careful human diff read did. SC2154 (referenced but not
+#      assigned) is exactly what shellcheck exists to flag. Run at --severity=warning so it
+#      catches that class of correctness bug without blocking on pure style/quoting nits;
+#      the teardown scripts already carry `# shellcheck disable=SC2154` /
+#      `# shellcheck source=` directives for their legitimate indirect-assignment and
+#      dynamic-source patterns.
+#   6. check-adr-landed.sh - Accepted ADRs from ADR-068 on must say where they landed.
 #      Catches the ADR-034 class: a sanctioned control that nobody ever wired up.
-#   6. check-worktrees.sh - uncommitted work in a volatile path (Temp/scratchpad) fails.
-#      This repo has lost agent output twice that way; see the script header.
+#   7. check-worktrees.sh - uncommitted work in a volatile path (Temp/scratchpad) fails.
+#      This repo has lost agent output twice that way; see the script header. Also WARNs
+#      (not a fail - `ops/*` rebuild-dispatch branches checked out in the main tree are a
+#      routine, sanctioned pattern, so this cannot be a hard gate) when the shared repo tree
+#      is checked out on anything but main/banking, the precondition behind the 2026-07-31
+#      collision.
 #
 # NOT wired in: scripts/check-claims.sh. It is useful and it found a real defect nothing
 # else did, but it parses English prose heuristically, and a heuristic has unbounded edge
@@ -81,16 +95,24 @@ else
   note "SKIP: actionlint not installed (CI still lints workflows)"
 fi
 
-# --- 5. Accepted ADRs record where they landed ---
-hr; echo "[5] check-adr-landed (Accepted ADRs cite a landing)"
+# --- 5. shellcheck (best-effort) ---
+hr; echo "[5] shellcheck (scripts/*.sh)"
+if command -v shellcheck >/dev/null 2>&1; then
+  if shellcheck --severity=warning scripts/*.sh; then note "OK"; else note "FAIL"; fail=1; fi
+else
+  note "SKIP: shellcheck not installed"
+fi
+
+# --- 6. Accepted ADRs record where they landed ---
+hr; echo "[6] check-adr-landed (Accepted ADRs cite a landing)"
 if bash scripts/check-adr-landed.sh > /tmp/pf_adr.log 2>&1; then
   note "OK: $(tail -2 /tmp/pf_adr.log | head -1)"
 else
   note "FAIL:"; sed 's/^/    /' /tmp/pf_adr.log; fail=1
 fi
 
-# --- 6. no uncommitted work parked somewhere volatile ---
-hr; echo "[6] check-worktrees (uncommitted work in volatile paths)"
+# --- 7. no uncommitted work parked somewhere volatile ---
+hr; echo "[7] check-worktrees (uncommitted work in volatile paths)"
 if bash scripts/check-worktrees.sh > /tmp/pf_wt.log 2>&1; then
   note "OK: $(tail -1 /tmp/pf_wt.log)"
   grep '^  WARN' /tmp/pf_wt.log | sed 's/^/  /' || true
