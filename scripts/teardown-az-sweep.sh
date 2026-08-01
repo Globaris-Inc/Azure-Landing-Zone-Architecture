@@ -235,6 +235,44 @@
 #     goes through the Azure CLI TSV formatter at all - see the WORKLOG entry for this fix round
 #     for the full site-by-site accounting.
 #
+# AMENDED a twelfth time 2026-08-01 (ADR-073 decision 4, generalises OQ-063/ADR-066 - resolves
+# OQ-069): step 7b is REWRITTEN from a single-hardcoded-name purge of the Security LAW into a
+# DISCOVERY-based sweep across every estate subscription (teardown_subscriptions), gated by the
+# is_estate_owned --resource-id containment predicate (gate A) and a blast-radius cap (gate B,
+# LAW_PURGE_BLAST_RADIUS_CAP, teardown-common.sh). Root cause this generalisation closes: live
+# evidence found a SECOND soft-deleted-workspace class member the old single-name filter
+# structurally could not reach - two entries in the management subscription, both named
+# law-platform-globaris-poc, sharing ONE ARM resource ID because region is not part of a Log
+# Analytics workspace's ARM identity (ADR-073's own context). Also fixes two real defects in the
+# PRIOR version of this step, both load-bearing once two entries can share an ID:
+#   - Gate C (recover): `az monitor log-analytics workspace recover` takes only --workspace-name
+#     and --resource-group - verified live against the current CLI reference 2026-08-01, it has
+#     NO --location parameter at all, so it cannot select between two entries that share an ARM
+#     ID. The recover call is now a REST PUT via `az rest` carrying an explicit `location` in the
+#     body (Microsoft's own "Delete and Recover a Log Analytics Workspace" doc documents recovery
+#     as exactly this PUT, `{"location": "<AzureRegion>"}`, at LAW_PURGE_API_VERSION).
+#   - Gate D (completion check): the prior confirm-GET was `confirm_gone_or_fail_primary` against
+#     an ARM GET keyed on the ARM ID ALONE, so purging one of two same-ID entries made that GET
+#     404 while the other was still soft-deleted - a FALSE "purged" confirmation. Replaced with a
+#     `deletedWorkspaces` RE-LIST keyed on the pair (id, location) - see `law_confirm_purged`
+#     below.
+# Purge cycles for entries that share an ARM ID are STRICTLY SEQUENTIAL (recover, permanently
+# delete, and re-list-confirm one entry fully before the next cycle starts) - after recovering
+# entry A a LIVE workspace occupies the shared ID, so a recovery PUT for entry B before A is
+# fully purged would be an immutable-location change on an existing resource, which ARM rejects.
+# This codebase processes the whole eligible list in one single-threaded loop, so this ordering
+# holds structurally, not by a same-ID detection heuristic. Placeholder resource groups are now
+# created and torn down PER CYCLE (never assumed shared across cycles, even same-ID ones) and
+# this step WAITS (wait_for_rgs_gone) for each placeholder's delete to be confirmed gone before
+# the next cycle starts, rather than firing the delete --no-wait and moving on the way the old
+# single-entry version did - ADR-073 permits reusing one placeholder RG across same-ID cycles
+# only after that is verified live in a run log, which has not happened yet, so this takes the
+# conservative fallback the ADR names instead of assuming it. Known, deliberately-accepted
+# residual risk (not closed in this pass): the recovery PUT is a raw `az rest` call and does not
+# poll the recovered resource's `provisioningState` the way the CLI's own `recover` verb's
+# default behaviour (called without `--no-wait`) would have - see the step's own comment for why
+# this is accepted rather than solved here.
+#
 # Order matters:
 #   1. Databricks: submit the WORKSPACE delete --no-wait --force-deletion (never `az group
 #      delete` the managed RG directly - it still carries an RP deny-assignment, F2, even with
@@ -273,14 +311,17 @@
 #      Step 6's writes are synchronous sub-second control-plane calls, not RGs - they are
 #      deliberately NOT added to this wait (wait_for_rgs_gone is RG-shaped); Phase 3 VERIFY
 #      (VERIFY 6-8) and the QA pass are their completion gate instead.
-#   7b. Security Log Analytics workspace purge (OQ-063, ADR-066, added 2026-07-29, REORDERED
-#      here and demoted to a backstop 2026-07-30 - see "AMENDED a tenth time" above and the
-#      step's own comment). Runs AFTER step 7's reconcile so the security RG (and with it the
-#      workspace) has had its bounded wait to actually finish deleting before this step checks
-#      for a soft-delete. Recovers-then-force-purges the soft-deleted law-security-<org>-<env>
-#      workspace so the next redeploy creates a genuinely fresh workspace instead of recovering
-#      one with stale Sentinel children. Idempotent (absent/already-purged is success). See the
-#      step's own comment for the resource-group-recreation mechanism this requires.
+#   7b. Log Analytics workspace soft-delete purge (ADR-073 decision 4, generalises OQ-063/
+#      ADR-066 - see "AMENDED a twelfth time" above and the step's own comment). Runs AFTER step
+#      7's reconcile, same reasoning as before: every submitted RG delete (including any
+#      LAW-owning root's) needs its bounded wait to actually land before this step goes looking
+#      for a soft-delete. DISCOVERS soft-deleted workspaces across every estate subscription (no
+#      hardcoded name), gated by containment (is_estate_owned --resource-id) and a blast-radius
+#      cap (LAW_PURGE_BLAST_RADIUS_CAP, teardown-common.sh), then recovers (REST PUT with an
+#      explicit location body) and permanently purges each eligible entry in strict sequence so
+#      the next redeploy creates genuinely fresh workspaces instead of recovering ones with stale
+#      children. Idempotent (nothing found is success). See the step's own comment for the full
+#      mechanism.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1452,185 +1493,39 @@ else
   fi
 fi
 
-# --- 7b. Security Log Analytics workspace purge (OQ-063, ADR-066, 2026-07-29; REORDERED and
-#     DEMOTED TO A BACKSTOP 2026-07-30, code-review Finding 1 / OQ-063 follow-up).
+# --- 7b. Log Analytics workspace soft-delete purge (ADR-073 decision 4, 2026-08-01; generalises
+#     OQ-063/ADR-066's single-workspace mechanism into a discovery-based, estate-wide sweep - see
+#     this file's "AMENDED a twelfth time" note above for the full root cause and the two defects
+#     this fix closes, and `law_purge_soft_deleted_workspaces`'s own comment (teardown-common.sh)
+#     for the complete gate-by-gate mechanism (containment, blast-radius cap, REST-PUT recovery,
+#     re-list completion check, strict per-entry ordering). The function lives in
+#     teardown-common.sh, not inline here, so it can be sourced and exercised in isolation with a
+#     stubbed `az` - the same reason `databricks_force_delete_cascade` and
+#     `attachment_sweep_cross_root_objects` above are shared functions rather than inline steps.
 #
-#     NOW A BACKSTOP, NOT THE PRIMARY PURGE MECHANISM: platform/security/providers.tf now sets
-#     `features { log_analytics_workspace { permanently_delete_on_destroy = true } }` (Cloud
-#     Engineer fix, the long-term mechanism this step's original comment flagged for). In the
-#     mode=terraform path (the PRIMARY path at target=all, ADR-066), Phase 1's `security`
-#     terraform destroy therefore PURGES the LAW NATIVELY as part of the same destroy that
-#     soft-deletes it - by the time this Phase 2 job runs, the workspace is already gone for
-#     good and this step below finds nothing (list-deleted-workspaces returns empty, "nothing
-#     to do", idempotent success). This step remains load-bearing ONLY as the whole-estate
-#     PRIMARY mechanism for mode=az-sweep (the state-gone fallback, ADR-065 decision 4, kept) -
-#     that path never runs `terraform destroy` at all, so nothing ever sets the provider
-#     feature in motion, and this step is the only thing that ever purges the LAW there. Also a
-#     genuine backstop for the mode=terraform path if an OLDER `platform/security` state (applied
-#     before the provider fix landed) is ever torn down.
+#     STILL A BACKSTOP, not the primary purge mechanism, for the same reason as before: any root
+#     that declares a Log Analytics workspace and sets
+#     `features { log_analytics_workspace { permanently_delete_on_destroy = true } }` in its own
+#     provider block purges that workspace NATIVELY as part of its own `terraform destroy`
+#     (platform/security already does this; platform/management gains the same block under
+#     ADR-073 decision 6, a Cloud Engineer fix tracked separately). This step remains
+#     load-bearing PRIMARILY for mode=az-sweep (the state-gone fallback, which never runs
+#     `terraform destroy` at all - ADR-065 decision 4), and as a genuine backstop for any older
+#     root state applied before its own provider fix landed.
 #
-#     WHY THIS RUNS HERE (AFTER step 7's reconcile), NOT RIGHT AFTER STEP 3 (Key Vault) WHERE IT
-#     USED TO LIVE (code-review Finding 1, 2026-07-30): step 2 submits the security RG delete
-#     with --no-wait; step 7's wait_for_rgs_gone is the ONLY bounded wait in this script for that
-#     submission to actually COMPLETE. Running this purge before step 7 raced that wait in
-#     mode=az-sweep - the workspace would not yet be in soft-delete when list-deleted-workspaces
-#     ran, so this step would print "nothing to do" and exit clean, and the workspace would land
-#     in soft-delete UNPURGED minutes later once the RG delete actually finished (a green
-#     teardown that silently reintroduces the exact stale-soft-delete condition OQ-063 exists to
-#     close). Placed here, after step 7 has either confirmed every submitted RG (including the
-#     security RG, and with it the workspace) actually gone, or exhausted the 30-min ceiling and
-#     warned, the workspace's host RG deletion has had every chance this script gives it to
-#     complete before this step ever checks for a soft-delete. A residual race still exists if
-#     step 7 hits its ceiling on a still-deleting security RG (reconcile_rc=1, warn-and-continue,
-#     matching every other straggler class in this script) - this step would then find nothing
-#     and report clean, exactly as before, but idempotently retried on the operator's own
-#     re-dispatch (the same accepted safety net step 7's own warning already documents), not a
-#     new failure mode this reorder introduces.
-#
-#     platform/security's terraform destroy (mode=terraform path, when the provider fix has NOT
-#     yet applied) or step 2's RG delete (mode=az-sweep path) only SOFT-deletes
-#     law-security-<org>-<env> in the absence of the native purge feature. Left soft-deleted, a
-#     redeploy within the 14-day window RECOVERS the same-named workspace together with its
-#     prior Microsoft.SecurityInsights children (Sentinel analytics rules, data connector) -
-#     objects the freshly-emptied Terraform state does not know about, producing the "already
-#     exists" Class 2 failure OQ-063 diagnoses. This step purges it so every redeploy creates a
-#     genuinely fresh workspace. Idempotent: not-soft-deleted (never destroyed this cycle,
-#     already purged natively by the mode=terraform path's own destroy, or already purged by a
-#     prior run of this step) is success, not an error - matches every other class in this
-#     script.
-#
-#     RESOURCE-GROUP-RECREATION CAVEAT (Microsoft's own documented behaviour, "Delete and
-#     recover an Azure Log Analytics workspace", ms.date verified live 2026-07-29): recovering
-#     an ALREADY soft-deleted workspace is a PUT that recreates the workspace resource inside
-#     its ORIGINAL resource group, and that PUT fails "ResourceGroupNotFound" if the RG no
-#     longer exists. It will not exist here in either path: platform/security's terraform
-#     destroy also destroys azurerm_resource_group.security (that root owns and destroys its own
-#     RG, platform/security/main.tf), and step 2 above independently sweeps the same RG by naming
-#     pattern in the mode=az-sweep path. So this step recreates a minimal placeholder RG (same
-#     name/location as the original, tracked so it is deleted again ONLY if THIS run created it),
-#     recovers the workspace into it, force-purges the workspace, then deletes the placeholder
-#     RG. That last delete is fire-and-forget (--no-wait, no second reconcile wait exists after
-#     this step - step 7 already ran) and self-correcting on failure either way: VERIFY 2's
-#     existing RG_SWEEP_QUERY naming-pattern scan already covers rg-security-globaris-poc as a
-#     remnant class, so an un-deleted placeholder RG is caught loudly there, not silently left
-#     behind.
-#
-#     List-call failure: a SUBSCRIPTION-scoped list can never legitimately be gone (section 9.4
-#     design boundary), so ANY non-zero is FAIL LOUD, matching every discovery list above.
-#     Recover/purge-call failure: classify with is_auth_error - auth-shaped fails loud;
-#     anything else is ALSO fail loud here (NOT warn-and-continue), because there is no
-#     separate Phase 3 VERIFY step for this class (unlike the KV soft-delete step above, which
-#     VERIFY 5 backstops) - this is the FIX-1 MG-scope precedent (teardown-common.sh's
-#     confirm_gone_or_fail_primary), applied here because a silent failure would leave the
-#     exact stale-soft-delete condition OQ-063 exists to close.
-echo "== Phase 2 step 7b: Security Log Analytics workspace purge (OQ-063, backstop) =="
-if [ -z "${SECURITY_SUBSCRIPTION_ID:-}" ]; then
-  echo "::error::SECURITY_SUBSCRIPTION_ID is empty - cannot purge the Security LAW. This is already a VERIFY 0 failure class; failing loud here too rather than silently skipping."
+#     WHY THIS RUNS HERE (after step 7's reconcile): unchanged reasoning from the original
+#     single-workspace version - step 2 submits every RG delete with --no-wait, and step 7's
+#     wait_for_rgs_gone is the only bounded wait in this script for those submissions to actually
+#     complete. Running this purge earlier would race any LAW-owning root's RG delete exactly the
+#     way it used to race the security RG's: list-deleted-workspaces would find nothing yet, this
+#     step would report clean, and the workspace would land in soft-delete UNPURGED minutes
+#     later. A residual race still exists if step 7 hits its 30-min ceiling on a still-deleting
+#     RG (warn-and-continue, matching every other straggler class in this script) - this step
+#     would then find nothing for that one and report clean, idempotently retried on the
+#     operator's own re-dispatch, not a new failure mode.
+echo "== Phase 2 step 7b: Log Analytics workspace soft-delete purge (ADR-073 decision 4) =="
+if ! law_purge_soft_deleted_workspaces; then
   exit 1
-fi
-if ! az_run_retry law_deleted_rows_out monitor log-analytics workspace list-deleted-workspaces \
-    --subscription "$SECURITY_SUBSCRIPTION_ID" \
-    --query "[?name=='${SECURITY_LAW_WORKSPACE_NAME}'].[name, location, id]" -o tsv; then
-  echo "::error::list-deleted-workspaces failed for the security subscription - a failed list is never read as 'not soft-deleted' (section 9.4): ${AZ_RUN_STDERR}"
-  exit 1
-fi
-# shellcheck disable=SC2154  # law_deleted_rows_out is assigned indirectly by az_run's printf -v
-mapfile -t law_deleted_rows <<< "$law_deleted_rows_out"
-law_found=0
-for row in "${law_deleted_rows[@]:-}"; do
-  [ -z "$row" ] && continue
-  law_found=1
-  law_name="$(printf '%s' "$row" | cut -f1)"
-  law_loc="$(printf '%s' "$row" | cut -f2)"
-  law_id="$(printf '%s' "$row" | cut -f3)"
-
-  case "$law_id" in
-    /subscriptions/*/resourceGroups/*) ;;
-    *)
-      echo "::error::deleted-workspace id '${law_id}' for ${law_name} does not contain a /resourceGroups/ segment - cannot determine which RG to recreate for recovery. Aborting rather than guessing."
-      exit 1
-      ;;
-  esac
-  law_rg="${law_id#*/resourceGroups/}"
-  law_rg="${law_rg%%/*}"
-  if [ "$law_rg" != "$SECURITY_LAW_RESOURCE_GROUP_NAME" ]; then
-    echo "::error::deleted workspace ${law_name} resolved to RG '${law_rg}', expected '${SECURITY_LAW_RESOURCE_GROUP_NAME}' (platform/security/main.tf naming) - refusing to recreate an unexpected RG name."
-    exit 1
-  fi
-
-  echo "  Found soft-deleted Security LAW ${law_name} (rg ${law_rg}, location ${law_loc}) - recovering to purge"
-  if ! az_run_retry law_rg_exists_out group exists --name "$law_rg" --subscription "$SECURITY_SUBSCRIPTION_ID" -o tsv; then
-    echo "::error::checking existence of ${law_rg} failed - an auth/transport error, not a clean true/false: ${AZ_RUN_STDERR}"
-    exit 1
-  fi
-  law_purge_rg_created=0
-  if [ "$law_rg_exists_out" != "true" ]; then
-    echo "  RG ${law_rg} does not exist (expected - the RG delete already ran in one path or the other) - recreating as a placeholder so the recover PUT has a container"
-    if ! law_rg_create_out="$(az group create --name "$law_rg" --location "$law_loc" \
-        --subscription "$SECURITY_SUBSCRIPTION_ID" --tags "Purpose=teardown-law-purge-scratch" --output none 2>&1)"; then
-      if is_auth_error "$law_rg_create_out"; then
-        echo "::error::creating placeholder RG ${law_rg} failed with an auth/transport error: ${law_rg_create_out}"
-        exit 1
-      fi
-      echo "::error::creating placeholder RG ${law_rg} failed - cannot recover the workspace without it: ${law_rg_create_out}"
-      exit 1
-    fi
-    law_purge_rg_created=1
-  else
-    echo "  RG ${law_rg} already exists - reusing it (not created by this step, will not be deleted after purge)"
-  fi
-
-  if ! law_recover_out="$(az monitor log-analytics workspace recover \
-      --resource-group "$law_rg" --workspace-name "$law_name" \
-      --subscription "$SECURITY_SUBSCRIPTION_ID" --output none 2>&1)"; then
-    if is_auth_error "$law_recover_out"; then
-      echo "::error::recovering ${law_name} (rg ${law_rg}) failed with an auth/transport error: ${law_recover_out}"
-      exit 1
-    fi
-    echo "::error::recovering ${law_name} (rg ${law_rg}) failed - cannot purge without first recovering it (Microsoft's own documented recover-then-purge sequence): ${law_recover_out}"
-    exit 1
-  fi
-
-  echo "  Force-purging (permanent delete, releases the name) ${law_name} (rg ${law_rg})"
-  if ! law_purge_out="$(az monitor log-analytics workspace delete \
-      --resource-group "$law_rg" --workspace-name "$law_name" \
-      --subscription "$SECURITY_SUBSCRIPTION_ID" --force --yes --output none 2>&1)"; then
-    if is_auth_error "$law_purge_out"; then
-      echo "::error::force-purging ${law_name} (rg ${law_rg}) failed with an auth/transport error: ${law_purge_out}"
-      exit 1
-    fi
-    echo "::error::force-purging ${law_name} (rg ${law_rg}) failed - no separate VERIFY step covers this class, so this is the only completion check it will ever get: ${law_purge_out}"
-    exit 1
-  fi
-  # PRIMARY-evidence confirm-GET via the shared helper (code-review Finding 4, 2026-07-30 -
-  # dedupes what used to be a hand-rolled copy of this exact 4-way branch; the helper's new
-  # optional third argument, teardown-common.sh, lets a non-MG-scope caller override WHY there
-  # is no separate Phase 3 VERIFY step without disturbing the MG-scope callers' default
-  # wording). No separate Phase 3 VERIFY step exists for the Security LAW purge (this pass
-  # deliberately did not add one), so this confirm-GET is the only completion check this class
-  # will ever get.
-  law_purge_url="${ARM_BASE}${law_id}?api-version=${SECURITY_LAW_API_VERSION}"
-  confirm_gone_or_fail_primary "Security LAW ${law_name} (rg ${law_rg})" "$law_purge_url" \
-    "the Security LAW purge has no separate Phase 3 VERIFY step covering this class" || exit 1
-
-  if [ "$law_purge_rg_created" -eq 1 ]; then
-    echo "  Deleting placeholder RG ${law_rg} (created by this step for the recover round-trip)"
-    # Fire-and-forget (--no-wait): unlike the original step-3b position, NO reconcile wait
-    # runs after this step (step 7 already ran above), so this placeholder RG's own deletion
-    # is intentionally NOT tracked by any wait in this script - VERIFY 2's RG naming-pattern
-    # scan is this delete's sole backstop (same as every other --no-wait submission's
-    # non-auth failure branch elsewhere in this script).
-    if ! law_rg_del_out="$(az group delete --name "$law_rg" --subscription "$SECURITY_SUBSCRIPTION_ID" --yes --no-wait --output none 2>&1)"; then
-      if is_auth_error "$law_rg_del_out"; then
-        echo "::error::deleting placeholder RG ${law_rg} failed with an auth/transport error: ${law_rg_del_out}"
-        exit 1
-      fi
-      echo "  ::warning::deleting placeholder RG ${law_rg} failed (continuing - VERIFY 2's RG naming-pattern scan will catch it as a remnant if it survives): ${law_rg_del_out}"
-    fi
-  fi
-done
-if [ "$law_found" -eq 0 ]; then
-  echo "  ${SECURITY_LAW_WORKSPACE_NAME} is not in a soft-delete state (never deleted this cycle - likely already purged natively by the mode=terraform path's own terraform destroy - or already purged by a prior run of this step) - nothing to do."
 fi
 
 echo "AZ SWEEP complete."
