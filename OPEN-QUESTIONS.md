@@ -92,6 +92,41 @@ Two things are genuinely unknown and should not be guessed:
   (standing user ruling). If they must go before a code change lands, that is an explicitly authorised,
   dated, scoped operator exception in the ADR-068 decision-6 shape, not a console habit.
 
+**RESOLVED 2026-08-01 by ADR-073 (option A executed, then B ruled, with a finding option A could not
+have predicted).** The operator ran the live read this OQ demanded. Results: connectivity 0, identity 0,
+landingzones 0, security 0, management 2. Both management entries are `law-platform-globaris-poc` in
+`rg-management-globaris-poc`, one created 2026-07-07 in `eastus2` (pre-region-flip) and one created
+2026-07-31 in `centralus`, and **both carry the IDENTICAL ARM resource ID**, because region is not a
+segment of a Log Analytics workspace's resource ID. So the second bullet of this OQ ("whether a rebuild
+inside the recovery window recovers or collides") was the right question asked against the wrong object
+model: the real question was WHICH of two same-ID candidates a recovery would target.
+
+The ruling, in five lines:
+
+1. **Recovery is keyed on FOUR things including REGION**, established from Microsoft's "Delete and
+   Recover a Log Analytics Workspace" page and the REST contract (the recovery PUT carries
+   `{"location": ...}` in its BODY, and `Restore-AzOperationalInsightsWorkspace` makes `-Location`
+   mandatory), not inferred. A `centralus` create therefore cannot recover the `eastus2` entry, and the
+   feared silent failure (the platform workspace returning in the DR region behind a green apply) is not
+   reachable under the documented contract.
+2. **The two-entry case itself is undocumented** and is not asserted. The residual outcomes are a
+   region-matched recovery or a name conflict; neither is a wrong-region recovery, and both are loud.
+3. **Disposition: purge BOTH entries via CI before Step 2**, so Step 2 is an unambiguous fresh create.
+   This is option C rejected properly and option A's read acted on. It removes the `customerId`
+   inheritance question rather than managing it, and it matches ADR-067's posture that a rebuild creates
+   rather than adopts.
+4. **Option B is adopted and specified**, with a safety bar this OQ did not scope: containment via the
+   existing `is_estate_owned --resource-id` predicate, a blast-radius cap, a REST-PUT recover (the CLI
+   verb has no `--location` and cannot select between same-ID entries), a `deletedWorkspaces` re-list as
+   the completion check (the current ARM GET returns a false "purged" whenever two entries share an ID),
+   and strictly sequential per-entry cycles.
+5. **Root cause is one block**: `platform/management/providers.tf` never set
+   `features { log_analytics_workspace { permanently_delete_on_destroy = true } }`, which
+   `platform/security/providers.tf` does. Exactly two roots in the repo declare a workspace.
+
+Owners: DevSecOps (ADR-073 decision 4), Cloud Engineer (decision 6), operator (decision 3 dispatch and
+the new PC-1M gate). Full reasoning, alternatives and the verbatim documentation quotes are in ADR-073.
+
 ### OQ-068: Container Insights on `bank-app-p1` uses the legacy workspace-key path (`use_aad_auth = false`), which is the specific reason a cross-root `Microsoft.OperationsManagement/solutions` object exists at all - should the estate move to the MSCI path that creates no such object?
 
 - **Raised:** 2026-08-01 (architect, ADR-072 corollary C3 - explicitly NOT decided in that ADR)
