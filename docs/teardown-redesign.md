@@ -99,10 +99,37 @@ Reverse-dependency-order `terraform destroy` per root, with the F1 fix:
   `terraform state list`; empty or errored state echoes "nothing to destroy" and exits 0. An
   undeployed or emptied root (including an inert synthetic) can then never fail a destroy.
 - Order (reverse of deploy): synthetic -> spokes (corp-a1/a2, online-p1, bank-app-p1, bank-data-p1)
-  -> {connectivity, security} -> identity -> management -> management-groups.
+  -> {connectivity, security} -> identity -> Phase 1.5 attachment sweep -> management.
 - F2 inside destroy: Databricks workspace delete (the deny-assignment blocks the RG, not the
   workspace); APIM/KV provider `features` purge flags; slow deletes covered by the 360-min CI
   ceiling and the state-empty resilience pre-step on re-run.
+
+> **AMENDED 2026-08-01 (ADR-072, DevSecOps).** `platform/management-groups` is REMOVED from this
+> Phase and from the `target=all` reverse-dependency order above (ADR-072 decision 6, amending
+> ADR-066 decision 1). Measured live (teardown run 30685705802): its destroy spent 5h02m in
+> Terraform's refresh prefix - which must complete in full before any delete is issued - and
+> reached zero deletes before the 6-hour GitHub Actions ceiling killed the job at the same instant
+> its OIDC assertion also went stale. This root's objects are overwhelmingly child objects of MG
+> container scopes, and Phase 2 step 4 (gated on `remove_mg_hierarchy`) already offers a cascading
+> container delete as the correct bulk primitive for that shape - two rebuild cycles have each
+> applied exactly 537 objects cleanly after an MG-tree cascade. ADR-066's INV-1 ("all eleven
+> Phase-1 layer destroys run and go green") narrows to INV-1': every root Phase 1 OWNS runs and
+> goes green; `platform/management-groups` is owned by the Phase 2 cascade instead, and its
+> completion is asserted by Phase 3 VERIFY. Single-root `target=platform/management-groups
+> mode=terraform` remains fully supported and now carries a bounded `destroy_timeout_minutes`
+> (`_tf-root.yml`) so a repeat stall fails loud with a live OIDC token instead of silently
+> burning six hours - see `.github/workflows/teardown.yml`'s own header for the full account.
+>
+> A new **Phase 1.5 - ATTACHMENT SWEEP** (`scripts/teardown-attachment-sweep.sh`, ADR-072
+> decision 4) runs between `identity` and `management`, `target=all` and `mode=terraform` only,
+> NOT a hard gate. It clears cross-root RP-attached objects (Traffic Analytics' NWTA
+> data-collection endpoint/rule pair, the AKS addon's ContainerInsights solution) that land in
+> `platform/management`'s resource group as a side effect of a DIFFERENT root's configuration, so
+> that root's own destroy can go green without widening `prevent_deletion_if_contains_resources`.
+> Its ordering constraint is the exact mirror of this document's own G-1 concept (section on
+> extension-resource ordering, Appendix): a G-1 object is keyed to its HOST and must be swept
+> BEFORE the host dies; this attachment class is keyed to its CONTAINER and must be swept AFTER
+> every declaring root destroys and BEFORE the container-owning root destroys.
 
 ### Phase 2 - AZ SWEEP (`teardown-az-sweep.sh`; az, `target=all` only, both modes)
 

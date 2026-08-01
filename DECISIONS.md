@@ -1329,6 +1329,41 @@ teardown path.
   but it does bound what a green Phase 3 VERIFY plus a reset Phase 4 state can be said to prove: they
   prove the estate is empty of everything that can be enumerated.
 
+**ADDENDUM 2026-08-01 (DevSecOps implementation fix, teardown run 30685705802 - decision 4's
+`mode=terraform` eligibility rule is AMENDED. Body above unedited, per append-only.)**
+
+- **The gap.** Decision 4 as originally implemented gated `TEARDOWN_MODE=terraform` eligibility
+  on job success ALONE, with no VERIFY fallback (`mode=az-sweep` was the only branch that fell
+  back to whole-estate VERIFY evidence). Run 30685705802 (`target=all mode=terraform
+  remove_mg_hierarchy=true`) exposed this directly: Phase 1 failed for `platform/management`
+  (blocked by cross-root orphans, since fixed by ADR-072 decision 4's attachment sweep) and
+  `platform/management-groups` (a 6-hour refresh stall, since routed off this path entirely by
+  ADR-072 decision 6), Phase 2 caught both remnants, and Phase 3 VERIFY PASSED - yet Phase 4
+  excluded both keys because their own jobs read `failure`, not `success`, leaving both blobs
+  populated after a run whose estate was independently proven clean. This is the exact FM-2
+  condition (state populated while resources gone) this ADR exists to close, produced by the
+  eligibility rule itself rather than by a missing reset mechanism.
+- **The fix.** `scripts/teardown-state-reset.sh`'s `determine_action` is unified across both
+  modes: a key's own Phase 1 job success remains the cheapest, most specific belt (checked
+  first, in either mode); a key whose job did NOT succeed now falls through to the SAME
+  VERIFY-fallback decision 2 already establishes for `mode=az-sweep` - except
+  `platform/identity`, which is EXCLUDED PERMANENTLY regardless of mode (carve-out A is
+  unchanged and unweakened: VERIFY 0-10 is ARM-plane only and has zero Entra/Graph/PIM
+  coverage, verified 2026-08-01 that no other root declares a non-ARM-plane provider). No
+  carve-out was removed and no new one was added - decision 4's evidence-boundary rule
+  ("a root's state may be reset only if that root's ENTIRE resource footprint is covered by the
+  evidence this run's mode actually produced") was already broad enough to justify this; what
+  was missing was applying it in `mode=terraform` too, not only in `mode=az-sweep`.
+- **Not yet re-run live.** This addendum documents the code change; the two stuck blobs
+  (`platform/management` and `platform/management-groups`) from run 30685705802 are unblocked
+  by this fix on the NEXT `mode=terraform` run that reaches Phase 4, or immediately via a
+  `target=all mode=az-sweep remove_mg_hierarchy=true` re-dispatch against the already-verified-
+  clean estate (that path's Phase 4 branch was already unconditional for both keys before this
+  fix - see WORKLOG for the full account of why no code change was needed for that path).
+- **Landed:** implemented on branch `fix/teardown-refresh-ceiling`, not yet merged. Update this
+  addendum (or add a further dated one) once the PR merges, per this file's own `Landed:`
+  convention.
+
 ### ADR-067: The clean-empty-state platform/security apply (run 30499221661) fails on three interacting classes - a soft-delete-recovered Security LAW re-hydrates orphaned Sentinel rules ("already exists"), the two Sentinel automation rules lack the onboarding dependency (race "not onboarded"), and the pricing serialization never actually serialized the extended plan set (CloudPosture 409). Diagnosis stands; the recovery ruling was SUPERSEDED 2026-07-29 (see Addendum) - the user's process change makes recovery a FULL estate teardown-and-restart from Step 1 with the Security LAW purged, not import-and-continue.
 
 - **Date:** 2026-07-29

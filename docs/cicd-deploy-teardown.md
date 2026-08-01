@@ -158,8 +158,16 @@ call; the ordering contract in §2 is the binding part.)
 - **First job step is a guard** that fails the run unless `confirm` matches the required token. This is a
   cheap pre-check before any Azure login, so a fat-fingered dispatch never reaches `destroy`.
 - When `target != all`: destroy that one root only. (Useful for tearing down a single spoke to cut cost.)
-- When `target == all`: destroy the 9 roots in **reverse dependency order** (§2). Implemented as the same
-  `needs:` chain as `deploy.yml` but **inverted** — `synthetic` first, `management-groups` last.
+- When `target == all`: destroy the roots in **reverse dependency order** (§2). Implemented as the same
+  `needs:` chain as `deploy.yml` but **inverted** - `synthetic` first, `management` last.
+  **AMENDED 2026-08-01 (ADR-072 decision 6):** `platform/management-groups` is no longer part of
+  this chain at `target=all` - it is destroyed by the Phase 2 management-group hierarchy cascade
+  instead (`teardown-az-sweep.sh`, gated on `remove_mg_hierarchy`), because its objects are
+  overwhelmingly child objects of MG container scopes with no cascading-delete equivalent inside
+  Terraform's own per-object destroy model, and a live run measured its `terraform destroy`
+  spending 5+ hours in Terraform's refresh prefix with zero deletes issued. Single-root
+  `target=platform/management-groups` remains fully supported. See `teardown.yml`'s own header
+  and `docs/teardown-redesign.md`'s Phase 1 section for the full account.
 - `include_bootstrap == true` additionally removes the bootstrap layer **last** (see §6).
 
 ---

@@ -2,7 +2,7 @@
 # Purpose: Manual, guarded, RELIABLE end-to-end teardown of the whole environment or one
 #          root - zero manual deletion (ADR-054 / docs/teardown-redesign.md).
 # Section: 10 - Pipeline & Tooling (ADR-019, ADR-054, OQ-012/OQ-013).
-# Last updated: 2026-07-30
+# Last updated: 2026-08-01
 #
 # Guards (destroy is irreversible):
 #   1. `confirm` must be typed exactly as `destroy` (a cheap pre-check before any login).
@@ -52,10 +52,13 @@
 #             (2026-07-29, same day, SUPERSEDES ADR-065 decision 1 on fresh evidence -
 #             KV purge protection and the Databricks deny-assignment do not actually block a
 #             terraform destroy) restores it: at target=all, ALL 11 Phase 1 per-root
-#             terraform destroy jobs now RUN and go GREEN, SERIALIZED in a strictly LINEAR
-#             reverse-dependency `needs` chain (synthetic -> bank-data-p1 -> bank-app-p1 ->
-#             online-p1 -> corp-a2 -> corp-a1 -> security -> connectivity -> identity ->
-#             management -> management-groups) so exactly ONE state-SA-touching job is open
+#             terraform destroy jobs then ran and went GREEN, SERIALIZED in a strictly LINEAR
+#             reverse-dependency `needs` chain. **AMENDED 2026-08-01 (ADR-072 decision 6):**
+#             `platform/management-groups` is no longer one of them - the chain is now 10 jobs
+#             (synthetic -> bank-data-p1 -> bank-app-p1 -> online-p1 -> corp-a2 -> corp-a1 ->
+#             security -> connectivity -> identity -> management), plus the non-counted Phase
+#             1.5 attachment sweep between `identity` and `management` (see the AMENDED
+#             2026-08-01 header note below) - so exactly ONE state-SA-touching job is open
 #             at any instant (the JIT firewall flip races only on CONCURRENT flips, not
 #             sequential ones - LESSON 31). Every Phase 1 root job now carries
 #             `manage_runner_ip: true` UNCONDITIONALLY (ADR-066; previously
@@ -69,7 +72,9 @@
 #             Fallback for mode=az-sweep (state gone, fixes F4) - there it remains the
 #             PRIMARY, full-coverage whole-estate deleter, unchanged. In mode=terraform
 #             (ADR-066: now the primary target=all path, Phase 1 runs) it is DEMOTED to a
-#             thin remnant-catch BELT that runs AFTER all 11 Phase 1 jobs, because
+#             thin remnant-catch BELT that runs AFTER all 10 Phase 1 jobs (ADR-072 decision 6
+#             removed `platform/management-groups` from this count - see the AMENDED
+#             2026-08-01 header note below), because
 #             terraform-destroy now covers the bulk of the estate natively: (a) Databricks
 #             workspace-delete cascade (never `az group delete` the RP-managed RG directly -
 #             deny-assignment, fixes F2) - Databricks IS deployed in this estate
@@ -107,6 +112,55 @@
 #             teardown (Phase 1 never runs there) left every workload/platform root's state
 #             fully populated describing resources VERIFY had just proven gone.
 #
+# AMENDED 2026-08-01 (DevSecOps fix round, teardown run 30685705802 - three defects referred
+# from that run, ADR-072 ruling the ownership/topology questions in parallel):
+#   - Phase 1.5 - ATTACHMENT SWEEP (scripts/teardown-attachment-sweep.sh, ADR-072 decision 4) -
+#     az, target=all AND mode=terraform only, inserted between `identity` and `management` in
+#     the chain. Clears cross-root RP-attached objects (Traffic Analytics' NWTA data-collection
+#     endpoint/rule pair, the AKS addon's ContainerInsights solution) that land in
+#     platform/management's resource group as a side effect of a DIFFERENT root's configuration,
+#     so that root's own `terraform destroy` can go green without widening its
+#     `prevent_deletion_if_contains_resources` blast radius. NOT a hard gate (same F1-style
+#     wiring as `databricks-precascade` -> `bank-data-p1`) - a failure surfaces as
+#     platform/management's own provider error or a Phase 2/3 remnant, never a skipped layer.
+#   - Phase 1: `platform/management-groups` is AMENDED OUT of the mode=terraform PRIMARY
+#     target=all path (ADR-072 decision 6, amending ADR-066 decision 1). Measured from that
+#     run's own job log: its destroy spent 5h02m in Terraform's REFRESH prefix (which must
+#     complete in full before any delete can be issued) and reached zero deletes before the
+#     6-hour GitHub Actions job ceiling killed it - the SAME instant its re-minted OIDC
+#     assertion also went stale (LESSON 46's "two ceilings that are the same number"). The
+#     DISARM-causes-403-on-a-deleted-scope hypothesis was tested against the actual log and
+#     REFUTED (every MG scope involved was still alive throughout that job's run; DISARM only
+#     ever deletes POLICY assignments, a different object type from the roleAssignments that
+#     stalled). This root's objects are overwhelmingly child objects of MG container scopes, and
+#     Phase 2 step 4 (gated on `remove_mg_hierarchy`) already offers a cascading container
+#     delete as the correct bulk primitive for exactly that shape - live evidence: two rebuild
+#     cycles each applied exactly 537 objects cleanly after an MG-tree cascade, zero `already
+#     exists` collisions. ADR-066 INV-1 ("all eleven Phase-1 layer destroys run and go green")
+#     NARROWS to INV-1': every root Phase 1 OWNS runs and goes green; this one root is owned by
+#     the Phase 2 cascade instead, and its completion is asserted by Phase 3 VERIFY. Single-root
+#     `target=platform/management-groups mode=terraform` remains fully supported for an operator
+#     who wants provider-faithful, state-exact removal and is willing to own the wall clock -
+#     nothing about that path is withdrawn, and it now carries a bounded
+#     `destroy_timeout_minutes: "90"` (`_tf-root.yml`) so a repeat of the same stall fails loud
+#     with a LIVE token instead of silently burning six hours (see that job's own comment for
+#     why a job-level `timeout-minutes:` cannot be used here at all).
+#   - Phase 4 STATE RESET eligibility (`scripts/teardown-state-reset.sh`) is UNIFIED across both
+#     modes: a key whose own Phase 1 job did not succeed is now ELIGIBLE anyway (except
+#     `platform/identity`, permanently) on whole-estate VERIFY evidence, in EITHER mode - not
+#     only under `mode=az-sweep` as ADR-068 decision 4 originally specified. This closes the gap
+#     that left `platform/management` and `platform/management-groups`'s state blobs populated
+#     after the 2026-08-01 run despite a PASSED Phase 3 VERIFY (an FM-2 condition blocking the
+#     next rebuild's plan) - see that script's own header for the full amendment.
+#   - Teardown Summary (`scripts/teardown-summary.sh`, new last job) - always runs at
+#     target=all, no Azure calls, and distinguishes "estate verified clean, `management-groups`
+#     correctly took the Phase 2 cascade path (INV-1')" from "a genuine, unexplained Phase 1
+#     failure" from "Phase 3 VERIFY itself did not pass" - three situations a run's bare
+#     conclusion could not tell apart, which is what made the 2026-08-01 run's overall FAILURE
+#     conclusion misrepresent an estate that Phase 3 VERIFY had, in fact, certified clean. It
+#     cannot and does not change the overall GitHub Actions run conclusion - see that script's
+#     own header for why that is correct.
+#
 # Scope (OQ-012, unchanged): default tears down the 9 workload/platform roots ONLY and KEEPS
 #   the bootstrap state backend + OIDC app, so redeploy is immediate. include_bootstrap=true
 #   surfaces a MANUAL scorched-earth runbook (the SP can't delete its own OIDC app, and the
@@ -125,8 +179,10 @@
 #   the JIT state-SA firewall flip (`manage_runner_ip: true`, ADR-066 - previously
 #   `target != 'all'`, ADR-065) so the single-root destroy can reach the firewalled state SA.
 #   A target=all destroy with the default mode=terraform (ADR-066, supersedes ADR-065
-#   decision 1) now RUNS all 11 Phase 1 per-root terraform destroy jobs, SERIALIZED in
-#   reverse-dependency order (one state-SA-touching job open at a time), followed by the
+#   decision 1; AMENDED 2026-08-01 by ADR-072 decision 6) now RUNS 10 Phase 1 per-root
+#   terraform destroy jobs (`platform/management-groups` is no longer one of them - see the
+#   AMENDED 2026-08-01 header note below), SERIALIZED in reverse-dependency order (one
+#   state-SA-touching job open at a time), plus the Phase 1.5 attachment sweep, followed by the
 #   Phase 2 az-sweep THIN BELT and Phase 3 VERIFY - the normal, transparent, state-faithful
 #   Terraform model, mirroring the deploy. A target=all destroy with mode=az-sweep remains
 #   the STATE-GONE FALLBACK (ADR-065 decision 4, kept): every Phase 1 job is skipped (gated
@@ -134,14 +190,20 @@
 #   Phase 2 AZ SWEEP (whole-estate, its original full-coverage role, for this path only) +
 #   Phase 3 VERIFY, which has zero state-backend dependency.
 #
-# Order = reverse of deploy.yml, and (ADR-066) now the exact SERIALIZED chain at target=all:
-#   synthetic -> bank-data-p1 -> bank-app-p1 -> online-p1 -> corp-a2 -> corp-a1 -> security ->
-#   connectivity -> identity -> management -> management-groups. deploy.yml applies synthetic
-#   LAST (after all 5 spokes, ordering hygiene only - see deploy.yml's comment), so teardown
-#   destroys it FIRST. terraform destroy keeps state consistent for clean re-apply. Within the
-#   5 spokes and within {connectivity, security}, deploy.yml has no relative ordering
-#   requirement (they applied independently/in parallel) - the linear order chosen here is one
-#   valid reverse-topological sort, not the only one (ADR-066).
+# Order = reverse of deploy.yml, and (ADR-066, AMENDED 2026-08-01 by ADR-072 decision 4/6) now
+# the exact SERIALIZED chain at target=all: synthetic -> bank-data-p1 -> bank-app-p1 ->
+#   online-p1 -> corp-a2 -> corp-a1 -> security -> connectivity -> identity ->
+#   attachment-sweep (Phase 1.5) -> management. `management-groups` is NO LONGER part of this
+#   chain at target=all (ADR-072 decision 6 - see the AMENDED 2026-08-01 header note above); it
+#   is destroyed by the Phase 2 MG-hierarchy cascade instead and only runs here as an explicit
+#   single-root dispatch. deploy.yml applies synthetic LAST (after all 5 spokes, ordering
+#   hygiene only - see deploy.yml's comment), so teardown destroys it FIRST. terraform destroy
+#   keeps state consistent for clean re-apply. Within the 5 spokes and within {connectivity,
+#   security}, deploy.yml has no relative ordering requirement (they applied
+#   independently/in parallel) - the linear order chosen here is one valid reverse-topological
+#   sort, not the only one (ADR-066). `attachment-sweep`'s position (after `identity`, before
+#   `management`) is fixed by ADR-072 decision 4: every declaring root above it has destroyed,
+#   and it runs before the container-owning root's own destroy.
 name: Teardown (manual)
 
 on:
@@ -165,7 +227,7 @@ on:
           - landing-zones/bank-data-p1
           - synthetic
       mode:
-        description: "terraform (default) = primary path: single-root destroys that one root; at target=all (ADR-066) it runs all 11 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order, then the Phase 2 az-sweep thin belt, then Phase 3 VERIFY. az-sweep = rejected for a single root (see guard); at target=all it is the STATE-GONE FALLBACK (ADR-065 decision 4, kept) - every Phase 1 job is skipped and the whole-estate az-sweep flow (Phase 0 DISARM + Phase 2 AZ SWEEP, whole-estate + Phase 3 VERIFY) runs alone."
+        description: "terraform (default) = primary path: single-root destroys that one root; at target=all (ADR-066, amended 2026-08-01 by ADR-072 decision 6) it runs 10 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order (platform/management-groups is destroyed by the Phase 2 MG cascade instead, not this chain), the Phase 1.5 attachment sweep, then the Phase 2 az-sweep thin belt, then Phase 3 VERIFY. az-sweep = rejected for a single root (see guard); at target=all it is the STATE-GONE FALLBACK (ADR-065 decision 4, kept) - every Phase 1 job is skipped and the whole-estate az-sweep flow (Phase 0 DISARM + Phase 2 AZ SWEEP, whole-estate + Phase 3 VERIFY) runs alone."
         type: choice
         default: terraform
         options:
@@ -216,15 +278,17 @@ jobs:
             echo "::error::mode=az-sweep requires target=all. az-sweep (Phase 2 fallback + Phase 0 disarm + Phase 3 verify) is a whole-estate operation and does not run for a single-root target - dispatching this combination would do nothing and still report green. For a single-root destroy use mode=terraform (the default)."
             exit 1
           fi
-          # NOTICE (ADR-066, supersedes the ADR-065 notice this replaces): at target=all the
-          # mode input now DOES matter again. mode=terraform (default) runs the full waved
-          # teardown - all 11 Phase 1 per-root terraform destroy jobs, serialized. mode=az-sweep
+          # NOTICE (ADR-066, supersedes the ADR-065 notice this replaces; AMENDED 2026-08-01 by
+          # ADR-072 decision 6): at target=all the mode input now DOES matter again.
+          # mode=terraform (default) runs the full waved teardown - 10 Phase 1 per-root
+          # terraform destroy jobs (platform/management-groups is no longer one of them), plus
+          # the Phase 1.5 attachment sweep, serialized. mode=az-sweep
           # remains the state-gone fallback (ADR-065 decision 4, kept) - Phase 1 is skipped.
           if [ "$TARGET" = "all" ]; then
             if [ "$MODE" = "terraform" ]; then
-              echo "NOTICE: target=all mode=terraform (default, ADR-066) runs the full waved teardown - Phase 0 DISARM, Phase 0.5 Databricks precascade (force-deletes any live Databricks workspace ahead of Phase 1), all 11 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order (one state-SA-touching job open at a time), the Phase 2 az-sweep thin remnant-catch belt, Phase 3 VERIFY, and (ADR-068, if VERIFY passes) Phase 4 STATE RESET - each Phase 1 root's state is reset only if that root's OWN destroy job succeeded (identity is eligible in this mode)."
+              echo "NOTICE: target=all mode=terraform (default, ADR-066, AMENDED 2026-08-01 by ADR-072) runs the full waved teardown - Phase 0 DISARM, Phase 0.5 Databricks precascade (force-deletes any live Databricks workspace ahead of Phase 1), 10 Phase 1 per-root terraform destroy jobs SERIALIZED in reverse-dependency order (one state-SA-touching job open at a time; platform/management-groups is no longer part of this chain - ADR-072 decision 6, it is destroyed by the Phase 2 MG-hierarchy cascade instead), the Phase 1.5 attachment sweep (ADR-072 decision 4, clears cross-root RP-attached objects before platform/management's own destroy), the Phase 2 az-sweep thin remnant-catch belt, Phase 3 VERIFY, and (ADR-068, amended 2026-08-01, if VERIFY passes) Phase 4 STATE RESET - a key is reset if its own Phase 1 job succeeded, OR (except platform/identity, permanently excluded) on whole-estate VERIFY evidence if it did not. A final Teardown Summary job always reports which layers destroyed via Terraform, which (management-groups) took the designed Phase 2 cascade path, and whether VERIFY passed."
             else
-              echo "NOTICE: target=all mode=az-sweep runs the state-gone FALLBACK path (ADR-065 decision 4, kept) - Phase 0 DISARM + Phase 2 AZ SWEEP (whole-estate, its original full-coverage role for this path only) + Phase 3 VERIFY; every Phase 1 per-root terraform destroy job is skipped (gated on mode=='terraform'). If VERIFY passes, Phase 4 STATE RESET (ADR-068) then resets every eligible workload/platform state blob to canonical empty EXCEPT platform/identity (carve-out A - never reset in this mode, since VERIFY has no Entra/PIM check) and platform/management-groups unless remove_mg_hierarchy=true (carve-out B)."
+              echo "NOTICE: target=all mode=az-sweep runs the state-gone FALLBACK path (ADR-065 decision 4, kept) - Phase 0 DISARM + Phase 2 AZ SWEEP (whole-estate, its original full-coverage role for this path only) + Phase 3 VERIFY; every Phase 1 per-root terraform destroy job is skipped (gated on mode=='terraform'). If VERIFY passes, Phase 4 STATE RESET (ADR-068, amended 2026-08-01) then resets every eligible workload/platform state blob to canonical empty EXCEPT platform/identity (permanently excluded unless its own destroy job succeeded, which never happens in this mode) and platform/management-groups unless remove_mg_hierarchy=true (carve-out B). A final Teardown Summary job always reports the outcome."
             fi
           fi
           echo "Confirmed. target=$TARGET mode=$MODE include_bootstrap=$INCLUDE_BOOTSTRAP remove_mg_hierarchy=$REMOVE_MG_HIERARCHY"
@@ -285,22 +349,26 @@ jobs:
           LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
         run: bash scripts/teardown-databricks-precascade.sh
 
-  # Phase 1 (ADR-066): a strictly LINEAR reverse-dependency `needs` chain of 11 jobs -
-  # synthetic -> bank-data-p1 -> bank-app-p1 -> online-p1 -> corp-a2 -> corp-a1 -> security ->
-  # connectivity -> identity -> management -> management-groups. At target=all every job's
-  # `if:` is true (the `inputs.target == 'all'` disjunct, restored - undoes ADR-065 decision
-  # 1) and GitHub Actions' unconditional `needs` dependency edge (independent of any `if:`)
-  # forces them to run ONE AT A TIME in exactly this order, so exactly one state-SA-touching
-  # job is ever open (`manage_runner_ip: true`, unconditional now - see each job below). At a
-  # single-root target only that one job's `if:` is true; every other job in the chain skips,
-  # and `needs` on a skipped predecessor never blocks a downstream job because every `if:`
-  # uses `!cancelled()` (NOT the default implicit success-gating) - the same F1-fix pattern
-  # this workflow already relies on, so single-root behaviour is byte-for-byte unaffected by
-  # this reorder. This order respects every real deploy dependency (spokes before
-  # connectivity/security; connectivity+security before management; management+identity
-  # before management-groups) - `identity` has no real dependency on its neighbours in the
-  # chain (it only ever needed `disarm`), so its linear position is free and was chosen to
-  # sit between connectivity and management per ADR-066's own spec.
+  # Phase 1 (ADR-066, AMENDED 2026-08-01 by ADR-072 decision 6): a strictly LINEAR
+  # reverse-dependency `needs` chain of 10 jobs - synthetic -> bank-data-p1 -> bank-app-p1 ->
+  # online-p1 -> corp-a2 -> corp-a1 -> security -> connectivity -> identity -> management (plus
+  # the non-counted Phase 1.5 attachment sweep between `identity` and `management` - see that
+  # job's own comment). `platform/management-groups` is NO LONGER part of this chain - it is
+  # destroyed by the Phase 2 MG-hierarchy cascade instead (ADR-072 decision 6) and only runs
+  # here as an explicit single-root dispatch, outside this `needs` chain entirely. At
+  # target=all every remaining job's `if:` is true (the `inputs.target == 'all'` disjunct,
+  # restored - undoes ADR-065 decision 1) and GitHub Actions' unconditional `needs` dependency
+  # edge (independent of any `if:`) forces them to run ONE AT A TIME in exactly this order, so
+  # exactly one state-SA-touching job is ever open (`manage_runner_ip: true`, unconditional now
+  # - see each job below). At a single-root target only that one job's `if:` is true; every
+  # other job in the chain skips, and `needs` on a skipped predecessor never blocks a
+  # downstream job because every `if:` uses `!cancelled()` (NOT the default implicit
+  # success-gating) - the same F1-fix pattern this workflow already relies on, so single-root
+  # behaviour is byte-for-byte unaffected by this reorder. This order respects every real
+  # deploy dependency (spokes before connectivity/security; connectivity+security before
+  # management) - `identity` has no real dependency on its neighbours in the chain (it only
+  # ever needed `disarm`), so its linear position is free and was chosen to sit between
+  # connectivity and management per ADR-066's own spec.
   #
   # `synthetic` is a REAL root (synthetic/*.tf define real resources - RGs, red-team ACA
   # jobs, cost-pattern VM/storage, etc. - gated behind var.enable_synthetic_workload,
@@ -322,7 +390,7 @@ jobs:
       action: destroy
       backend_rel: "../"
       gh_environment: production-destroy
-      # ADR-066: chain position 1 of 11. manage_runner_ip unconditional - this job is only
+      # ADR-066: chain position 1 of 10. manage_runner_ip unconditional - this job is only
       # ever reached serialized (single-root, or first in the target=all chain).
       manage_runner_ip: true
     secrets: inherit
@@ -335,8 +403,9 @@ jobs:
   # LIVE, before this job runs - see that job's own comment. `needs` includes it for ORDERING
   # ONLY (same F1 convention as `synthetic` below - a sibling/helper job's own result is never
   # gated on here, only guard/disarm are hard gates): if the precascade job itself fails, this
-  # job still RUNS and still goes green (preserving INV-1 - all 11 layers run green), and any
-  # resulting orphan managed RG is then a correct, loud VERIFY 2/3 failure (ADR-066 decision 5),
+  # job still RUNS and still goes green (preserving INV-1' - every root Phase 1 OWNS runs
+  # green, ADR-072 decision 6), and any resulting orphan managed RG is then a correct, loud
+  # VERIFY 2/3 failure (ADR-066 decision 5),
   # not a silently-skipped mandatory layer.
   bank-data-p1:
     needs: [guard, disarm, databricks-precascade, synthetic]
@@ -347,7 +416,7 @@ jobs:
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 2 of 11.
+      # ADR-066: chain position 2 of 10.
       manage_runner_ip: true
     secrets: inherit
 
@@ -360,7 +429,7 @@ jobs:
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 3 of 11.
+      # ADR-066: chain position 3 of 10.
       manage_runner_ip: true
     secrets: inherit
 
@@ -373,7 +442,7 @@ jobs:
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 4 of 11.
+      # ADR-066: chain position 4 of 10.
       manage_runner_ip: true
     secrets: inherit
 
@@ -386,7 +455,7 @@ jobs:
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 5 of 11.
+      # ADR-066: chain position 5 of 10.
       manage_runner_ip: true
     secrets: inherit
 
@@ -399,7 +468,7 @@ jobs:
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 6 of 11.
+      # ADR-066: chain position 6 of 10.
       manage_runner_ip: true
     secrets: inherit
 
@@ -412,7 +481,7 @@ jobs:
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 7 of 11. Its terraform destroy also destroys
+      # ADR-066: chain position 7 of 10. Its terraform destroy also destroys
       # azurerm_resource_group.security (this root owns and destroys its own RG). The Security
       # LAW is now PURGED NATIVELY as part of this same destroy
       # (platform/security/providers.tf sets `permanently_delete_on_destroy = true`, Cloud
@@ -442,7 +511,7 @@ jobs:
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 8 of 11.
+      # ADR-066: chain position 8 of 10.
       manage_runner_ip: true
     secrets: inherit
 
@@ -455,14 +524,57 @@ jobs:
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 9 of 11. No real dependency on connectivity/security - its
+      # ADR-066: chain position 9 of 10. No real dependency on connectivity/security - its
       # linear slot here is free (see the chain-level comment above) and matches ADR-066's
       # own given order.
       manage_runner_ip: true
     secrets: inherit
 
-  management:
+  # Phase 1.5 - ATTACHMENT SWEEP (ADR-072 decision 4). Inserted between `identity` and
+  # `management` - the position ADR-072 specifies: after every declaring root's own destroy
+  # (all four Traffic-Analytics-enabled spokes plus bank-app-p1's AKS addon, all earlier in this
+  # chain) and before the container-owning root (platform/management) destroys its resource
+  # group. `needs: identity` is sufficient for ordering (identity itself needs connectivity,
+  # which needs security, ... down to synthetic - the same transitive-chain convention every
+  # other job in this file already relies on). target=all AND mode=terraform only, mirroring
+  # `databricks-precascade`'s own gating (mode=az-sweep never runs Phase 1 at all, and the
+  # API-level `az group delete` there already cascades whatever the RG contains - a second
+  # mechanism would be a duplicate, not a fix).
+  #
+  # NOT A GATE (ADR-072 decision 4, "not a gate", the same wiring `databricks-precascade` uses
+  # for `bank-data-p1`): a failure here is loud (the job itself reports red) but `management`'s
+  # own `if:` below does not read this job's result - `needs: attachment-sweep` is for ORDERING
+  # only. A residual left behind by a failure here surfaces instead as platform/management's own
+  # `prevent_deletion_if_contains_resources` error or a loud Phase 2/3 remnant, never as a
+  # silently-skipped mandatory layer.
+  attachment-sweep:
+    name: "Phase 1.5 - ATTACHMENT SWEEP (cross-root RP-attached objects)"
     needs: [guard, disarm, identity]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    environment: production-destroy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sweep cross-root RP-attached objects (NWTA DCE/DCR, ContainerInsights solution)
+        env:
+          MANAGEMENT_SUBSCRIPTION_ID: ${{ secrets.MANAGEMENT_SUBSCRIPTION_ID }}
+          CONNECTIVITY_SUBSCRIPTION_ID: ${{ secrets.CONNECTIVITY_SUBSCRIPTION_ID }}
+          IDENTITY_SUBSCRIPTION_ID: ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
+          SECURITY_SUBSCRIPTION_ID: ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
+          LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
+        run: bash scripts/teardown-attachment-sweep.sh
+
+  management:
+    needs: [guard, disarm, attachment-sweep]
     if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/management') }}
     uses: ./.github/workflows/_tf-root.yml
     with:
@@ -470,21 +582,77 @@ jobs:
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 10 of 11.
+      # ADR-066: chain position 10 of 10 (last). `needs` reads attachment-sweep (ADR-072 decision 4,
+      # ordering only, not a gate - see that job's own comment above) instead of `identity`
+      # directly; identity is still reached transitively (attachment-sweep itself needs it).
       manage_runner_ip: true
     secrets: inherit
 
+  # ADR-072 decision 6 AMENDS ADR-066: this root is no longer part of the mode=terraform
+  # PRIMARY target=all path. Its objects are overwhelmingly child objects of eleven container
+  # (MG) scopes with no cascading-container-delete equivalent inside Terraform's own per-object
+  # destroy model, while Phase 2 step 4 (teardown-az-sweep.sh, gated on remove_mg_hierarchy)
+  # already offers exactly that bulk primitive - live evidence: two rebuild cycles each applied
+  # exactly 537 objects cleanly after an MG-tree cascade, with zero `already exists` collisions.
+  # ADR-066 INV-1 ("all eleven Phase-1 layer destroys run and go green") NARROWS to INV-1':
+  # every root Phase 1 owns runs and goes green; this one is owned by the Phase 2 cascade and
+  # its completion is asserted by Phase 3 VERIFY, not by this job (see ADR-072 decision 6 and
+  # DECISIONS.md for the full ruling - this is a topology decision, not a tuning one).
+  #
+  # So at target=all this job's `if:` below no longer fires at all (the `inputs.target == 'all'`
+  # disjunct is REMOVED, not just left unreachable) - it now runs ONLY as an explicit single-root
+  # dispatch (`target=platform/management-groups`), which ADR-072 decision 6 explicitly keeps
+  # available "for an operator who wants provider-faithful, state-exact removal and is willing to
+  # own the wall clock".
+  #
+  # `destroy_timeout_minutes: "90"` is a DevSecOps addition (Defect 1, the six-hour-refresh-stall
+  # incident, teardown run 30685705802): measured from that run's own job log,
+  # `azapi_resource.policy_role_assignments` refreshed in tight batches of ~10 (Terraform's
+  # default parallelism) at almost EXACTLY one-hour intervals with zero logged errors in between -
+  # the signature of a silent client-side retry-with-backoff loop, not a hard failure (the
+  # DISARM-causes-403-on-a-deleted-scope hypothesis was TESTED against this same log and
+  # REFUTED: every MG scope involved was still alive throughout, and DISARM only deletes POLICY
+  # assignments, a different object type from the roleAssignments that stalled). The exact
+  # mechanism is UNVERIFIED (a leading candidate is azapi's own retry/timeout defaults - see
+  # WORKLOG for the full account) and is not fixed here; `terraform destroy` refreshes its
+  # ENTIRE state before issuing any delete, so a run killed mid-refresh completes ZERO deletes
+  # regardless of where the ceiling sits - trimming the ceiling cannot make this root's destroy
+  # succeed faster, only fail louder and sooner. 90 minutes is a judgment call (generous against
+  # every healthy destroy of this root on record, decisively short of the 6-hour GitHub Actions
+  # job default and of the point where the OIDC assertion itself becomes stale).
+  #
+  # NOTE ON MECHANISM: a job-level `timeout-minutes:` is NOT valid syntax here (GitHub Actions
+  # rejects `timeout-minutes` on any job whose body is `uses: <reusable workflow>` - "Unexpected
+  # value 'timeout-minutes'", confirmed against GitHub's own community discussion #50481 and
+  # reproduced independently by multiple reporters, 2026-08-01). `_tf-root.yml`'s "Terraform
+  # Destroy" step instead wraps the command in the coreutils `timeout` utility (present on
+  # ubuntu-latest) when this input is non-empty - see that workflow's own `destroy_timeout_minutes`
+  # input for the full mechanism. This is also STRICTLY BETTER than a job-level kill would have
+  # been: a shell-level timeout only terminates the destroy subprocess, so every later step in
+  # the SAME job (crucially, "Restore state SA firewall to Deny") still runs with a LIVE OIDC
+  # token, instead of dying at the exact instant the token itself goes stale (the "two ceilings
+  # that are the same number" failure mode this whole fix exists to break).
+  #
+  # Not applied to any other root - this codebase has at least one documented case of a
+  # LEGITIMATELY multi-hour create/destroy elsewhere (platform/identity's AADDS domain, LESSON
+  # 46), and a blanket short timeout would risk killing a genuinely progressing job rather than
+  # only a stalled one.
   management-groups:
     needs: [guard, disarm, management]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'platform/management-groups') }}
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && inputs.target == 'platform/management-groups' }}
     uses: ./.github/workflows/_tf-root.yml
     with:
       root: platform/management-groups
       action: destroy
       backend_rel: "../../"
       gh_environment: production-destroy
-      # ADR-066: chain position 11 of 11 (last).
+      # ADR-072 decision 6: no longer chain position 11 of 11 at target=all (it does not run
+      # there at all now) - reachable only via an explicit single-root dispatch. `needs:
+      # management` is retained so a hypothetical future re-widening has the right ordering
+      # already in place, and so this job's position in the file continues to read naturally
+      # after `management` even though the two no longer share a live target=all edge.
       manage_runner_ip: true
+      destroy_timeout_minutes: "90"
     secrets: inherit
 
   # Phase 2 - AZ SWEEP (ADR-054). Fallback for mode=az-sweep (state gone) AND a
@@ -744,3 +912,47 @@ jobs:
           echo "  # 2. Delete the OIDC app registration (SP lacks Graph rights to self-delete):"
           echo "  az ad app delete --id <oidc_client_id>"
           echo "See docs/cicd-deploy-teardown.md section 6 and bootstrap/README."
+
+  # Teardown Summary (DevSecOps fix, teardown run 30685705802, "Defect 3"). Runs ALWAYS, target=
+  # all only, and reads pure job-status data - no Azure calls, no OIDC login, no environment
+  # gate needed (least privilege: a job that only reports never needs a credential). Root cause
+  # this closes: that run's Phase 3 VERIFY PASSED (Azure genuinely verified clean) while two
+  # Phase 1 jobs had failed, and the run's overall conclusion (FAILURE, driven purely by GitHub's
+  # own job-conclusion aggregation) materially misrepresented what the run achieved - the same
+  # class of defect as a green run that did not mean what it said, inverted.
+  #
+  # THIS JOB CANNOT AND DOES NOT CHANGE THE OVERALL RUN CONCLUSION - see scripts/teardown-
+  # summary.sh's own header for why that is correct, not a limitation to work around: a genuine
+  # Phase-1 failure on a layer with no designed fallback (i.e. any layer other than
+  # platform/management-groups, ADR-072 decision 6) must keep failing the run loud, in full,
+  # exactly as today. What this job adds is a single, clearly-labelled place that distinguishes
+  # "estate verified clean, `platform/management-groups` correctly took the Phase 2 cascade path
+  # (INV-1')" from "a genuine, unexplained Phase 1 failure" from "Phase 3 VERIFY itself did not
+  # pass" - three different situations this run's own bare conclusion could not tell apart.
+  #
+  # `if: always()` (not `!cancelled()`): this is the one job in the file that is SUPPOSED to run
+  # and report even when everything upstream failed or was cancelled, precisely so an operator
+  # facing the worst-case run still gets an honest, structured account of what happened.
+  teardown-summary:
+    name: "Teardown Summary (run-outcome distinction)"
+    needs: [guard, disarm, databricks-precascade, synthetic, bank-data-p1, bank-app-p1, online-p1,
+            corp-a2, corp-a1, security, connectivity, identity, attachment-sweep, management,
+            management-groups, az-sweep, verify, state-reset]
+    if: ${{ always() && inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    # Least privilege: this job only reads job-status data GitHub Actions already computed - no
+    # Azure call, no OIDC login. Narrows away the workflow-level `id-token: write` it does not
+    # need (contents: read is enough for the checkout step below).
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Summarize run outcome
+        env:
+          ALL_RESULTS_JSON: ${{ toJSON(needs) }}
+          TARGET: ${{ inputs.target }}
+          MODE: ${{ inputs.mode }}
+          REMOVE_MG_HIERARCHY: ${{ inputs.remove_mg_hierarchy }}
+        run: bash scripts/teardown-summary.sh
