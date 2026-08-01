@@ -31,6 +31,111 @@
 
 <!-- Newest at the top. -->
 
+### OQ-069: Teardown's soft-deleted-workspace purge only ever looks at ONE named workspace in ONE subscription, and two soft-deleted Log Analytics workspaces are sitting in the MANAGEMENT subscription right now
+
+- **Raised:** 2026-08-01 (architect, while ruling ADR-072 on the `platform/management` teardown orphans)
+- **Section:** 8 (Standard Platform Components) / 10 (Pipeline & Tooling, teardown)
+- **Blocking:** **Yes for the rebuild's `platform/management` step.** Not blocking anything else, and
+  not blocking a teardown. It must carry a written disposition in the rebuild pre-clearance before
+  `platform/management` is applied, per the standing pre-clearance gate.
+- **Priority:** High (a rebuild inside the 14-day recovery window is the exposed case, and the window is
+  open now)
+
+**Question:**
+
+The operator verified live on 2026-08-01, after the `30685705802` teardown completed its Phase 2/3/4,
+that the SECURITY subscription holds **zero** soft-deleted Log Analytics workspaces and the MANAGEMENT
+subscription holds **two**.
+
+Teardown's purge step cannot reach them, and the reason is a design shape this estate has already ruled
+against once. `scripts/teardown-az-sweep.sh` step 7b (the OQ-063 purge) is scoped to
+`SECURITY_SUBSCRIPTION_ID` and filters `list-deleted-workspaces` down to a single hardcoded name,
+`SECURITY_LAW_WORKSPACE_NAME`, then asserts the resolved resource group equals
+`SECURITY_LAW_RESOURCE_GROUP_NAME` and aborts if it does not. Every one of those is correct FOR THE
+SECURITY WORKSPACE and structurally blind to any other. It is an enumerated single-instance list, which
+is exactly the mechanism ADR-062 ruled is not a control ("an enumerated list plus a written promise to
+maintain it is not a control"), applied to a class where a second instance has now actually appeared.
+
+Two things are genuinely unknown and should not be guessed:
+
+- **What the two workspaces are.** Candidates are the platform workspace itself
+  (`platform/management`), a Traffic Analytics or AMBA-adjacent workspace, or a `DefaultWorkspace-*`
+  the AKS addon can create when no workspace is supplied. Their names and resource groups decide
+  everything below and are one `az monitor log-analytics workspace list-deleted-workspaces
+  --subscription <management>` away.
+- **Whether a rebuild inside the recovery window recovers or collides.** Azure reserves a soft-deleted
+  workspace's name for the retention period. If the rebuild's `platform/management` apply recreates the
+  same name in the same resource group, the plausible outcomes are (a) the API silently RECOVERS the old
+  workspace, carrying its old `customerId`, its old linked solutions and its old data into a run that
+  believes it created something new, or (b) a hard create failure. **(a) is the dangerous one** and it
+  is not hypothetical in this estate: a recovered workspace with its ORIGINAL `customerId` also revives
+  the exact NWTA naming inheritance `docs/estate-bom.md` finding 1 identified and that ADR-072 decision
+  1 re-attributed to Traffic Analytics.
+
+**Options being considered:**
+
+- **A (recommended default): read first, then disposition in the pre-clearance, and only then decide the
+  code change.** One list call names the two workspaces. If either is the platform workspace, the
+  rebuild pre-clearance must carry an explicit GO/NO-GO on recover-versus-create with the expected
+  behaviour written down BEFORE `platform/management` is applied, per the standing rule that no first
+  apply proceeds without a written disposition. Cheap, correct order of operations, and it does not
+  commit to a mechanism before the facts are in.
+- **B: generalise step 7b from "the one named security workspace" to discovery across all five
+  subscriptions**, deleting any soft-deleted workspace whose resource group is estate-owned by the
+  existing `is_estate_owned` containment predicate. This is the ADR-062-shaped fix and is almost
+  certainly where this ends up. It is a DevSecOps change and should not be authored until A has
+  established what is actually there, so the predicate is written against real objects.
+- **C: leave it, and let the rebuild recover the workspaces.** Rejected as a default. It accepts option
+  (a) above as the plan, and a recovered workspace that Terraform believes it created is FM-1-adjacent:
+  state describing an object whose real history the state does not reflect.
+- **D: purge them by hand from the portal.** Rejected: teardown and estate mutation are CI/CD only
+  (standing user ruling). If they must go before a code change lands, that is an explicitly authorised,
+  dated, scoped operator exception in the ADR-068 decision-6 shape, not a console habit.
+
+### OQ-068: Container Insights on `bank-app-p1` uses the legacy workspace-key path (`use_aad_auth = false`), which is the specific reason a cross-root `Microsoft.OperationsManagement/solutions` object exists at all - should the estate move to the MSCI path that creates no such object?
+
+- **Raised:** 2026-08-01 (architect, ADR-072 corollary C3 - explicitly NOT decided in that ADR)
+- **Section:** 9 (Landing Zone Spokes) / 13 or a later O&M wave (where managed Prometheus lives)
+- **Blocking:** **No.** ADR-072 decision 4's sweep removes the object regardless of which path is
+  chosen, so nothing waits on this. It is a "should the coupling exist at all" question, not a
+  "how do we clean it up" question.
+- **Priority:** Medium
+
+**Question:**
+
+`landing-zones/bank-app-p1/aks.tf` enables the AKS monitoring addon with
+`addon_profile_oms_agent = { enabled = true, config = { log_analytics_workspace_resource_id = ...,
+use_aad_auth = false } }`. The file records why, and the reason was sound at the time: the module only
+wires the required MSCI data collection rule through its `onboard_monitoring` path, which also brings in
+managed Prometheus resources, and that was deferred to the B7 O&M wave.
+
+What was not priced at the time is that `use_aad_auth = false` is precisely the path that materialises a
+`Microsoft.OperationsManagement/solutions/ContainerInsights(<workspace>)` object inside the PLATFORM
+root's resource group. The `use_aad_auth = true` MSCI path does not create that object. So a build-time
+convenience decision in a spoke created a permanent cross-root coupling into a platform root - which is
+the ADR-072 decision 5 class, arriving through a single boolean.
+
+The question is whether to keep it. It is a live-behaviour change to a deployed workload (Container
+Insights ingestion path, authentication mode, and possibly a managed-Prometheus footprint), so it needs
+a plan bar and a wave, not a teardown ADR.
+
+**Options being considered:**
+
+- **A (recommended default): keep `use_aad_auth = false` for now, revisit inside the O&M wave that
+  lands managed Prometheus.** The coupling is now named, documented (ADR-072 C2's attachment-surface
+  table) and swept (ADR-072 decision 4), so its cost is bounded and visible. Flipping it now changes a
+  deployed monitoring path for a cleanliness benefit the sweep already delivers, and it would land
+  mid-rebuild, which LESSON 59 forbids.
+- **B: flip to `use_aad_auth = true` in the next `bank-app-p1` change.** Removes the cross-root object
+  at source, which is strictly better architecture under ADR-072 decision 5, and moves Container
+  Insights onto the current MSCI mechanism rather than the legacy workspace-key one. Cost: pulls managed
+  Prometheus resources into a wave that has not budgeted them, changes what the AVM module deploys, and
+  needs its own plan bar and pre-clearance. **Verify before adopting:** whether the pinned AKS module
+  version exposes a path to MSCI WITHOUT the managed-Prometheus fan-out. That has not been checked and
+  must not be assumed.
+- **C: drop Container Insights from `bank-app-p1` entirely.** Rejected as a default - it removes a
+  capability the demo narrative uses, to solve a teardown problem that is already solved.
+
 ### OQ-067: Who owns private-endpoint DNS zone groups when ALZ DINE and Terraform both write them, and what actually created the three Terraform-named diagnostic settings before any DINE deployment started?
 
 - **Raised:** 2026-07-31 (architect, ruling ADR-070 on the twice-failed `bank-data-p1` apply)
