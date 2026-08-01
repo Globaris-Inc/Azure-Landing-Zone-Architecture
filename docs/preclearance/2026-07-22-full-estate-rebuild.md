@@ -2250,3 +2250,394 @@ docs(preclearance): 2026-07-31 addendum B - bank-data-p1 Step 8 RETRY cleared GO
 PC-1DINE..PC-4DINE, Step 9 gated on PC-5DINE; full teardown NOT ordered (ADR-070 decision 3, runbook
 B1 not ADR-067); PC-8S private-DNS DINE row corrected
 ```
+
+---
+
+# 2026-08-01 REFRESH #4 - re-clearance against `banking` @ `3472f4c`, after the completed 14/14 rebuild, the teardown, and ADR-070 through ADR-073
+
+**Date:** 2026-08-01
+**Author:** cloud-solutions-architect
+**Type:** REFRESH of refresh #3 and addendum B. Append-only: nothing above this line was edited.
+**Repo state this refresh was computed against:** `banking` @ `3472f4c`. Written on branch
+`docs/preclearance-refresh-4`, cut off `origin/banking` at `3472f4c`.
+**Supersedes:** the per-root verdict table in refresh #3 (T0) and addendum B's U0 table.
+T1 through T9 are carried, amended where stated in V2 and V5.
+**Basis moved:** `7fc8930` -> `3472f4c`. Between them the full 14-step rebuild RAN AND COMPLETED,
+the estate was torn down, and PRs #64 to #86 merged.
+
+---
+
+## Why refresh #4 exists, and why refresh #3 cannot carry
+
+Refresh #3 cleared a rebuild that had not yet run. That rebuild has now run to completion, been torn
+down, and had four ADRs and a teardown-hardening batch merged on top of it. Three specific things
+invalidate a carry-forward:
+
+1. **Most of refresh #3's conditions were discharged by EXECUTION, and a teardown killed the evidence
+   for about half of them.** A condition that reads state Step 1 creates (PC-3C, PC-4C, PC-3X) is
+   discharged only for the estate lifetime it was read in. The MG tree is gone, so that evidence is
+   gone with it. A condition that reads a tenant-scoped or subscription-scoped fact (PC-3REG service
+   availability, PC-1REG allowed-locations) survives the teardown. V2 splits them on exactly that line
+   rather than treating "it passed last time" as uniform.
+2. **The apply path moved, in one direction nobody flagged and one that was expected.** The expected
+   one is ADR-070's exemption unit, which adds three addresses to `bank-data-p1`. The unflagged one is
+   that `envs/poc.tfvars` on `banking` is now in POST-REBUILD STEADY STATE, carrying two Step-12 and
+   Step-13 flags that are `true`. Dispatching Step 1 from `banking` as it stands today does not produce
+   the cleared plan. This is the finding of refresh #4 and it is V0's hard blocker.
+3. **ADR-071's permanent fix did NOT land.** Its interim two-applies rule is therefore still the
+   operating rule, and it is unbudgeted in the runbook's STOP matrix. V2 gives it a condition id so it
+   cannot trip the U5 hard stop by accident.
+
+---
+
+## V0. VERDICT
+
+**Whole-run verdict: GO-CONDITIONAL, with ONE hard blocker that is a two-line code change and must
+clear before Step 1 is dispatched.**
+
+### The blocker
+
+**PC-1TF (BLOCKING, cloud-engineer lane plus code-reviewer, before Step 1).**
+`envs/poc.tfvars` at `3472f4c` carries the estate's post-rebuild steady state, not its greenfield
+state. Two lines must be reverted in one reviewed PR merged to `banking` before any Step 1 dispatch:
+
+| Line | Value at `3472f4c` | Required for Steps 1-12 | What happens if it is not reverted |
+|---|---|---|---|
+| `envs/poc.tfvars:380` `enable_om_phase1` | `true` | **`false`** | `platform/management-groups` selects the `globaris-amba` architecture. Step 1's plan lands in the 700s instead of 537, which is the runbook's **B4 STOP** signature to the letter, and the AMBA DINE assignments reference `id-amba-prod-001` before `platform/management` has created it. This is the exact greenfield circularity PC-4R was written for. |
+| `envs/poc.tfvars:250` `enable_acr_kubelet_binding` | `true` | **absent** (root default `false`) | `landing-zones/bank-app-p1/acr.tf:45` `data.azurerm_kubernetes_cluster.aks_lookup` is gated on `var.enable_kubernetes_platform && var.enable_acr_kubelet_binding`. Both true on a greenfield estate means the data source resolves at PLAN time against a cluster that does not exist, the read 404s, and **Step 9's plan exits non-zero before anything is created**. This is PC-2S, the original hard code blocker of this whole document, regressed by a tfvars line. |
+
+Both are documented in the file's own comments as needing exactly this revert. Neither is enforced by
+anything. **The runbook's checks DO catch both** (PC-5X's second limb greps for
+`enable_acr_kubelet_binding = true` in `envs/poc.tfvars` and now MATCHES where it expects `CLEAR`;
+matrix B4 catches the 700s count), so this is a gate working as designed and finding a real defect,
+not a gate gap. What is stale is the runbook's **PC-4R row**, which asserts as already-confirmed fact
+that `envs/poc.tfvars` reads `enable_om_phase1 = false`. That sentence is now FALSE and an operator
+reading it would skip the check.
+
+PC-1TF discharges **PC-4R** and **PC-5X limb 2**, and re-arms **PC-1H** (the Step 13 flip becomes a
+re-merge rather than a first merge). Verify the dispatched `headSha` carries the revert (LESSON 33).
+
+### Everything else
+
+No other NO-GO, no other open code blocker, and no root whose behaviour I could not resolve from the
+repository at `3472f4c`. The conditional load is otherwise LOWER than refresh #3's, because the entire
+estate was created live by the ARM API 24 to 36 hours ago: every bar was measured, every service was
+proven available, and every lifecycle question was answered by an actual PUT rather than by a document.
+
+---
+
+## V1. Per-root verdict table, re-cleared against `3472f4c`
+
+| # | Root | R#3 verdict | **R#4 verdict** | Basis, and what the merged work changed |
+|---|---|---|---|---|
+| 1 | `platform/management-groups` | GO | **GO-CONDITIONAL (PC-1TF)** | **Changed, and only by tfvars.** No `.tf` in this root is in the `7fc8930..3472f4c` diff. R#3's reasoning holds unchanged and is now empirically confirmed twice (537 planned, 537 applied). What changed is that `enable_om_phase1 = true` on `banking` selects a different architecture. **ADR-072 has NO effect on this root's deploy path** - see V4. Bar 537, conditional on PC-1TF. |
+| 2 | `platform/management` | GO-CONDITIONAL | **GO-CONDITIONAL (PC-1M, PC-1TF, PC-1DIAG)** | **Tightened, by ADR-073.** `providers.tf` gains `permanently_delete_on_destroy = true`, verified against pinned azurerm 4.71.0 as read only in `resourceLogAnalyticsWorkspaceDelete`: **destroy-path only, zero plan or apply surface.** The real change is the precondition: two soft-deleted `law-platform-globaris-poc` entries under one ARM resource id currently sit in the management subscription, so **PC-1M is NOT satisfied**. At flag-true this root also plans 39 rather than 36. |
+| 3 | `platform/security` | GO-CONDITIONAL (PC-2R) | **GO-CONDITIONAL (PC-2R, PC-1DIAG)** | **R#3's verdict holds unchanged.** Not one file in this root is in the diff. PC-1SEC is superseded by the strictly wider PC-1M. PC-2R carries: the Defender plans were re-armed by the rebuild and the teardown's disarm is the thing that must be re-read, not assumed. |
+| 4 | `platform/connectivity` | GO-CONDITIONAL | **GO-CONDITIONAL (PC-3C, PC-4C, PC-3X, PC-1DIAG)** | **R#3's verdict holds unchanged; not one file in this root is in the diff.** All three carried conditions read state that Step 1 or Step 4 creates, so the 2026-07-31 discharges died with the teardown and every one must be re-read this cycle. 696 planned, 696 applied, both firewalls live in centralus with zones 1,2,3 confirmed. |
+| 5 | `landing-zones/corp-a1` | GO-CONDITIONAL | **GO-CONDITIONAL (PC-4C)** | Unchanged, untouched by the diff. PC-3REG is DISCHARGED and retired. |
+| 6 | `landing-zones/corp-a2` | GO-CONDITIONAL | **GO-CONDITIONAL (PC-4C)** | Unchanged, untouched by the diff. |
+| 7 | `landing-zones/online-p1` | GO-CONDITIONAL | **GO-CONDITIONAL (PC-4C, PC-1DIAG)** | Unchanged, untouched by the diff. Carries one diagnostic setting (`diag-appgw-to-platform-law`), so it is inside the PC-1DIAG class. |
+| 8 | `landing-zones/bank-data-p1` | GO-CONDITIONAL | **GO-CONDITIONAL (PC-1S, PC-1BAR-8, PC-1DIAG)** | **The one root whose PLAN BAR MOVED.** ADR-070 adds `azurerm_resource_group_policy_exemption.dine_ownership` (2 instances) plus `time_sleep.wait_dine_ownership_exemptions` (1 instance), all gated on `enable_dine_ownership_exemptions`, default `true`, not set in tfvars. The measured 73 was taken BEFORE PR #67 merged. **New bar 76.** Addendum B's PC-1DINE..PC-4DINE are all DISCHARGED by execution. |
+| 9 | `landing-zones/bank-app-p1` Pass 1 | GO-CONDITIONAL | **GO-CONDITIONAL (PC-1TF, PC-4S', PC-4REG, PC-1DIAG)** | **Bar does NOT move.** The 67 was measured AFTER PR #67 merged (WORKLOG states this explicitly and gives the reason), so the same +3 exemption unit is already inside it. PC-1TF is load-bearing here in the strongest sense: unreverted, this root does not plan at all. PC-1DIAG matters most here - five diagnostic settings sit behind a 60 to 180 minute APIM create. |
+| 10 | `platform/identity` Pass 1 | GO | **GO** | Untouched by the diff. Bar is **16**, not the runbook's 26; the 26 is the single-pass total. RC-2 and the AADDS centralus build are both discharged by execution. |
+| 11 | `platform/identity` Pass 2 | GO | **GO** | Untouched. Bar 10. Entra objects carry no region. |
+| 12 | `landing-zones/bank-app-p1` Pass 2 | GO-CONDITIONAL | **GO-CONDITIONAL (PC-1TF re-merge)** | Bar 1. The tfvars line PC-1TF removes is the line this step re-adds. Same reviewed-PR shape as before. Anything touching the cluster or the registry itself is a STOP. |
+| 13 | `platform/management` (B7) | GO-CONDITIONAL | **GO-CONDITIONAL (PC-1H re-merge, PC-2H)** | Bar 3. `enable_om_phase1 = true` is re-merged here, after Step 12 is green, exactly as PC-1H always specified. |
+| 14 | `platform/management-groups` (B7) | GO-CONDITIONAL | **GO-CONDITIONAL (PC-1H, PC-2H)** | Bar 223, plus the 2 permitted `time_sleep` replacement destroys and the documented 70 `PolicyRoleAssignmentError` warnings. **ADR-072 has no effect on this step** - see V4. |
+
+**Movement summary:** one root gains a hard blocker that is shared with the whole run (1, and through
+it 9 and 12), one root's bar moves (8, +3), one root's precondition is now known-unsatisfied (2, PC-1M),
+and six roots are byte-identical to the state refresh #3 cleared. No root moved to NO-GO.
+
+---
+
+## V2. Condition ledger: discharged, carried, changed, new
+
+### DISCHARGED and RETIRED
+
+| ID | Why it is discharged |
+|---|---|
+| **PC-1SEC** | **SUPERSEDED by PC-1M, and the framing in the brief is correct.** PC-1SEC asked one subscription (security) one question and blocked Step 3. ADR-073 decision 5a establishes that the class is estate-wide and that the management subscription, not security, is where it actually bit. PC-1M is strictly wider on BOTH axes: five subscriptions instead of one, and it blocks **Step 2** rather than Step 3, which is earlier in the sequence. Anything PC-1SEC would have caught, PC-1M catches sooner. |
+| **PC-3REG** | Discharged live 2026-07-31: all six provider surfaces confirmed available in `centralus`, and then every one of the six actually built (APIM, Databricks, Service Bus, Event Hubs, App Gateway, Log Analytics). Provider-level regional availability is not affected by a teardown. |
+| **PC-2REG** | Discharged in full. All five listed bars were re-measured under `centralus`-primary and every one matched exactly. Its standing successor is **PC-1BAR** in V3, which covers all fourteen rather than five. |
+| **PC-2S** | Discharged by execution (Steps 9 and 12 both green). **But note it is REGRESSIBLE by tfvars alone, which is what PC-1TF exists to prevent.** The code gate is correct; the configuration around it is not. |
+| **PC-1DINE, PC-2DINE, PC-3DINE, PC-4DINE, PC-5DINE** | All discharged by execution. ADR-070 merged, Step 8 recovered green, Step 9 gated correctly and then went green. |
+| **PC-1Y** | Discharged live by the operator today and treated as sourced: 1 management group (Tenant Root only), no estate resource groups in any of the five subscriptions beyond `NetworkWatcherRG`, the bootstrap state RG and the landingzones Cloud Shell stray (the last survives teardown by design), and all 11 state blobs at the canonical empty baseline. |
+
+### CARRIED UNCHANGED, and why the teardown did not discharge them
+
+Every condition in this block reads state that **Step 1 or a later step creates**. Its 2026-07-31
+pass expired when that estate was destroyed. Each must be re-read this cycle, at the same point in the
+sequence, with the same bar.
+
+| ID | Bar | Read it |
+|---|---|---|
+| **PC-2R** | The 8 estate-managed Defender plans read `Free` in the security subscription | before Step 3 |
+| **PC-3C** | `Enable-DDoS-VNET` reads `DoNotEnforce` at BOTH the connectivity and landingzones MGs | after Step 1, before Step 4 |
+| **PC-4C** | 89 private DNS zones exist, and the 11 the spokes look up resolve | after Step 4, before Step 5 |
+| **PC-3X** | Firewall private IPs read `10.0.0.4` (primary) and `10.1.0.4` (DR) | after Step 4 |
+| **PC-1S** | Zero subscription-scoped policy exemptions in the landingzones subscription | before Step 8. Load-bearing: `bank-data-p1` CREATES one, so a survivor collides |
+| **PC-2H** | `platform/management` (Step 13) precedes `platform/management-groups` (Step 14), MI verified live between them | Steps 13-14 |
+| **PC-4REG** | vCPU watch-item, NOT a blocker | Central US Total Regional limit is 10 and `standardDSv4Family` is 10. AKS is 6 of 10 steady, 8 of 10 at surge. **The rebuild proved it fits: zero quota errors on the Step 9 AKS create.** Quota is released by the teardown and the limit is unchanged, so the same margin applies. Pre-agreed disposition on a quota error is unchanged: do NOT retry, set `enable_kubernetes_platform = false` via a reviewed one-line PR, ship the spoke network-only |
+
+### CHANGED
+
+| ID | Change |
+|---|---|
+| **PC-1REG -> PC-1REG'** | **Discharged in substance, but the QUERY SHAPE is now known to be incomplete and that is a finding.** Discharged in substance because 537 MG-scope objects and a full estate in `centralus`, including two resource-group creates in `centralus`, applied green on 2026-07-31 under this exact configuration. **Incomplete because this tenant demonstrably carries a DENY-shaped location policy at tenant root that PC-1REG's query cannot see:** `sys.blockwesteurope` is enforcing at tenant root with no `notScopes` (recorded in the 2026-07-31 rebuild-complete WORKLOG entry as a standing blocker for `enable_synthetic_workload`). PC-1REG filters on `contains(to_string(parameters),'listOfAllowedLocations')`, which matches an ALLOW-LIST policy only. **PC-1REG': enumerate ALL policy assignments at Tenant Root Group with `--disable-scope-strict-match` and inspect for a location constraint of EITHER shape. Bar: no assignment that denies `centralus` or `eastus2`.** Severity drops to a cheap Step 0 confirm rather than a hard gate, because execution has already answered the question for both regions the estate uses; the widening is so the next region change is not cleared by a query that structurally cannot fail. |
+| **PC-2X -> PC-2X'** | Carried unchanged in its own right (re-set `PLATFORM_LAW_CUSTOMER_ID` after Step 2; the command reads names that carry no region token). **ADR-073 decision 5b adds a second assertion at the same point:** in the same pass as the `workspace show`, assert the workspace's `location` reads `centralus`. It is a SECONDARY detector, not the control - PC-1M is the control - and it costs one query. |
+| **PC-4S -> PC-4S'** | Carried, with refresh #3 amendment 3's predicted inversion **now realised**. The runbook's purge command hardcodes `--location eastus2`. This rebuild created and destroyed an APIM instance in `centralus`, so a surviving soft-delete is now in `centralus` and the hardcoded value is wrong in the other direction, exactly as amendment 3 warned. **PC-4S': check BOTH regions, and read the location from the `deletedservices` response rather than hardcoding it.** Bar unchanged: zero soft-deleted `apim-bank-app-p1-globaris-poc`, before Step 9. |
+| **PC-5X** | Limb 1 (the code gate exists in `variables.tf` and `acr.tf`) **PASSES** at `3472f4c`. Limb 2 (the tfvars flip is NOT merged) **FAILS**. Folded into PC-1TF. |
+| **PC-1H** | Unchanged in substance and INVERTED in operation. The `enable_om_phase1 = true` flip is already merged, so PC-1H's obligation becomes: PC-1TF reverts it before Step 1, and PC-1H re-merges it before Step 13. |
+| **PC-4R** | Its runbook row asserts as confirmed fact something that is now false. Must be re-read, not trusted. Discharged by PC-1TF. |
+
+### NEW
+
+| ID | Blocks | Bar |
+|---|---|---|
+| **PC-1TF** (BLOCKING) | **Step 1** and, through it, the whole run | The two `envs/poc.tfvars` reverts in V0, merged to `banking`, and the dispatched `headSha` carries them. A grep of `origin/banking -- envs/poc.tfvars` for `enable_om_phase1` and for `enable_acr_kubelet_binding = true` expects exactly one line total, `enable_om_phase1 = false`. |
+| **PC-1M** (BLOCKING) | **Step 2** | `az monitor log-analytics workspace list-deleted-workspaces --subscription <sub>` for **all five** estate subscriptions returns `[]` from every one. Not "the security one is clean", not "the name I expected is gone" - **empty from all five**. **Currently NOT satisfied:** two `law-platform-globaris-poc` entries (one `eastus2` created 2026-07-07, one `centralus` created 2026-07-31) sit in the management subscription under an identical ARM resource id. A teardown dispatch carrying the ADR-073 decision-4 discovery sweep is in flight to purge them. **The completion check must be a `deletedWorkspaces` RE-LIST, never an ARM GET on the shared id** (ADR-073 gate D: a GET on that id returns 404 after the FIRST purge while the second entry is still soft-deleted, producing a false PASS). Carry PC-1SEC's second half forward too: confirm `rg-management-globaris-poc` and `rg-security-globaris-poc` do not exist at all. |
+| **PC-1BAR** (BLOCKING, per root) | every root | The fourteen bars in V3, with the unit stated. Rule 1 unchanged: a delta of even ONE against a bar certified unchanged is a STOP requiring a fresh architect disposition, never a silent bar update. |
+| **PC-1DIAG** (BUDGETED, not a blocker, but it MUST be pre-agreed) | Steps 2, 3, 4, 7, 8, 9 | **ADR-071's permanent fix did NOT land.** Verified at `3472f4c`: `teardown.yml` carries a Phase 0.5 **Databricks** precascade and a Phase 1.5 **attachment** sweep, and **no Phase 0.5 diagnostic-setting live-host sweep**. `scripts/teardown-attachment-sweep.sh` is the ADR-072 job, not the ADR-071 one. So ADR-071 decision 3's INTERIM two-applies rule is still the operating rule for this rebuild. **Pre-agreed disposition, so nobody improvises at 2am:** any root creating `azurerm_monitor_diagnostic_setting` may fail its FIRST apply with `already exists` on those settings and only those settings. Recovery is runbook **B1** - confirm no `PolicyDeployment_*` is mid-flight on the target RG (90-minute pathological cap), DELETE each named survivor, confirm absent by direct GET, then **plan, scan, apply** (ADR-060, never a bare apply). **This class does NOT count toward U5 and does NOT fire ADR-067.** What DOES fire U5 is a second failure of the same root on a DIFFERENT class, or a third failure on this one. Highest exposure is Step 9, where five settings sit behind a 60 to 180 minute APIM create; that cost is banked, not repeated, because nothing is rolled back. |
+
+---
+
+## V3. The plan bars: all fourteen, with the unit stated
+
+**THE UNIT, stated once and applying to every row: each bar is the raw `Plan: N to add` integer,
+AVM telemetry pseudo-resources INCLUDED.** This is the single most important line in the section. The
+runbook's spoke bars were authored as real-resource ranges and its platform bars as raw totals, and
+mixing the two is what made `bank-data-p1` read as a 13-over STOP when it was in fact at the bottom of
+its intended range. A bar whose unit is unstated cannot function as a gate.
+
+All fourteen were MEASURED during the rebuild, all fourteen matched their plan exactly at apply, and
+the whole set is now the verified `centralus`-primary precedent.
+
+| Step | Root | Measured 2026-07-31 | **R#4 bar** | Status |
+|---|---|---|---|---|
+| 1 | `platform/management-groups` | 537 | **537** | HOLDS, conditional on PC-1TF. At `enable_om_phase1 = true` this becomes roughly 760, which is matrix **B4**. |
+| 2 | `platform/management` | 36 | **36** | HOLDS, conditional on PC-1TF. At flag-true it becomes **39** (36 plus Step 13's 3). |
+| 3 | `platform/security` | 48 | **48** | HOLDS. No file in this root is in the `7fc8930..3472f4c` diff. |
+| 4 | `platform/connectivity` | 696 | **696** | HOLDS. No file in this root is in the diff. |
+| 5 | `landing-zones/corp-a1` | 24 | **24** | HOLDS. Untouched. |
+| 6 | `landing-zones/corp-a2` | 24 | **24** | HOLDS. Untouched. |
+| 7 | `landing-zones/online-p1` | 26 | **26** | HOLDS. Untouched. |
+| 8 | `landing-zones/bank-data-p1` | 73 = **49 real + 24 AVM telemetry** (12 `modtm_telemetry` + 12 `random_uuid.telemetry`) | **76 = 52 real + 24 telemetry** | **MOVED, +3.** The 73 was measured on a plan taken BEFORE PR #67 (`68080b8`) merged. ADR-070 adds exactly three addresses to this root. |
+| 9 | `landing-zones/bank-app-p1` Pass 1 | 67 | **67** | HOLDS. The 67 was deliberately measured AFTER PR #67 merged, so the same +3 is already inside it. Verified in the file: 2 exemption instances plus 1 `time_sleep`, identical shape to `bank-data-p1`. |
+| 10 | `platform/identity` Pass 1 | 16 | **16** | HOLDS. **Not 26.** The runbook's 26 is the single-pass total; Pass 1 is 16. |
+| 11 | `platform/identity` Pass 2 | 10 | **10** | HOLDS. |
+| 12 | `landing-zones/bank-app-p1` Pass 2 | 1 | **1** | HOLDS. Requires the PC-1TF line re-merged at Step 12. |
+| 13 | `platform/management` (B7) | 3 | **3** | HOLDS. Requires `enable_om_phase1 = true` re-merged at Step 13. |
+| 14 | `platform/management-groups` (B7) | 223 | **223** | HOLDS. Plus the 2 permitted `time_sleep` replacement destroy halves and exactly 70 `PolicyRoleAssignmentError` warnings (the documented U6 / OQ-021 bar). |
+
+### Which merged change could move which bar, stated explicitly
+
+| Merged work | Bar effect | Basis |
+|---|---|---|
+| **ADR-070 exemption unit** | **+3 to Step 8 ONLY.** Already inside Step 9's 67. | Read at `3472f4c`: `azurerm_resource_group_policy_exemption.dine_ownership` `for_each` over a static 2-key map, plus `time_sleep.wait_dine_ownership_exemptions` `for_each = toset(["this"])`, both gated on `var.enable_dine_ownership_exemptions`, `default = true`, and **absent from `envs/poc.tfvars`** so the default governs. The rest of ADR-070's diff across `acr.tf`, `aks.tf`, `apim.tf`, `messaging.tf`, `ai.tf`, `databricks.tf`, `datalake.tf` is comments plus one `depends_on` edge each. A `depends_on` is a graph edge and creates no address. |
+| **ADR-072 attachment sweep** | **ZERO.** It is a teardown job. | The whole of ADR-072's implementation is in `.github/workflows/teardown.yml` and `scripts/teardown-attachment-sweep.sh`. Neither is on the deploy path. |
+| **ADR-073 `permanently_delete_on_destroy`** | **ZERO.** It governs destroy only. | `platform/management/providers.tf` gains a `features` block. Verified against pinned azurerm 4.71.0: the flag is read only in `resourceLogAnalyticsWorkspaceDelete`, where it sets `Force` on the delete call. No create, read or update behaviour changes and it produces no diff on an existing resource. |
+| **ADR-073 discovery-based purge** | **ZERO on any plan.** It changes the PRECONDITION, which is PC-1M. | `scripts/teardown-az-sweep.sh` step 7b plus `scripts/teardown-common.sh`. |
+| **`_tf-root.yml` `destroy_timeout_minutes`** | **ZERO.** | New optional input, `default = ""`, wired only into the `action == 'destroy'` step. The plan and apply steps are byte-identical. |
+| **`require-worklog` PreToolUse gate** | **ZERO on Azure.** | `.claude/hooks/require-worklog.sh` plus `.claude/settings.json`. It blocks an agent-issued CI dispatch when the previous dispatch is not written up. It is an agent-lane forcing function with no Azure surface, and it has **no override by design** - budget the thirty seconds between dispatches. |
+| **`envs/poc.tfvars` two flags** | **The only merged change that moves a bar, and it moves two of them catastrophically.** | Step 1 to roughly 760 (B4 STOP); Step 9 to a non-zero plan exit. PC-1TF. |
+
+---
+
+## V4. The Step 14 / ADR-072 interaction
+
+**Answer: ADR-072 decision 6 has NO effect on the DEPLOY path for Step 1 or Step 14. Neither step's
+plan, apply, bar or ordering changes. What it changes is the WARRANT behind Step 1's greenfield
+precondition, and that warrant is satisfied today by direct evidence.**
+
+**Why there is no deploy-path effect, verified rather than reasoned.** ADR-072 decision 6 amends
+ADR-066 decision 1 and narrows INV-1 to INV-1'. Both are statements about which TEARDOWN mechanism
+owns which root. The implementation is entirely in `teardown.yml`'s job chain and `needs` graph. Steps
+1 and 14 both dispatch `platform/management-groups` through `deploy.yml` into `_tf-root.yml` with
+`action=apply`, and `_tf-root.yml`'s only change in `7fc8930..3472f4c` is a new optional
+`destroy_timeout_minutes` input, defaulted empty and wired exclusively into the `action == 'destroy'`
+step. There is no path by which a teardown job graph reaches an apply.
+
+**What it DOES affect, stated precisely so it is not read as "nothing changed".**
+
+1. **The warrant for Step 1's greenfield precondition is now weaker in kind, though not in this
+   instance.** Step 1's 537 clean-create bar depends on the MG tree and all 537 policy objects being
+   absent. That used to be guaranteed by a per-object, state-exact `terraform destroy` of this root.
+   It is now guaranteed by the ARM management-group cascade. **ADR-072 is explicit and correctly
+   modest about what the cascade proves:** it is evidence that the objects do not COLLIDE with a
+   rebuild, which is the operative property under ADR-057, and it is expressly NOT a proof that every
+   ARM object is purged. The practical consequence is that the operative check moves from "that root's
+   destroy job went green" to two direct reads: **Step 0 confirms one management group in the tenant
+   and the state blob at the empty baseline** (the operator has confirmed both), and **Step 1's plan
+   reads exactly 537 to add, 0 change, 0 destroy, 0 replace, 0 import, 0 `already exists`.** Those two
+   together are a stronger test than a green job anyway, because they test the property directly.
+2. **`platform/management-groups`'s Phase 4 state-blob reset now comes from the VERIFY-evidence
+   fallback, not from its own job success.** Under INV-1' this root has no Phase 1 job to succeed. The
+   operator confirms all 11 blobs are at the canonical empty baseline, so this is discharged in fact.
+   Worth naming because the mechanism that produced it changed.
+3. **Step 14 itself is untouched in every respect.** Step 14 is an increment on a LIVE estate that
+   Step 1 created in the same rebuild. It never depended on any teardown mechanism, so nothing about
+   its 223-add bar, its 2 permitted `time_sleep` replacements, its 70 `PolicyRoleAssignmentError`
+   warnings, or PC-2H's ordering gate moves.
+
+**One thing PC-1TF and ADR-072 do NOT interact over, checked because it looks like they might.** The
+`enable_om_phase1` revert changes which ARCHITECTURE `platform/management-groups` selects, and
+ADR-072 changes which MECHANISM destroys it. Those are different lifecycle phases of the same root and
+they do not compose into a third failure mode: the cascade deletes management groups and their child
+objects irrespective of which architecture definition created them, which is precisely why the same
+cascade cleanly preceded a 537-add Step 1 twice.
+
+---
+
+## V5. Apply-path drift `7fc8930..3472f4c`, and what carries from T1 to T9
+
+**14 files touch `.tf`, `.tfvars`, `.hcl` or `.json`. Classified on the same axis T2 used.**
+
+| Class | Files | Effect on the apply |
+|---|---|---|
+| **A. Changes what gets PUT** | **1**: `envs/poc.tfvars` | `enable_acr_kubelet_binding = true` added, `enable_om_phase1` `false` to `true`. **This is the whole functional drift, and it is PC-1TF.** |
+| **B. Adds addresses to one root** | **2**: `landing-zones/bank-data-p1/policy_exemptions.tf`, `landing-zones/bank-app-p1/policy_exemptions.tf`, plus their `variables.tf` | +3 addresses each. Step 9's 67 already contains its three; Step 8's 73 does not, hence 76. |
+| **C. Graph edges and comments** | **7**: `bank-app-p1/{acr,aks,apim,messaging}.tf`, `bank-data-p1/{ai,databricks,datalake}.tf` | One `depends_on` edge each (or, for `databricks.tf`, a comment explaining a DELIBERATE non-edge) plus prose. Zero new addresses. |
+| **D. Destroy-path only** | **1**: `platform/management/providers.tf` | Provider `features` block read only in the delete path. |
+| **E. Off the Azure path entirely** | `.claude/settings.json` | Hook registration. |
+
+**Refresh #3's T1 through T9 carry as follows.** T3's five-bar certification is SUPERSEDED by V3's
+fourteen. T6's verified-versus-assumed is REPLACED by V7. T4's lifecycle audit is superseded by V6.
+T5's runbook amendments 1 to 6 stand, with amendment 3's predicted inversion now realised (PC-4S').
+T7 (the purge-protected Key Vault residue) carries unchanged and gains a fifth member from this
+rebuild cycle, which is the monotonic accumulation T7 predicted. T8's findings F3, F4, F5, F7, F8, F9,
+F10 remain OPEN; F6's amendments 1 to 3 should land with the PC-1TF PR since the runbook is being
+touched anyway. T9 carries. Addendum B's U0, U1 and U3 are discharged by execution; **U2's plan-scan
+shape and U4's PC-8S correction both carry unchanged.**
+
+---
+
+## V6. Lifecycle audit delta (LESSON 40/41)
+
+**The governing audit was run 2026-07-21 and re-checked 2026-07-30. It is 2 days old, well inside the
+14-day window, so this is a delta rather than a re-derivation. Next full re-audit remains due
+2026-08-04.**
+
+**The delta is dominated by one fact that outranks any document check: the entire estate, roughly
+1,721 resources, was created live by the ARM API on 2026-07-31, 14 steps out of 14 green.** Every
+resource type, SKU, plan, agent and mechanism in the deployed estate was accepted by the live API
+within the last 36 hours. That is the strongest possible form of the evidence a lifecycle audit exists
+to approximate, and it retires the audit's residual risk for every type the estate actually builds.
+
+**What that evidence does NOT cover, named rather than implied:**
+
+- The gated-off surfaces, which were not exercised and whose audit entries carry unchanged: `enable_sql`
+  and `enable_app_service` (ADR-031 / ADR-032, subscription offer caps, not lifted by the region flip),
+  `enable_synthetic_workload`, the VPN gateway, the DNS Private Resolver and Bastion.
+- Two dated items already on the register and still future-dated: Foundational CSPM's opt-in move on
+  2026-10-27, and the Defender `AI` plan free-trial conversion around 2026-08-15 (OQ-052).
+- **I did not re-run web-sourced lifecycle checks this pass.** Stated plainly. The justification is the
+  36-hour-old live apply, not diligence. If dispatch slips past **2026-08-04**, the full audit is due
+  and this shortcut expires.
+
+**One standing lifecycle-adjacent blocker, recorded because it is invisible to every repo grep:**
+`sys.blockwesteurope` is enforcing at tenant root with no `notScopes`, and `synthetic/variables.tf:63`
+defaults `red_team_geo_location = "westeurope"`. Those PUTs would pass `validate`, pass `plan` and be
+denied at apply. Not in scope for this rebuild (`enable_synthetic_workload = false`), and it is the
+live proof behind PC-1REG'.
+
+**Module and provider pins: UNCHANGED.** No `.terraform.lock.hcl` and no module `version =` is in the
+`7fc8930..3472f4c` delta. `azurerm` stays pinned at 4.71.0 by every root's committed lock file.
+
+---
+
+## V7. VERIFIED vs ASSUMED (this replaces T6)
+
+### Verified LIVE by the operator lane, treated as sourced
+
+Greenfield estate: 1 management group (Tenant Root only); no estate resource groups in any of the five
+subscriptions except `NetworkWatcherRG`, the bootstrap state RG and the landingzones Cloud Shell stray
+(the last survives teardown by design); all 11 state blobs at the canonical empty baseline. Two
+soft-deleted `law-platform-globaris-poc` workspaces in the management subscription sharing one ARM
+resource id, with a purge dispatch in flight.
+
+### Verified by me, from the repository, at `3472f4c`
+
+The complete `7fc8930..3472f4c` diff and its per-file disposition (V5); that `envs/poc.tfvars` line 380
+reads `enable_om_phase1 = true` and line 250 reads `enable_acr_kubelet_binding = true`; that
+`landing-zones/bank-app-p1/acr.tf:45` gates the AKS data source on
+`var.enable_kubernetes_platform && var.enable_acr_kubelet_binding` so both-true on greenfield is a
+plan-time 404; that both `policy_exemptions.tf` files add exactly 2 exemption instances plus 1
+`time_sleep` instance, gated on a variable defaulting `true` and absent from tfvars; that the seven
+other spoke `.tf` changes are one `depends_on` edge and prose; that
+`platform/management/providers.tf`'s new `features` block governs the destroy path only; that
+`_tf-root.yml`'s only change is a `destroy_timeout_minutes` input defaulted empty and wired solely into
+the destroy step, leaving plan and apply byte-identical; that **`teardown.yml` carries a Phase 0.5
+Databricks precascade and a Phase 1.5 attachment sweep and NO ADR-071 diagnostic-setting sweep**; that
+no lock file and no module version moved; that the fourteen measured bars are as recorded in the
+rebuild-complete WORKLOG table; and that the `bank-app-p1` 67 was measured after PR #67 while the
+`bank-data-p1` 73 was measured before it.
+
+### NOT verified, because it requires live Azure and I am read-only on it
+
+| ID | What must be proved | Owner | Blocks |
+|---|---|---|---|
+| **PC-1M** | `deletedWorkspaces` empty in all five subscriptions, confirmed by RE-LIST not by ARM GET; both platform RGs absent | operator | **Step 2** |
+| **PC-1REG'** | No tenant-root assignment denying `centralus` or `eastus2`, in either allow-list or deny-list shape | operator | advisory, Step 0 |
+| **PC-2R** | The 8 estate-managed Defender plans read `Free` | operator | Step 3 |
+| **PC-3R** | `Microsoft.CostManagementExports` is `NotRegistered` in the management subscription | operator | Step 2 |
+| **PC-3C** | `Enable-DDoS-VNET` reads `DoNotEnforce` at BOTH MGs | operator | Step 4 |
+| **PC-4C / PC-3X** | 89 zones; firewall IPs `10.0.0.4` / `10.1.0.4` | operator | Steps 5-9 |
+| **PC-1S** | Zero subscription-scoped policy exemptions in landingzones | operator | Step 8 |
+| **PC-4S'** | Zero soft-deleted APIM, checked in BOTH regions | operator | Step 9 |
+| **PC-1BAR** | All fourteen bars re-measured and recorded | operator | every root |
+| Live policy matrix at every ancestor MG scope | Structurally unreadable below Tenant Root until Step 1 creates the tree. PC-1REG' covers the one scope that exists now; PC-3C and a re-run at `globaris` cover it after Step 1 | operator | Steps 2, 4 |
+| Tenant prerequisites | CI SP role bindings, RP registrations, federated credentials, identity licensing. Step 1 IS the live confirmation and fails loud before any estate resource is touched. **Strengthened this cycle:** the identical set carried a full 14-step rebuild 36 hours ago | operator | Step 1 |
+| GitHub known-issues sweep | Open `azurerm` and AVM issues at 4.71.0 across the ten roots. **I did not sweep this pass either.** Named rather than implied; the 14/14 green rebuild is partial mitigation, not a substitute | architect / operator | advisory |
+| Whether the in-flight teardown's purge actually cleared both entries | This is PC-1M and it is the reason PC-1M is written as NOT satisfied | operator | Step 2 |
+
+---
+
+## V8. Carried non-blocking items, explicitly NOT resolved here
+
+Listed so they are visible and so nobody reads their absence from the condition ledger as closure.
+Each is out of scope for refresh #4 by instruction.
+
+1. **The stale `ip_rules` entry on the state storage account.** Carried, non-blocking.
+2. **The gate-B boundary test gap in the new ADR-073 discovery purge.** Carried, non-blocking; it is a
+   test-coverage question about the blast-radius cap, not a correctness finding against the purge.
+3. **Extending OQ-063 to `platform/management`.** Superseded in mechanism by ADR-073 decision 6, which
+   has merged; the bookkeeping of folding OQ-063's text is carried, non-blocking.
+4. **T8's open findings F3, F4, F5, F7, F8, F9, F10.** All carried unchanged. F4 gains weight: the
+   probe still has no soft-delete class, and PC-1M is precisely the check that class would automate.
+
+---
+
+## V9. Decisions and open items
+
+- **No new ADR.** ADR-070 through ADR-073 are merged and are not re-ruled here. ADR-057, ADR-060,
+  ADR-061, ADR-066 (as amended to INV-1'), ADR-067, ADR-068 and ADR-069 all govern unchanged.
+- **OQ-070 raised** (this pass): `envs/poc.tfvars` is a single-state file describing a POST-rebuild
+  estate, so `banking` is not greenfield-dispatchable by default and the repo's own default branch
+  carries a latent Step-1 and Step-9 failure between rebuilds. Options and a recommended default are in
+  `OPEN-QUESTIONS.md`.
+- **Runbook amendments handed to DevSecOps**, to land with the PC-1TF PR since the runbook is open
+  anyway: correct the stale PC-4R row (it asserts `enable_om_phase1 = false` as confirmed fact);
+  widen PC-1REG to PC-1REG'; fix PC-4S's hardcoded `--location eastus2`; correct Step 10's bar from 26
+  to 16 for Pass 1; state the `Plan: N to add` unit on every bar; move Step 8's bar to 76; add PC-1M
+  before Step 2 and PC-1DIAG's B1 budget with its explicit U5 carve-out.
+- **PC-1DIAG is the item most likely to be forgotten**, because ADR-071 is written as though its fix
+  had landed. It has not. Until the Phase 0.5 diagnostic sweep exists, ADR-071's T3 prediction stays
+  untested and the two-applies rule stays in force.
+
+---
+
+## Proposed commit message (refresh #4)
+
+```
+docs(preclearance): 2026-08-01 refresh #4 - re-clear the full-estate rebuild against 3472f4c after the
+completed 14/14 rebuild and teardown; whole-run GO-CONDITIONAL on ONE new hard blocker PC-1TF
+(envs/poc.tfvars carries post-rebuild steady state - enable_om_phase1=true drives Step 1 to the B4 700s
+and enable_acr_kubelet_binding=true makes Step 9 unplannable, regressing PC-2S by tfvars alone);
+PC-1SEC superseded by the wider PC-1M (zero soft-deleted LAWs in all five subscriptions, blocking
+Step 2, currently NOT satisfied); PC-1REG widened to PC-1REG' after sys.blockwesteurope proved the
+query shape cannot see a deny-list location policy; all fourteen plan bars re-certified with the raw
+Plan-N-to-add unit stated and Step 8 moved 73 to 76 for the ADR-070 exemption unit; ADR-072 confirmed
+to have zero deploy-path effect on Steps 1 and 14; PC-1DIAG names the still-unfixed ADR-071
+two-applies budget with an explicit U5 carve-out
+```

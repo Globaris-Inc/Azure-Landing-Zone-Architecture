@@ -31,6 +31,69 @@
 
 <!-- Newest at the top. -->
 
+### OQ-070: `envs/poc.tfvars` is a single-state file describing a POST-rebuild estate, so `banking` is never greenfield-dispatchable between rebuilds and carries a latent Step-1 and Step-9 failure by default
+
+- **Raised:** 2026-08-01 (architect, pre-clearance refresh #4)
+- **Section:** 9 (Landing Zone Spokes) / 10 (Pipeline and Tooling)
+- **Blocking:** **Yes for the next rebuild, and discharged operationally by PC-1TF.** The immediate
+  fix is a two-line revert PR. This entry is about the DURABLE fix, which is not blocking.
+- **Priority:** Medium
+
+**Question:**
+
+Found live at `banking` @ `3472f4c`, read from the file rather than inferred:
+
+- `envs/poc.tfvars:380` `enable_om_phase1 = true`
+- `envs/poc.tfvars:250` `enable_acr_kubelet_binding = true`
+
+Both are correct for the estate that existed at the end of the 2026-07-31 rebuild. Both are wrong for
+Step 1 of the next one. Dispatching Step 1 from `banking` as it stands makes
+`platform/management-groups` select the `globaris-amba` architecture and plan in the 700s instead of
+537, which is runbook matrix **B4**; and it makes Step 9's `bank-app-p1` Pass-1 plan resolve
+`data.azurerm_kubernetes_cluster.aks_lookup` against a cluster that does not exist, 404 at PLAN time,
+and exit non-zero. The second one regresses PC-2S, the original hard code blocker of the rebuild
+pre-clearance, purely through a tfvars line and with no `.tf` change at all.
+
+**Neither is a bug in anyone's work.** Both flags were flipped exactly when the runbook told the
+operator to flip them, by reviewed PRs, and both files carry long, accurate comments saying they must
+be reverted before a fresh greenfield build. The defect is structural: **one file has to describe two
+mutually exclusive estate states, and nothing in the repository or the pipeline knows which one it is
+currently describing.** The comments are the only control, and a comment is not a control (ADR-062).
+
+The runbook's checks DID catch it (PC-5X limb 2 and matrix B4 both fire correctly), which is worth
+recording as a win. But the runbook's **PC-4R row** asserts as already-confirmed fact that
+`envs/poc.tfvars` reads `enable_om_phase1 = false`, and that sentence is now false, so an operator
+following the runbook top to bottom has one row telling them not to bother checking.
+
+**Options being considered:**
+
+- **A (RECOMMENDED DEFAULT). A greenfield-state assertion in `preflight.sh`, plus a dispatch-time
+  check.** One cheap, mechanical rule: `envs/poc.tfvars` must contain `enable_om_phase1 = false` and
+  must NOT contain `enable_acr_kubelet_binding = true` UNLESS an explicit marker says the estate is
+  past Step 12. Cost is a few lines of shell. It keeps one tfvars file, keeps the two-pass sequences
+  that ADR-055 and PC-2S require, and turns two comments into a gate. Recommended because it is the
+  smallest change that converts a documentation obligation into a mechanical one, which is the exact
+  move ADR-062 argues for.
+- **B. Split the late-stage flags into a second var-file** (for example `envs/poc.post-step12.tfvars`)
+  layered on only for Steps 12 to 14. Structurally cleanest and removes the ambiguity entirely, but it
+  touches every CI path that passes `-var-file` and is a real change to a proven pipeline, days before
+  a rebuild. Better as a post-rebuild change than a pre-rebuild one.
+- **C. Revert the flags to greenfield values immediately after each rebuild completes**, as the final
+  step of the runbook rather than a precondition of the next one. Zero tooling. Same failure mode as
+  every other "remember to" control this project has already ruled against, and it leaves `banking`
+  describing an estate that does not match the live one for the whole gap.
+- **D. Do nothing beyond PC-1TF.** Accept the two-line revert as a standing pre-rebuild step. Honest,
+  and it is what will happen for THIS rebuild regardless. It leaves the trap armed for the next one.
+
+**Recommended:** **A** now (or at minimum PC-1TF plus the PC-4R row correction, which is the
+non-negotiable part), **B** as a post-rebuild cleanup if the estate is rebuilt more than once more.
+
+**Not in scope of this entry:** whether `enable_om_phase1 = false` is the right greenfield ORDERING
+workaround at all. That is settled by PC-4R option A and ADR-052; this entry is only about the file
+describing the wrong state at the wrong time.
+
+---
+
 ### OQ-069: Teardown's soft-deleted-workspace purge only ever looks at ONE named workspace in ONE subscription, and two soft-deleted Log Analytics workspaces are sitting in the MANAGEMENT subscription right now
 
 - **Raised:** 2026-08-01 (architect, while ruling ADR-072 on the `platform/management` teardown orphans)
