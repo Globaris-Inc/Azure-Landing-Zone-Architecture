@@ -49,6 +49,340 @@
 
 <!-- Newest at the top. -->
 
+### ADR-071: The ORPHANED DIAGNOSTIC SETTING is a named failure class whose mechanism is already established in this estate (ADR-063 decision 5, G-1, live proof `diag-aa-to-law`): a `microsoft.insights/diagnosticSettings` object is keyed to its host's URI, outlives the host, outlives the state, and is invisible to every greenfield proof, so it re-collides on the first apply that recreates a same-named host. The two-applies expectation is RATIFIED but only as an INTERIM operating rule; the permanent fix is a Phase 0.5 live-host sweep at TEARDOWN, not an apply-side change. Separately: teardown is CONTRAINDICATED while a Service Health `ServiceIssue` is Active against a service the destroy inventory must delete, and a blocking pre-teardown health gate is specified
+
+- **Date:** 2026-07-31
+- **Section:** 9 (Landing Zone Spokes, where the class fired) / 10 (Pipeline & Tooling, where the fix
+  and the gate live). **Extends ADR-063 decision 5** (the resource-scoped diagnostic-settings sweep and
+  its G-1 finding) rather than superseding it. **Extends ADR-068's failure-mode taxonomy** with FM-3.
+  **Constrains ADR-066** (all eleven Phase-1 layer destroys must go green) by ruling when a teardown may
+  not be dispatched at all. Applies the ADR-066 decision 4 precedent (an operation that must run while
+  its target is still live belongs in Phase 0.5, not Phase 2). Does NOT supersede ADR-070: that ruling
+  is about DINE ownership and is correct on its own terms, but it never addressed this class and could
+  not have prevented it. Answers **OQ-067 item B**. Relates to ADR-067 (the teardown-and-restart class
+  this is NOT), ADR-060 (plan before every apply), LESSON 52 (import blocks), LESSON 59 (one
+  consolidated fix-spec per failure set), LESSON 62 (mechanical rules get a hook, not a habit).
+- **Status:** Accepted (architect ruling; the user directed a ruling once the class had two roots, eight
+  instances and a stated operational rule behind it, and separately directed a ruling on the teardown
+  implication of the active Microsoft incident).
+- **Landed:** NOT IMPLEMENTED. Decisions 4b and 5 are a written spec for DevSecOps (one new Phase 0.5
+  teardown job plus one blocking gate step in `teardown.yml`); decisions 1, 2, 3, 4a and 6 are rulings,
+  operator actions and doc amendments that need no `.tf` or `.yml`. Update this field by dated addendum
+  when the DevSecOps PR merges.
+- **Decision makers:** claude (architect); user (raised the class, recorded the two-applies rule that
+  decision 3 ratifies and narrows, and identified the teardown hazard that decision 5 answers).
+
+**Context:**
+
+**The signature, established from live evidence gathered 2026-07-31.** Across three CI applies of two
+roots, eight `azurerm_monitor_diagnostic_setting` resources failed with
+`already exists - to be managed via Terraform this resource needs to be imported`, every one of them
+with the same four properties: the object is **present in Azure**, carries a **Terraform-derived name**
+(`diag-<resource>`, computed by the AVM modules and by our own native resources from our own inputs, so
+nothing else in Azure composes it), is **exactly one per parent** on a LIST, and is **absent from
+Terraform state**.
+
+| Root | Runs | Orphans |
+|---|---|---|
+| `landing-zones/bank-data-p1` | `30661012325`, `30662610292` (both failed) | `diag-dbw-*`, `diag-aif-*`, `diag-srch-*` |
+| `landing-zones/bank-app-p1` | `30672301220` (failed at 33 min 50 s) | `diag-apim-*`, `diag-acr-*`, `diag-aks-*`, `diag-evhns-*`, `diag-sbns-*` |
+
+Both roots recovered by the runbook **B1** action - delete the survivors, rerun the same root, do not
+import. `bank-data-p1`'s recovery run `30671577938` took **3 min 36 s** and came back
+`4 added, 26 changed, 0 destroyed` with **zero** `already exists`. Nothing was rolled back by the failed
+applies: every expensive resource (APIM, AKS, the Premium ACR, both messaging namespaces, Databricks,
+Foundry, Search) had already provisioned and reported `Succeeded`.
+
+**Three explanations are excluded, and the exclusions are evidence, not assumption.**
+
+1. **DINE is excluded.** `diag-aks-*` is decisive: `Deploy-Diag-LogsCat` has no member for
+   `microsoft.containerservice/managedclusters`, and the only AKS diagnostics policies in the
+   inheritance chain are hard-capped `[AuditIfNotExists, Disabled]` and cannot write. Independently,
+   the code-reviewer proved from the pinned azurerm v4.71.0 source that the existence check is built as
+   `NewScopedDiagnosticSettingID(target_resource_id, name)` and GETs that **exact configured name**, so
+   a differently-named policy object (`setByPolicy-LogAnalytics`) cannot collide with any of ours. Both
+   arguments hold for every resource type, not just AKS. ADR-070's exemptions are correct for their own
+   reasons and were never going to prevent this.
+2. **The ARM instability is excluded as the mechanism** (it remains admissible as a trigger for the
+   first occurrence only). The `diagnosticSettings` write path was returning `InternalServerError` for
+   roughly two hours (20:00 to 21:59Z, evidenced by three DINE `PolicyDeployment_*` retrying doomed PUTs
+   and still collecting fresh 500s at 21:59Z). But the class reproduced on `bank-app-p1` hours later,
+   after the endpoint had demonstrably recovered: all eight B1 DELETEs returned cleanly and were
+   confirmed absent by direct GET, which is itself a probe of the same write path.
+3. **A CI-side retry of the apply is excluded.** Checked directly in this branch:
+   `.github/workflows/_tf-root.yml` wraps only `terraform init` in a bounded retry loop (six attempts,
+   the ADR-025 state-SA firewall backstop). The `apply` step is not retried. So "the same run applied
+   the resource twice" is not available as an explanation, and it was worth eliminating because it would
+   have made the class an artifact of our own pipeline.
+
+**The mechanism is not new, and this estate has already ruled on it and already carries a live proof.**
+`scripts/teardown-az-sweep.sh` step 2-pre exists because of exactly this behaviour, recorded there as
+ADR-063 decision 5 / finding **G-1** on 2026-07-23:
+
+> a resource-scoped diagnostic setting is an extension object keyed to its host resource's URI, and
+> does NOT reliably cascade away just because the host resource is later deleted [...] the live proof
+> is `diag-aa-to-law` (`platform/management/main.tf`, on the platform automation account inside
+> `rg-management-globaris-poc`), which is what the 2026-07-23 rebuild collided on at Step 2
+> ("already exists - needs to be imported") despite both the RG and the automation account having been
+> deleted by an earlier teardown.
+
+That is the same signature, on a different root, eight days earlier, already diagnosed. The public
+issue family says the same thing from outside (hashicorp/terraform-provider-azurerm #7114, #11070,
+#11076, #25673; the Microsoft Q&A thread on AVM diagnostic settings), and the provider's own create path
+makes the consequence deterministic: `ImportAsExistsError` is raised **before any PUT**, so a resource
+that reports `already exists` was found by the pre-create GET and was therefore present **before that
+resource's create began**.
+
+**Which forces a correction to the operating premise in the record.** The 2026-07-31 operator entry
+states that "the objects are created and lost DURING the apply, so there is no pre-emptive delete
+available". The first half is not established and is in tension with the provider's create ordering;
+the second half is true only of the apply side. Under the established G-1 mechanism the object PREDATES
+the run, and a pre-emptive delete **does** exist - at teardown, while the host is still alive. That
+distinction is the whole difference between "budget for two applies forever" and "fix it once".
+
+**Why the existing sweep did not catch these eight: an ordering regression, and it is the same one
+ADR-066 decision 4 already found and fixed for Databricks.** Step 2-pre enumerates targets as
+`discover_live_rgs` -> `az resource list` per RG -> `diagnosticSettings` GET per resource id. It can
+only see a setting whose **host is still live**. It sits in Phase 2 (`az-sweep`), whose job in
+`teardown.yml` `needs` all eleven Phase-1 jobs. Under ADR-066, `mode=terraform` at `target=all` runs
+those eleven `terraform destroy` jobs FIRST, which delete the hosts, after which no enumeration can
+reach any setting the destroying root did not hold in state. So in the `mode=terraform` path the sweep
+is structurally unable to catch precisely the residue it was written for. This is the identical shape
+ADR-066 decision 4 identified for the Databricks force-delete and solved by moving it to a Phase 0.5
+job that runs while the workspace is still live. The fix was applied to Databricks only.
+
+**What is NOT established, stated plainly.** Which teardown left these eight, and whether all eight
+share one provenance. The enabling conditions are all documented and dated (the resource-scoped sweep
+did not exist in this repo before 2026-07-23, `0a7607b` / `7be4dfa`; these roots were first deployed in
+waves B2 to B6 on 2026-07-18 and 2026-07-19; state blobs have been emptied and reset since, so some
+destroys were no-ops), but "consistent with" is not "shown". Decision 2 says how to close it for the
+cost of three reads, and deliberately does not block anything on the answer.
+
+**Decision:**
+
+**1. The class is named, and it gets a one-read signature test.** An **orphaned diagnostic setting** is
+a `microsoft.insights/diagnosticSettings` object that (a) exists in Azure, (b) carries a name this
+repository composes, (c) is absent from the state of the root that composes it, and (d) blocks that
+root's create with `already exists`. All four must hold. It is distinguished, in one line each, from
+the two classes it keeps being confused with:
+
+| Observation | Class | Action |
+|---|---|---|
+| Blocking object carries OUR name, no data, no dependents, deletable | **This ADR (orphaned diagnostic setting)** | runbook **B1**: delete the survivor, rerun the same root |
+| Blocking object carries a POLICY name (`setByPolicy-*`, `deployedByPolicy`), or is a private DNS zone group | **ADR-070** (DINE ownership) | RG-scoped `Mitigated` exemption + separate 300s sleep + `depends_on` |
+| Blocking object cannot be deleted at all (soft-delete, purge protection, dependents, data) | **ADR-067** | full teardown and restart from Step 1 |
+
+ADR-070's bright-line test governs the choice between rows 1 and 3 unchanged: can every blocking object
+be deleted and recreated identically by the next apply, with no data loss and no soft-delete window? For
+a diagnostic setting the answer is always yes.
+
+**2. FM-3, and the three reads that close OQ-067 item B.** ADR-068 named FM-1 (state missing while
+resources live) and FM-2 (state populated while resources gone). This class is neither, and it needs its
+own name because it defeats the guard both of those have:
+
+> **FM-3: an object outlives BOTH the estate and the state, and is invisible to every discovery-based
+> proof, because its only address runs through a host that no longer exists.**
+
+This is why the 2026-07-31 greenfield verification was correct and the orphans still existed. Nothing was
+missed: a `diagnosticSettings` child of a deleted resource cannot be enumerated by any subscription, RG
+or resource listing. **A greenfield proof is a statement about what can be discovered, and FM-3 objects
+are by construction outside it.** That sentence belongs in the teardown documentation.
+
+Provenance is closed by three reads, all cheap, none blocking:
+
+- **T1 (offline, on a log already held).** For each failing address in run `30672301220`, read whether
+  Terraform emitted any `Still creating... [N elapsed]` ticks before the failure, and compare the
+  timestamps of the three or five `Error:` diagnostics with each other. **If the errors share one
+  timestamp, the "10m17s / 2m14s / 55s" figures measure from each `Creating...` line to the end-of-run
+  diagnostics block and carry no information about the provider's own duration** - which is the reading
+  that fits staggered dependency completion and a fast pre-create GET. If instead each address shows
+  ticks running to its own figure, the create really did spend minutes before returning, and G-1 is not
+  the whole story for these instances. This single read is the highest-value item in the ADR and costs
+  nothing.
+- **T2 (live, read-only, 90-day window).** Query the Activity Log for
+  `Microsoft.Insights/diagnosticSettings/write` on each of the eight target resource IDs. A write inside
+  the failed run's window supports "created during the apply"; no write inside the window plus one at an
+  earlier estate lifetime confirms G-1. **Guard against the empty-result trap (ADR-069 addendum item
+  6):** if the query returns nothing for BOTH windows, the query shape is uninformative and must not be
+  read as evidence of absence; validate it first against a resource whose setting was demonstrably
+  written today.
+- **T3 (the prediction that makes this falsifiable).** G-1 predicts that after decision 4b lands, the
+  next greenfield first-apply of these roots creates all nine settings with **zero** `already exists`.
+  If the class recurs on a first apply that followed a teardown carrying the Phase 0.5 sweep, G-1 is
+  refuted for this estate and decision 4a's fallback is bought.
+
+**3. The two-applies rule is RATIFIED, NARROWED, and explicitly INTERIM.** The operator's rule stands as
+an operating expectation, with three corrections:
+
+- **Ratified:** any root creating `azurerm_monitor_diagnostic_setting` may fail its first apply on those
+  settings; the recovery is B1 (delete the orphans, rerun), it is fast because nothing is rolled back,
+  and it is budgeted rather than escalated. It is not an incident, it does not fire ADR-067, and it does
+  not justify a teardown.
+- **Narrowed:** the exposure is the **first apply of a root after an estate lifetime in which its
+  diagnostic settings were removed without a live-host sweep**, not every apply forever. It did not fire
+  on either recovery run, and it did not fire on the five root-level settings in Steps 2, 3, 4 and 7,
+  which is consistent with narrowing and inconsistent with "always two applies".
+- **Interim:** this expectation expires when decision 4b lands and T3 is observed once. Shipping "expect
+  every apply to fail" as a permanent operating rule would be accepting a defect as a feature, and it
+  would eventually be paid at the worst possible moment - `bank-app-p1` already spent 33 minutes 50
+  seconds of APIM and AKS provisioning before failing on five settings.
+
+Recovery procedure, unchanged and now written where it can be found: confirm no DINE `PolicyDeployment_*`
+is mid-flight on the target RG (ADR-070 R1, with its 90-minute pathological cap), DELETE each named
+survivor, confirm absent by direct GET, then plan (ADR-060, always) and apply. Plan bar for the retry:
+pure adds of the previously blocked settings, 0 destroy, 0 replace, 0 import, changes limited to the
+OQ-032 `CreatedDate` churn.
+
+**4. The structural-fix ruling: buy the teardown-side fix, do not buy the apply-side rewrite.**
+
+**4a. Rejected, with the reason each was tested against.**
+
+- **Convert the nine `azurerm_monitor_diagnostic_setting` objects to root-level
+  `azapi_resource` (`Microsoft.Insights/diagnosticSettings@2021-05-01-preview`).** This WOULD work, and
+  it is hypothesis-independent: azapi PUTs idempotently with no RequiresImport pre-check, which is
+  exactly why `module.datalake`'s azapi-based setting never failed in the same runs that killed three
+  azurerm siblings. **Rejected as the primary fix anyway.** It treats the symptom at the apply while
+  leaving FM-3 objects accumulating in the tenant; it removes nine settings from the AVM
+  `diagnostic_settings` inputs that are the module's supported interface (ADR-038 consumes AVM
+  directly); it requires hand-authored category bodies, which is a NEW PUT-time failure surface of
+  exactly the class LESSON 27 catalogues; and landing it mid-rebuild would widen the failure class on
+  the estate's most expensive roots, which is what LESSON 59 forbids. **Retained as the named fallback**
+  if T3 refutes G-1, and in that event the conversion is scoped to the failing settings only, not all
+  nine.
+- **Move to a newer `azurerm`.** **Rejected on verified fact, not preference.** The v4 changelog was
+  read end to end for this ADR: there is **no** `azurerm_monitor_diagnostic_setting` change of any kind
+  between 4.72.0 and 4.81.0 (latest v4, 2026-07-14). The only create-path fix in the line -
+  "add further polling to work around an eventual consistency issue when creating the resource"
+  (issue #27088) - shipped in **4.0.0** and is therefore already present in our pinned 4.71.0. A bump
+  buys nothing here and costs a re-plan of every root. 5.0.0 (2026-07-27) is a major-version migration
+  and is out of scope entirely.
+- **A `lifecycle` block.** **Rejected as impossible, not undesirable.** `ignore_changes`,
+  `prevent_destroy` and `replace_triggered_by` all act on Terraform's diff; `ImportAsExistsError` is
+  raised inside the provider's Create before any of them can apply. There is no meta-argument that
+  suppresses it.
+- **A config-driven `import` block.** Rejected: forbidden by ADR-067's addendum, constrained by LESSON
+  52, and worse than deleting even if allowed - adopting an object of unknown provenance under a
+  Terraform address is how you get a resource Terraform believes it controls and something else writes.
+
+**4b. Bought: a Phase 0.5 resource-scoped diagnostic-settings PRECASCADE at teardown.** DevSecOps lane,
+one PR. The shape is fixed by the precedent already in the tree, so this is a spec and not an idea:
+
+- **Extract** the existing step 2-pre body from `scripts/teardown-az-sweep.sh` into a shared function in
+  `scripts/teardown-common.sh` (working name `sweep_resource_diagnostic_settings`), exactly as
+  `databricks_force_delete_cascade` is shared today, **so the two call sites cannot drift**. Behaviour,
+  api-version (`RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION`, currently `2021-05-01-preview`), the
+  `is_estate_owned --resource-id` containment predicate, the auth-shaped-failure-only loud branch and
+  the confirm-GET all move unchanged. This is a refactor with no behaviour change at the existing site.
+- **Add** `scripts/teardown-diagnostic-precascade.sh` calling that function, wired as a new Phase 0.5
+  job in `.github/workflows/teardown.yml` gated **identically to `databricks-precascade`**:
+  `needs: [guard]`, `if: !cancelled() && needs.guard.result == 'success' && inputs.target == 'all' &&
+  inputs.mode == 'terraform'`. `mode=az-sweep` is deliberately NOT wired: Phase 1 never runs in that
+  path, so the existing step 2-pre already executes while hosts are live and a second call would be a
+  duplicate rather than a fix. Same reasoning, same words, as the Databricks job's own header.
+- **Keep step 2-pre where it is.** It is the belt for the az-sweep path and for anything Phase 0.5
+  missed; removing it would trade one gap for another.
+- **Not a gate.** Consistent with the Databricks precascade: a failure here is loud but does not skip a
+  layer, because Phase 1 must still run all eleven destroys green (ADR-066 INV-1).
+- **Acceptance:** the next `target=all mode=terraform` teardown shows the Phase 0.5 job deleting at
+  least the settings the estate currently holds, and the next greenfield first apply of `bank-data-p1`
+  and `bank-app-p1` reports zero `already exists` (T3).
+
+**5. Teardown is CONTRAINDICATED right now, and the pre-teardown health check is a blocking gate.**
+
+**5a. The immediate ruling.** A Microsoft Service Health `ServiceIssue` titled "Azure Databricks
+Workspace Deletion Failures" was Active on the landingzones subscription (impact start 16:51:26Z, still
+Active at 22:41Z). `landing-zones/bank-data-p1` holds a live `dbw-bank-data-p1-globaris-poc`. ADR-066
+requires all eleven Phase-1 layer destroys to go green, and Phase 0.5 submits a Databricks
+force-delete BEFORE Phase 1 even starts, so a teardown dispatched during this incident drives the
+estate's teardown straight into the one operation Microsoft is reporting as failing. The likely outcome
+is a failed teardown with a partially destroyed estate and partially populated state - **strictly worse
+than the state we are in**, and the FM-2 shape ADR-068 exists to prevent. **Do not dispatch a teardown
+while that event is Active. Wait for `status = Resolved`.** The operator signalled teardown twice on
+2026-07-31; this ruling is the answer both times.
+
+There is no safe shortcut. `mode=az-sweep` does not dodge it (its step 1 issues the same force-delete),
+and deleting the workspace by hand is excluded by the standing rule that teardown is CI/CD only.
+
+**5b. The gate, so this is never a memory item again (LESSON 62).** Add a read-only step to the existing
+`guard` job in `.github/workflows/teardown.yml`, before any destructive job can start:
+
+- For each estate subscription, `GET
+  https://management.azure.com/subscriptions/{subscriptionId}/providers/Microsoft.ResourceHealth/events?api-version=2025-05-01&queryStartTime=<today-7d>`.
+  The api-version is verified current against the Resource Health REST reference (Events - List By
+  Subscription Id, doc updated 2026-07-21); `2022-10-01` is the fallback if the SP's read path rejects
+  it. `queryStartTime` is mandatory in our use: the default window is three days by `lastUpdateTime`,
+  and a long-running incident can fall out of it.
+- **Fail the job if any returned event has `properties.eventType == "ServiceIssue"` and
+  `properties.status == "Active"`, or any `properties.impact[].impactedRegions[]` entry with
+  `status == "Active"` in an estate region.** Deliberately broad. A curated impacted-service-to-resource
+  map would drift silently and would have to be right about a service name we do not control; a short
+  written disposition per event costs the operator a minute and produces the record.
+- Print, for every matched event, `name` (the tracking ID), `properties.title`, `impactedService`,
+  `impactStartTime` and `status`, so the disposition can be written from the job log.
+- **Override:** a `workflow_dispatch` boolean input (default `false`) that downgrades the failure to a
+  warning, whose description requires the architect disposition reference to be recorded in
+  `docs/preclearance/` before use. A gate with no override gets bypassed by editing the workflow, which
+  is worse.
+- **A failed or empty LIST is never read as "no incidents"** - same section 9.4 discipline every other
+  list in the teardown scripts already follows, and the same empty-result trap decision 2 guards.
+- **Prerequisite to confirm at implementation:** the CI SP can read
+  `Microsoft.ResourceHealth/events` (included in Reader; not yet verified live for this SP). If it
+  cannot, the gate is written to fail loud on the authorization error rather than pass.
+- The check runs **at dispatch time**, not at planning time. Incidents open in hours.
+
+**6. Documentation follow-ups, owned and small.**
+
+1. **DevSecOps:** decision 4b (the Phase 0.5 job) and decision 5b (the guard-job gate), one PR each or
+   one PR total, reviewer-gated.
+2. **DevSecOps / runbook:** `docs/2026-07-22-full-estate-rebuild-runbook.md` matrix row **B1** currently
+   reads "on a budget, cost export, anomaly alert, or subscription diagnostic setting". Widen it to any
+   `azurerm_monitor_diagnostic_setting` at **resource** scope, pointing at this ADR, and add the
+   decision-3 two-applies expectation to section 3d (Steps 5-9).
+3. **DevSecOps / teardown docs:** `docs/teardown-redesign.md` and `docs/cicd-deploy-teardown.md` gain the
+   Phase 0.5 diagnostic precascade, the FM-3 sentence from decision 2, and the decision-5b gate as a
+   documented pre-dispatch condition.
+4. **Operator:** run T1 now (it is a log read), T2 when convenient, and record both in OQ-067 item B.
+5. **Architect:** carry the FM-3 sentence and the "a greenfield proof is a statement about what can be
+   discovered" formulation into `landing-zone-kit/LESSONS.md` at the next kit pass; it generalises well
+   beyond this estate.
+
+**Alternatives considered:**
+
+- **Treat it as an incident each time it fires.** Rejected: it has now fired eight times with one
+  signature and a documented mechanism, and escalating a known class burns the review and dispatch
+  budget that LESSON 59 reserves for narrowing real failures.
+- **Accept two applies permanently and change nothing.** Rejected: see decision 3. It also leaves FM-3
+  objects accumulating invisibly in the tenant, which is a governance problem independent of Terraform.
+- **Block the rebuild until provenance is proven.** Rejected: the recovery action is identical under
+  every candidate provenance, so blocking buys nothing and costs the remaining rebuild steps. Decision 2
+  is deliberately non-blocking.
+- **Sweep diagnostic settings before every APPLY rather than at teardown.** Rejected as unavailable: an
+  orphan is only addressable through its host, and on a greenfield apply the host does not exist until
+  the apply creates it. There is genuinely no pre-emptive delete on the apply side, which is the one
+  half of the operator's premise that survives.
+- **Gate teardown on a curated impacted-service list rather than on any Active ServiceIssue.** Rejected:
+  a hand-maintained map of Azure service display names to our resource inventory is precisely the kind
+  of mirrored state that drifted and had to be retired from `WORKLOG.md`. Broad match plus a written
+  disposition is cheaper and cannot go stale.
+
+**Consequences:**
+
+- Positive: the class has a name, a signature test, an established mechanism, an honest boundary around
+  what is still hypothesis, and a fix that removes the SOURCE rather than the symptom. The B1-versus-
+  ADR-070-versus-ADR-067 choice becomes a three-row table. FM-3 explains why a correct greenfield proof
+  and a live orphan can coexist, which was the most confusing part of the evidence. The teardown hazard
+  that was nearly acted on twice is now a workflow gate instead of a thing someone remembered.
+- Negative / trade-offs: one more teardown job and one more blocking gate, both of which lengthen the
+  teardown path and can fail on their own. The gate will occasionally block a teardown on an incident
+  that would not actually have affected it, and the override exists precisely because that will happen.
+  Two applies remains the operating expectation until decision 4b lands and T3 is observed once, so the
+  rest of this rebuild still budgets for it.
+- Negative: provenance for the eight is closed by prediction (T3) rather than by proof, and T3 cannot be
+  observed until after the next teardown and rebuild. That is a real gap and it is why decision 4a keeps
+  the azapi conversion named and scoped rather than discarded.
+- Follow-ups required: the five items in decision 6. **OQ-067 item B** is answered to the extent the
+  evidence allows and updated in place with the new constraint; it stays open on provenance only.
+
 ### ADR-070: Terraform is the SOLE owner of diagnostic settings and private-endpoint DNS zone groups on every resource a landing-zone root creates; the ALZ DINE policies that write the same two object classes are suppressed at those scopes by RG-scoped `Mitigated` exemptions. The twice-failed `bank-data-p1` apply is runbook matrix **B1** (delete the survivor, rerun, do not import), **NOT** the ADR-067 teardown class, and the bright-line test between the two is written down here so it stops being re-litigated.
 
 - **Date:** 2026-07-31
@@ -165,6 +499,36 @@ The 2026-07-31 operator entry for Steps 4-8 root-caused this as ARM read-after-w
   4. DevSecOps amends the runbook: PC-8S row `Deploy-Private-DNS-Zones` must stop reading "post-apply drift only, never a create blocker", and matrix 3d needs a row for this failure class pointing at B1 and at this ADR.
   5. QA adds the duplicate-diagnostic-setting audit (decision 5's PC-1D LIST half) to the per-root acceptance criteria; it is a FinOps finding, not a pass/fail gate.
   6. OQ-021 and OQ-067 are answered together, not separately, since landing either half alone is worse than landing neither.
+
+**ADDENDUM 2026-07-31 (the decision is IMPLEMENTED, and the scope of what it fixes is bounded. Body above unedited, per append-only.)**
+
+- **Landed:** `b4c058e` (PR #67), merged to `banking` as `68080b8` on 2026-07-31. 11 files across
+  `landing-zones/bank-data-p1` and `landing-zones/bank-app-p1`: `policy_exemptions.tf` in both roots
+  (the `azurerm_resource_group_policy_exemption.dine_ownership` map, category `Mitigated`, gated on the
+  new `enable_dine_ownership_exemptions` variable, plus the NEW separate
+  `time_sleep.wait_dine_ownership_exemptions` at 300s that decision 2 required), `variables.tf` in both
+  roots, and `depends_on` edges plus point-of-use comments in `ai.tf`, `databricks.tf`, `datalake.tf`,
+  `acr.tf`, `aks.tf`, `apim.tf` and `messaging.tf`. Code-reviewer APPROVED after one BLOCK-and-fix
+  round. Decisions 1, 2 and 6 are implemented; decisions 3, 4, 5 and 7 were operator and gate actions
+  needing no code and are discharged. **This supersedes the `NOT IMPLEMENTED` in the field above,
+  which was accurate when written.**
+  **Same parser caveat as ADR-069's addendum:** `scripts/check-adr-landed.sh` keeps the FIRST
+  `- **Landed:**` line in each ADR block, so it will keep reporting ADR-070 as `NOT IMPLEMENTED` until
+  that parser takes the LAST one instead. Do not resolve that by editing the body. The append-only rule
+  is the more important of the two and the parser is the thing that should move (DevSecOps finding F10
+  in the 2026-07-22 rebuild pre-clearance refresh #3).
+
+- **Bounding what this ADR fixed, so the record does not overclaim.** The exemptions are correct and the
+  private-DNS-zone-group half is load-bearing (only one zone group per private endpoint, and the Foundry
+  PE needs three zones where the policy deploys one). **They did not and could not fix the failed
+  applies that prompted the ADR.** The code-reviewer proved from pinned azurerm v4.71.0 source that the
+  existence check GETs the exact configured name, so a `setByPolicy-LogAnalytics` object cannot collide
+  with a `diag-*` one; and `diag-aks-*` later failed on a resource type no DINE in this tenant covers at
+  all. The `already exists` class is ruled separately in **ADR-071**, which names it, excludes DINE,
+  and puts the permanent fix at teardown rather than in these roots. ADR-070 decision 7 (OQ-021 Option A
+  is only safe paired with these exemptions) is unaffected and still stands - it is arguably
+  strengthened, because the three DINE `PolicyDeployment_*` that hung for 122 minutes against the
+  zero-GUID placeholder workspace were cancelled on 2026-07-31, discharging PC-3DINE.
 
 ### ADR-069: `centralus` becomes the PRIMARY region and `eastus2` the secondary/DR. The region pair was never actually decided - OQ-004 was raised at bootstrap and never answered, so `PROMPT.md`'s suggestion became the config by default and four separate capacity workarounds accumulated around a primary region that could not serve the estate. Resolves OQ-004.
 
@@ -926,6 +1290,44 @@ Phase 4 guarantees state is empty when teardown ran and went green. It cannot he
 not run, ran red, or ran from a ref without the mechanism. Today's incident was ultimately a deploy
 that planned against a state nobody had checked, and that check belongs on the deploy path, not the
 teardown path.
+
+**ADDENDUM 2026-07-31 (the decision is IMPLEMENTED and PROVEN LIVE. Body above unedited, per append-only.)**
+
+- **Landed:** `f28f695` (PR #57), merged to `banking` as `1af0fc9` on 2026-07-30. Five files:
+  `.github/workflows/teardown.yml` (the Phase 4 `state-reset` job, gated hard on
+  `needs.verify.result == 'success'` with the `!cancelled()` prefix the 2026-07-30 addendum inside
+  decision 2 corrected), `scripts/teardown-state-reset.sh` (new, 468 lines - the canonical empty
+  document, lineage and `terraform_version` preserved, serial bumped, overwrite only and never delete),
+  plus the runbook and pre-clearance amendments that decision 8 required. Decisions 1 to 5 and 8 to 12
+  are implemented; decision 6 was the owner-executed one-time disposition and is discharged; decision 13
+  is explicitly out of scope and remains OQ-065 limb B. **This supersedes the `NOT IMPLEMENTED` in the
+  field above, which was accurate when written.**
+- **Proven live, not just merged.** Phase 4 executed on the 2026-07-31 rebuild teardown, and on
+  2026-07-31 the estate AND all eleven state blobs were independently confirmed greenfield - which is
+  also the precondition ADR-069 decision 6 required before the region flip could be dispatched (see
+  ADR-069's addendum, item 5). The evidence sits in the 2026-07-31 WORKLOG entries.
+- **Same parser caveat as ADR-069 and ADR-070.** `scripts/check-adr-landed.sh` keeps the FIRST
+  `- **Landed:**` line in each ADR block, so it will keep reporting ADR-068 as `NOT IMPLEMENTED` until
+  that parser takes the LAST one. Do not fix that by editing the body. Tracked as DevSecOps finding F10
+  in the 2026-07-22 rebuild pre-clearance refresh #3.
+- **Why all three of ADR-068, ADR-069 and ADR-070 went stale in the same field, recorded because the
+  pattern matters more than the three corrections.** The `Landed:` field is written by the architect at
+  ruling time, when the honest value is always `NOT IMPLEMENTED`, and it can only be corrected by
+  someone who returns to the ADR AFTER the implementation PR merges. Nothing in the merge path prompts
+  that. The check script passes on `NOT IMPLEMENTED` by design (an honest backlog entry is the point),
+  so the register degrades silently in exactly the direction it was built to prevent: decisions that ARE
+  running, recorded as not running. **The durable fix is a check that cross-references, not a habit:**
+  once the parser takes the LAST `Landed:` line, a second check can flag any ADR whose `Status` is
+  Accepted, whose `Landed` is `NOT IMPLEMENTED`, and whose number is referenced by a merged commit
+  message on `banking`. That is a mechanical query over data git already holds, and it is the LESSON 62
+  shape (a hook, not a habit). Raised here rather than in a new OQ because F10 already owns the parser.
+- **FM-3, added by ADR-071 and relevant to this ADR's taxonomy.** ADR-068 names FM-1 (state missing
+  while resources live) and FM-2 (state populated while resources gone). ADR-071 names **FM-3: an object
+  outlives BOTH the estate and the state and is invisible to every discovery-based proof, because its
+  only address runs through a host that no longer exists.** A resource-scoped diagnostic setting is the
+  worked example. FM-3 does not weaken this ADR's guards - it is a class neither of them was aimed at -
+  but it does bound what a green Phase 3 VERIFY plus a reset Phase 4 state can be said to prove: they
+  prove the estate is empty of everything that can be enumerated.
 
 ### ADR-067: The clean-empty-state platform/security apply (run 30499221661) fails on three interacting classes - a soft-delete-recovered Security LAW re-hydrates orphaned Sentinel rules ("already exists"), the two Sentinel automation rules lack the onboarding dependency (race "not onboarded"), and the pricing serialization never actually serialized the extended plan set (CloudPosture 409). Diagnosis stands; the recovery ruling was SUPERSEDED 2026-07-29 (see Addendum) - the user's process change makes recovery a FULL estate teardown-and-restart from Step 1 with the Security LAW purged, not import-and-continue.
 

@@ -126,6 +126,63 @@ object names is a bigger problem than a policy collision, because no exemption s
 does not block the `bank-data-p1` recovery on this (the action is identical under B1 and B2), but it
 does gate Step 9, where the same class would fire four times after a 60 to 180 minute APIM create.
 
+**UPDATE 2026-07-31 (B) - item B is ANSWERED at the mechanism level by ADR-071 and NARROWED to
+provenance only; item A is unchanged and remains ruled by ADR-070. Body above unedited.**
+
+**Item A: no change.** The `Mitigated` exemptions landed (`b4c058e`, PR #67, merged `68080b8`) with the
+live assignment names and `policyDefinitionReferenceIds` enumerated from ARM rather than guessed, which
+is what this item asked for. Terraform won the zone-group race on `pe-aif-bank-data-p1-globaris-poc`:
+the private endpoint carries Terraform's `default` group with **3** zones, not DINE's single-zone
+`deployedByPolicy`. The three hung `PolicyDeployment_*` were cancelled at 122 minutes after collecting
+`InternalServerError` for two hours against the zero-GUID placeholder workspace, so **no
+`setByPolicy-LogAnalytics` object was ever created anywhere in the estate** - which also sharpens
+OQ-021: the unwired parameter does not merely make that DINE inert, it makes it hang.
+
+**Item B: the constraint the class now carries.** Five new facts, all live-verified 2026-07-31:
+
+1. It reproduced on a SECOND root. `landing-zones/bank-app-p1` (run `30672301220`, failed at 33 min
+   50 s) produced **five** orphans - `diag-apim-*`, `diag-acr-*`, `diag-aks-*`, `diag-evhns-*`,
+   `diag-sbns-*` - all present in Azure, Terraform-named, exactly one per parent, absent from state.
+   Eight instances across two roots and three runs, one signature.
+2. **DINE is definitively excluded**, so the `B1`/`B2` framing above is settled in favour of neither:
+   `diag-aks-*` is decisive (`Deploy-Diag-LogsCat` has no member for
+   `microsoft.containerservice/managedclusters`, and the only AKS diagnostics policies in the chain are
+   hard-capped `[AuditIfNotExists, Disabled]`), and the pinned azurerm v4.71.0 existence check is scoped
+   to the exact configured name, so a policy-named object cannot collide with a `diag-*` one.
+3. **The ARM incident is excluded as the mechanism.** The class fired again hours later, after the
+   `diagnosticSettings` write path had demonstrably recovered - all eight B1 DELETEs returned cleanly,
+   which is itself a probe of that path.
+4. **A CI-side apply retry is excluded.** `.github/workflows/_tf-root.yml` retries only `terraform
+   init` (six attempts, the ADR-025 firewall backstop). The apply step is not retried.
+5. **The mechanism was already established in this estate and already ruled on.**
+   `scripts/teardown-az-sweep.sh` step 2-pre exists because of ADR-063 decision 5 finding G-1: a
+   resource-scoped diagnostic setting is keyed to its host's URI and does not reliably cascade away when
+   the host is deleted, with `diag-aa-to-law` as the live proof from the 2026-07-23 rebuild - the same
+   `already exists` on a recreated same-named host. The public issue family says the same
+   (terraform-provider-azurerm #7114, #11070, #11076, #25673).
+
+**What that changes.** The premise recorded in the operator log - "the objects are created and lost
+DURING the apply" - is not established and is in tension with the provider's create ordering
+(`ImportAsExistsError` is raised BEFORE any PUT, so the object existed before that create began). ADR-071
+therefore rules the class as **FM-3**: an object that outlives both the estate and the state and is
+invisible to every discovery-based greenfield proof, because its only address runs through a host that no
+longer exists. The permanent fix moves to **teardown** (a Phase 0.5 live-host sweep, mirroring the
+ADR-066 decision 4 Databricks precascade, because step 2-pre now runs after Phase 1 has already deleted
+the hosts and can no longer see the residue it was written for). Two applies is ratified only as an
+INTERIM operating rule.
+
+**What is still open, and it is only this: which teardown left these eight, and whether all eight share
+one provenance.** Closed by three reads, none blocking (ADR-071 decision 2): **T1** re-read the run
+`30672301220` log for `Still creating...` ticks and for whether the `Error:` diagnostics share one
+timestamp (if they do, the 10m17s / 2m14s / 55s figures measure to the end-of-run diagnostics block and
+say nothing about the provider's own duration); **T2** query the Activity Log for
+`Microsoft.Insights/diagnosticSettings/write` on the eight target resource IDs, guarding against the
+empty-result trap; **T3** the falsifiable prediction - after the Phase 0.5 sweep lands, the next
+greenfield first apply of these roots reports zero `already exists`.
+
+**Blocking status revised: item B is NO LONGER BLOCKING for Step 9** (it was, and Step 9 has since been
+dispatched and recovered). It stays open at Medium priority against T1, T2 and T3.
+
 ### OQ-066: The centralus-primary flip (ADR-069) rests on capacity that is EVIDENCED for a subset and ASSUMED for the rest - plus a teardown that failed and left the estate non-greenfield
 
 - **Raised:** 2026-07-30 (architect, while ruling ADR-069 on the region flip)
