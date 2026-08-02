@@ -36,6 +36,26 @@
 #             that path, so az-sweep's own step 1 (teardown-az-sweep.sh, unchanged) already
 #             force-deletes the workspace first there - wiring this job there too would be a
 #             redundant duplicate, not a fix.
+#   Phase 0.5 - DIAGNOSTIC PRECASCADE (scripts/teardown-diagnostic-precascade.sh) - az,
+#             target=all AND mode=terraform only (ADR-071 decision 4b, ADDED 2026-08-01).
+#             Deletes every resource-scoped microsoft.insights/diagnosticSettings object WHILE
+#             ITS HOST IS STILL LIVE. These are extension objects keyed to the host's URI: they
+#             do not reliably cascade with the host, they are absent from state once state is
+#             emptied, and once the host is gone they cannot be enumerated by ANY subscription,
+#             RG or resource listing (ADR-068 FM-3), so they are invisible to every greenfield
+#             proof and re-collide with `already exists` on the next apply that recreates a
+#             same-named host. Eight such failures across bank-data-p1 and bank-app-p1 on
+#             2026-07-31 are the live evidence. Fixes the SAME ordering regression ADR-066
+#             decision 4 fixed for Databricks: Phase 2's step 2-pre sweeps this class but can
+#             only see LIVE hosts, and it runs after all of Phase 1 has deleted them. Shares its
+#             whole body with step 2-pre via `sweep_resource_diagnostic_settings`
+#             (teardown-common.sh) so the two cannot drift; step 2-pre STAYS as the belt for the
+#             az-sweep path and anything this missed. Runs alongside Phase 0 DISARM and the
+#             Databricks precascade (all three gate on `guard` only, no ordering dependency
+#             between them - disjoint object classes). The Phase 1 CHAIN HEAD (`synthetic`)
+#             `needs` this job for ORDERING ONLY, so the sweep completes before the first destroy
+#             deletes any host; it is NOT in that job's `if:`, so a failure here never skips a
+#             layer (INV-1). Not wired for mode=az-sweep, same reasoning as the Databricks job.
 #   Phase 1 - DESTROY  (terraform, per root, incl. synthetic) - mode=terraform only. `needs`
 #             is for ORDERING ONLY; every root job's `if:` uses `!cancelled()` (NOT
 #             `!failure()`), so one root's failure never cascade-skips the others (fixes F1).
@@ -349,6 +369,40 @@ jobs:
           LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
         run: bash scripts/teardown-databricks-precascade.sh
 
+  # Phase 0.5 - DIAGNOSTIC PRECASCADE (ADR-071 decision 4b). Gated IDENTICALLY to
+  # databricks-precascade above (needs: [guard], target=all AND mode=terraform) and, like it,
+  # deliberately NOT wired for mode=az-sweep: Phase 1 never runs in that path, so Phase 2's own
+  # step 2-pre already sweeps this class while hosts are live there, and a second call would be a
+  # redundant duplicate rather than a fix. Runs alongside disarm and databricks-precascade - all
+  # three gate on `guard` only, with no ordering dependency between them, because they act on
+  # disjoint object classes. NOT a gate: a failure is loud but never skips a Phase 1 layer
+  # (ADR-066 INV-1); the residue surfaces later as an `already exists` recovered by runbook B1.
+  diagnostic-precascade:
+    name: "Phase 0.5 - DIAGNOSTIC PRECASCADE (delete settings while hosts are live)"
+    needs: [guard]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && inputs.target == 'all' && inputs.mode == 'terraform' }}
+    runs-on: ubuntu-latest
+    environment: production-destroy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Delete resource-scoped diagnostic settings while their hosts are still live
+        env:
+          MANAGEMENT_SUBSCRIPTION_ID: ${{ secrets.MANAGEMENT_SUBSCRIPTION_ID }}
+          CONNECTIVITY_SUBSCRIPTION_ID: ${{ secrets.CONNECTIVITY_SUBSCRIPTION_ID }}
+          IDENTITY_SUBSCRIPTION_ID: ${{ secrets.IDENTITY_SUBSCRIPTION_ID }}
+          SECURITY_SUBSCRIPTION_ID: ${{ secrets.SECURITY_SUBSCRIPTION_ID }}
+          LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
+        run: bash scripts/teardown-diagnostic-precascade.sh
+
   # Phase 1 (ADR-066, AMENDED 2026-08-01 by ADR-072 decision 6): a strictly LINEAR
   # reverse-dependency `needs` chain of 10 jobs - synthetic -> bank-data-p1 -> bank-app-p1 ->
   # online-p1 -> corp-a2 -> corp-a1 -> security -> connectivity -> identity -> management (plus
@@ -381,8 +435,21 @@ jobs:
   # get a real `terraform destroy` so its Terraform state is retired cleanly, not just have
   # its RGs caught out-of-band by the Phase 2 naming-pattern sweep (which would leave
   # synthetic's own state drifted - "exists in state, gone in Azure").
+  # `diagnostic-precascade` added to `needs` 2026-08-01 (ADR-071 decision 4b) for ORDERING ONLY,
+  # on the CHAIN HEAD rather than on one root. The Databricks precascade only has to precede
+  # `bank-data-p1`, the single root that owns the workspace, so it is wired there; the diagnostic
+  # sweep enumerates hosts across EVERY root, so it has to finish before the FIRST Phase 1 destroy
+  # deletes any host - otherwise it races the chain and the settings on whatever was destroyed
+  # first become exactly the FM-3 orphans this job exists to prevent.
+  #
+  # It is deliberately NOT added to the `if:` below. Per ADR-071 decision 4b this must NOT be a
+  # gate: `needs` supplies the ordering edge, while the `!cancelled()` form of the `if:` (NOT the
+  # default implicit success-gating) means a FAILED or SKIPPED precascade still lets every Phase 1
+  # root run and go green, preserving ADR-066 INV-1. Same ordering-not-gating pattern this
+  # workflow already uses for `disarm`, and skip-safe for the single-root and mode=az-sweep paths
+  # where `diagnostic-precascade` never runs at all.
   synthetic:
-    needs: [guard, disarm]
+    needs: [guard, disarm, diagnostic-precascade]
     if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.disarm.result == 'success' || needs.disarm.result == 'skipped') && inputs.mode == 'terraform' && (inputs.target == 'all' || inputs.target == 'synthetic') }}
     uses: ./.github/workflows/_tf-root.yml
     with:

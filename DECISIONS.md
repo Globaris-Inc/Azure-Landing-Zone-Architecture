@@ -655,6 +655,27 @@ terraform path could not complete are DevSecOps's and are deliberately not resta
   teardown job plus one blocking gate step in `teardown.yml`); decisions 1, 2, 3, 4a and 6 are rulings,
   operator actions and doc amendments that need no `.tf` or `.yml`. Update this field by dated addendum
   when the DevSecOps PR merges.
+  - **ADDENDUM 2026-08-01: decision 4b IS NOW IMPLEMENTED. Decision 5 is NOT.** Landed as specified:
+    the step 2-pre body extracted verbatim into `sweep_resource_diagnostic_settings`
+    (`scripts/teardown-common.sh`) with `exit 1` becoming `return 1` as its only change; new
+    `scripts/teardown-diagnostic-precascade.sh`; new `diagnostic-precascade` job in `teardown.yml`
+    gated byte-identically to `databricks-precascade` (`needs: [guard]`, `target=all` AND
+    `mode=terraform`, not wired for `az-sweep`); step 2-pre kept as the belt. **One addition beyond the
+    literal spec, flagged rather than folded in:** the Phase 1 CHAIN HEAD (`synthetic`) now `needs`
+    this job. The spec gave the precascade's own gate but not an ordering edge, and without one the
+    sweep runs CONCURRENTLY with Phase 1 - `bank-data-p1` would begin deleting Databricks/Foundry/Search
+    hosts while the sweep was still enumerating, making exactly those settings the FM-3 orphans this
+    job exists to prevent. The Databricks precedent has the same shape (`bank-data-p1` `needs`
+    `databricks-precascade`); it needs to precede ONE root, whereas this sweep spans every root, so the
+    edge belongs on the chain head. It is deliberately absent from `synthetic`'s `if:`, so it remains
+    ORDERING ONLY and never gates a layer (ADR-066 INV-1), per decision 4b's "Not a gate".
+    New regression suite `scripts/test-teardown-diagnostic-sweep.sh`, 22 assertions, mutation-tested:
+    breaking the auth-vs-noise asymmetry, making the expected-noise branch fatal, and dropping the
+    confirm-GET were each caught. **Decision 4b's ACCEPTANCE (and T3) is NOT yet discharged** - it
+    requires a live `target=all mode=terraform` teardown showing the job delete real settings, then a
+    greenfield first apply of `bank-data-p1` and `bank-app-p1` reporting zero `already exists`. Until
+    that runs, decision 3's interim two-applies rule REMAINS the operating rule and PC-1DIAG's
+    budgeted B1 disposition still stands.
 - **Decision makers:** claude (architect); user (raised the class, recorded the two-applies rule that
   decision 3 ratifies and narrows, and identified the teardown hazard that decision 5 answers).
 
