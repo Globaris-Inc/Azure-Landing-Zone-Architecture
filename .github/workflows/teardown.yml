@@ -1002,9 +1002,9 @@ jobs:
   # facing the worst-case run still gets an honest, structured account of what happened.
   teardown-summary:
     name: "Teardown Summary (run-outcome distinction)"
-    needs: [guard, disarm, databricks-precascade, synthetic, bank-data-p1, bank-app-p1, online-p1,
-            corp-a2, corp-a1, security, connectivity, identity, attachment-sweep, management,
-            management-groups, az-sweep, verify, state-reset]
+    needs: [guard, disarm, databricks-precascade, diagnostic-precascade, synthetic, bank-data-p1,
+            bank-app-p1, online-p1, corp-a2, corp-a1, security, connectivity, identity,
+            attachment-sweep, management, management-groups, az-sweep, verify, state-reset]
     if: ${{ always() && inputs.target == 'all' }}
     runs-on: ubuntu-latest
     # Least privilege: this job only reads job-status data GitHub Actions already computed - no
