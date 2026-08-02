@@ -94,6 +94,7 @@ add_line ""
 add_line "-- Belt jobs (not hard gates - a failure here does not block the layer it precedes) --"
 add_line "  disarm: $(result_of disarm)"
 add_line "  databricks-precascade: $(result_of databricks-precascade)"
+add_line "  diagnostic-precascade: $(result_of diagnostic-precascade) (ADR-071 decision 4b - a failure leaves an FM-3 orphan that NO later greenfield proof can see, and it surfaces only as an 'already exists' on the first apply that recreates the host, recovered by runbook B1; it never skips a Phase 1 layer)"
 add_line "  attachment-sweep: $(result_of attachment-sweep) (ADR-072 decision 4 - a failure surfaces as platform/management's own prevent_deletion_if_contains_resources error or a Phase 2/3 remnant, never a skipped layer)"
 add_line "  az-sweep (Phase 2, remnant-catch belt): $(result_of az-sweep)"
 
