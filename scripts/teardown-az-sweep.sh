@@ -418,57 +418,16 @@ fi
 #     precedent) - only an auth-shaped failure fails loud here; any other failure is expected
 #     noise and is skipped, not treated as "no diagnostic settings" for a class that never existed
 #     at all.
+#     EXTRACTED 2026-08-01 (ADR-071 decision 4b) into `sweep_resource_diagnostic_settings`
+#     (teardown-common.sh). The body moved verbatim - same api-version, same containment
+#     predicate, same auth-shaped-failure-only loud branch, same confirm-GET - so this site's
+#     behaviour is unchanged. It is shared because Phase 0.5 (teardown-diagnostic-precascade.sh)
+#     is now a SECOND caller, and the two must not drift. This step STAYS: it is the belt for the
+#     mode=az-sweep path (where Phase 0.5 is deliberately not wired, because Phase 1 never runs
+#     there and this step already executes while hosts are live) and the backstop for anything
+#     Phase 0.5 missed. Removing it would trade one gap for another.
 echo "== Phase 2 step 2-pre: resource-scoped diagnostic settings (before RG deletes are submitted) =="
-for sub in "${SUBS[@]}"; do
-  if ! discover_live_rgs rg2pre_names_out "$sub"; then
-    echo "::error::RG list failed for subscription ${sub} while discovering resource-scoped diagnostic-settings targets - a failed list is never read as 'no RGs' (section 9.4): ${AZ_RUN_STDERR}"
-    exit 1
-  fi
-  # shellcheck disable=SC2154  # rg2pre_names_out is assigned indirectly by az_run's printf -v
-  mapfile -t rg2pre_names <<< "$rg2pre_names_out"
-  for rg in "${rg2pre_names[@]:-}"; do
-    [ -z "$rg" ] && continue
-    if ! az_run_retry rg2pre_resource_ids_out resource list --resource-group "$rg" --subscription "$sub" --query "[].id" -o tsv; then
-      echo "::error::resource list failed for RG ${rg} (sub ${sub}) while enumerating resources for the resource-scoped diagnostic-settings sweep: ${AZ_RUN_STDERR}"
-      exit 1
-    fi
-    # shellcheck disable=SC2154  # rg2pre_resource_ids_out is assigned indirectly by az_run's printf -v
-    mapfile -t rg2pre_resource_ids <<< "$rg2pre_resource_ids_out"
-    for res_id in "${rg2pre_resource_ids[@]:-}"; do
-      [ -z "$res_id" ] && continue
-      if ! az_run_retry rg2pre_diag_names_out rest --method get \
-          --url "${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}" \
-          --query "value[].name" -o tsv; then
-        if is_auth_error "$AZ_RUN_STDERR"; then
-          echo "::error::resource-scoped diagnostic-settings list failed for ${res_id} with an auth/transport error: ${AZ_RUN_STDERR}"
-          exit 1
-        fi
-        # Expected noise for a resource type that does not support diagnostic settings at all -
-        # not a class that "has none"; skip this resource, not the whole sweep.
-        continue
-      fi
-      # shellcheck disable=SC2154  # rg2pre_diag_names_out is assigned indirectly by az_run's printf -v
-      mapfile -t rg2pre_diag_names <<< "$rg2pre_diag_names_out"
-      for name in "${rg2pre_diag_names[@]:-}"; do
-        [ -z "$name" ] && continue
-        if ! is_estate_owned --resource-id "$res_id"; then
-          # Structurally unreachable (res_id came from a discover_live_rgs-filtered RG) - kept
-          # as a hard stop rather than a silent skip, same defensive posture as every other
-          # "should be impossible" branch this fix adds.
-          echo "::error::resource-scoped diagnostic setting ${name} on ${res_id} did not classify as estate-owned by is_estate_owned - this should be structurally impossible for a resource inside an RG_SWEEP_QUERY-matched RG. Failing loud rather than silently skipping."
-          exit 1
-        fi
-        echo "  Deleting resource-scoped diagnostic setting ${name} (resource ${res_id})"
-        rg2pre_diag_url="${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings/${name}?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}"
-        if ! rg2pre_diag_del_out="$(az rest --method delete --url "$rg2pre_diag_url" --output none 2>&1)"; then
-          echo "::error::resource-scoped diagnostic setting delete for ${name} (resource ${res_id}) failed: ${rg2pre_diag_del_out}"
-          exit 1
-        fi
-        confirm_gone_or_fail_primary "resource-scoped diagnostic setting ${name} (resource ${res_id})" "$rg2pre_diag_url" || exit 1
-      done
-    done
-  done
-done
+sweep_resource_diagnostic_settings || exit 1
 
 # --- 2. General RG sweep by naming pattern, across all 5 subs (--no-wait submission). The
 #     Databricks-managed RG is STILL excluded here even with --force-deletion in step 1: it

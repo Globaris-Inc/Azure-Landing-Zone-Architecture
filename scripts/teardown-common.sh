@@ -1087,6 +1087,92 @@ discover_live_rgs() {
   az_run_retry "$__out_var" group list --subscription "$__sub" --query "$RG_SWEEP_QUERY" -o tsv
 }
 
+# sweep_resource_diagnostic_settings - deletes every estate-owned RESOURCE-scoped
+# `microsoft.insights/diagnosticSettings` object reachable while its host resource is still LIVE.
+# Enumeration shape: teardown_subscriptions -> discover_live_rgs -> `az resource list` per RG ->
+# diagnosticSettings LIST per resource id -> DELETE + confirm-GET per name.
+#
+# EXTRACTED 2026-08-01 from teardown-az-sweep.sh's inline Phase 2 step 2-pre (ADR-071 decision 4b),
+# unchanged in behaviour, api-version, containment predicate, failure handling and confirm-GET. It
+# is shared for exactly the reason `databricks_force_delete_cascade` is: there are now TWO call
+# sites (Phase 0.5 precascade and Phase 2 step 2-pre) and they must not drift on the az invocation.
+# The ONLY difference from the original inline body is `return 1` where it said `exit 1`, so the
+# caller decides whether a failure is fatal - the two callers genuinely differ on that.
+#
+# WHY A SECOND CALL SITE EXISTS AT ALL (ADR-071 decision 4b, the ordering regression). Step 2-pre
+# can only see a setting whose HOST IS STILL LIVE, and it sits in Phase 2, which `needs` all of
+# Phase 1. Under ADR-066 `mode=terraform` at `target=all` runs the per-root `terraform destroy`
+# jobs FIRST, deleting the hosts, after which no enumeration can reach any setting the destroying
+# root did not hold in state. So on the mode=terraform path the sweep is structurally unable to
+# catch the residue it was written for. This is the identical shape ADR-066 decision 4 found for
+# Databricks and fixed by moving the operation to a Phase 0.5 job that runs while the target is
+# still live. G-1 / FM-3: a diagnosticSettings object is keyed to its host's URI, outlives the
+# host, outlives the state, and is invisible to every discovery-based greenfield proof - which is
+# why it silently re-collides on the next apply that recreates a same-named host, and why the fix
+# has to happen at teardown rather than at apply.
+#
+# LIST-FAILURE HANDLING DIFFERS FROM EVERY OTHER LIST IN THIS CODEBASE, deliberately. A
+# resource-scoped diagnosticSettings GET can legitimately 404/BadRequest for a resource TYPE that
+# does not support diagnostic settings at all (most do; some do not). Only an AUTH-shaped failure
+# fails loud; any other failure is expected noise and skips that one resource. It is never read as
+# "this resource has no diagnostic settings" for a class that never existed on it.
+sweep_resource_diagnostic_settings() {
+  local sub rg res_id name
+  local rgnames_out rgnames resource_ids_out resource_ids diag_names_out diag_names diag_url diag_del_out
+  for sub in $(teardown_subscriptions); do
+    if ! discover_live_rgs rgnames_out "$sub"; then
+      echo "::error::RG list failed for subscription ${sub} while discovering resource-scoped diagnostic-settings targets - a failed list is never read as 'no RGs' (section 9.4): ${AZ_RUN_STDERR}"
+      return 1
+    fi
+    mapfile -t rgnames <<< "$rgnames_out"
+    for rg in "${rgnames[@]:-}"; do
+      [ -z "$rg" ] && continue
+      if ! az_run_retry resource_ids_out resource list --resource-group "$rg" --subscription "$sub" --query "[].id" -o tsv; then
+        echo "::error::resource list failed for RG ${rg} (sub ${sub}) while enumerating resources for the resource-scoped diagnostic-settings sweep: ${AZ_RUN_STDERR}"
+        return 1
+      fi
+      mapfile -t resource_ids <<< "$resource_ids_out"
+      for res_id in "${resource_ids[@]:-}"; do
+        [ -z "$res_id" ] && continue
+        if ! az_run_retry diag_names_out rest --method get \
+            --url "${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}" \
+            --query "value[].name" -o tsv; then
+          if is_auth_error "$AZ_RUN_STDERR"; then
+            echo "::error::resource-scoped diagnostic-settings list failed for ${res_id} with an auth/transport error: ${AZ_RUN_STDERR}"
+            return 1
+          fi
+          # Expected noise for a resource type that does not support diagnostic settings at all -
+          # not a class that "has none"; skip this resource, not the whole sweep.
+          continue
+        fi
+        mapfile -t diag_names <<< "$diag_names_out"
+        for name in "${diag_names[@]:-}"; do
+          [ -z "$name" ] && continue
+          if ! is_estate_owned --resource-id "$res_id"; then
+            # Structurally unreachable (res_id came from a discover_live_rgs-filtered RG) - kept
+            # as a hard stop rather than a silent skip, same defensive posture as every other
+            # "should be impossible" branch this class's original fix added.
+            echo "::error::resource-scoped diagnostic setting ${name} on ${res_id} did not classify as estate-owned by is_estate_owned - this should be structurally impossible for a resource inside an RG_SWEEP_QUERY-matched RG. Failing loud rather than silently skipping."
+            return 1
+          fi
+          echo "  Deleting resource-scoped diagnostic setting ${name} (resource ${res_id})"
+          diag_url="${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings/${name}?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}"
+          if ! diag_del_out="$(az rest --method delete --url "$diag_url" --output none 2>&1)"; then
+            echo "::error::resource-scoped diagnostic setting delete for ${name} (resource ${res_id}) failed: ${diag_del_out}"
+            return 1
+          fi
+          # This delete's own confirm-GET is the ONLY completion check this class will ever get:
+          # by the time Phase 3 VERIFY runs, the host and its RG are expected to be gone, so there
+          # is no later discovery that could re-observe the object (FM-3). Same PRIMARY-evidence
+          # rationale FIX-1's MG-scope confirm-GETs use.
+          confirm_gone_or_fail_primary "resource-scoped diagnostic setting ${name} (resource ${res_id})" "$diag_url" || return 1
+        done
+      done
+    done
+  done
+  return 0
+}
+
 # databricks_force_delete_cascade <managed_rgs_outvar> <managed_rg_subs_outvar> - lists every
 # Databricks workspace across every estate subscription (teardown_subscriptions) and submits a
 # --no-wait --force-deletion delete for each (architect pre-clearance C1: --force-deletion is
