@@ -1627,6 +1627,26 @@ would drift further every rebuild cycle.
 **Recommended default:** A, actioned before 2026-08-15. It is a single command and it does not touch
 the rebuild, so it can be done at any convenient point and is NOT a gate on B0a.
 
+**LIVE CONFIRMATION 2026-08-02 (pre-clearance refresh #5, PC-1AI).** The estimate is now a measured
+date. Read from `az security pricing show -n AI --subscription sub-security-poc-01`:
+
+| Field | Value |
+|---|---|
+| `pricingTier` | `Standard` |
+| `enablementTime` | `2026-07-16T04:40:39Z` |
+| `freeTrialRemainingTime` | **`12 days, 5:54:00`** |
+
+**So the conversion date is on or about 2026-08-14, one day earlier than the "approximately 2026-08-15"
+this entry estimated, and it falls INSIDE the rebuild window.** Nothing else about the entry changes:
+the plan is still unmanaged by Terraform, still in no root's state, and still owned by nobody, and
+option A is still a single reversible command.
+
+**Two further non-estate plans were found reading `Standard` in the same query and are NOT covered by
+this entry:** `Discovery` and `FoundationalCspm`. Neither is in `local.defender_extended_plans` nor in
+the foundational set in `main.tf`. Who enabled them and whether either bills was **not** determined -
+named here rather than implied, and it should be resolved in the same pass that dispositions the AI
+plan.
+
 ### OQ-051: The ADR-041 temporary tenant-root grants are five days past their time-box and have no revocation owner - who revokes, when, and what replaces them
 
 - **Raised:** 2026-07-21 (B0a pre-clearance refresh, architect; PC-6R(c))
