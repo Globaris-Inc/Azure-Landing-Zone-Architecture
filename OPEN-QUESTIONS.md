@@ -31,6 +31,108 @@
 
 <!-- Newest at the top. -->
 
+### OQ-072: ADR-040 removed the Defender Key Vault and Resource Manager plans as "deprecated for new enablement"; Azure Advisor now recommends enabling both on 7 subscription rows - one of the two is wrong
+
+- **Raised:** 2026-08-02 (Advisor export evaluation, `docs/advisor-remediation-plan.md` group D)
+- **Section:** 6 (Defender for Cloud + Sentinel)
+- **Blocking:** No. Blocks only the Defender portion of the post-rebuild hardening wave (phase 4).
+- **Priority:** Medium
+
+**Question:**
+
+`platform/security/defender.tf:20-23` carries this comment, and the plans were removed on its authority:
+
+> (KeyVaults and Arm were removed from main.tf per ADR-040: deprecated for new enablement since
+> 2026-07-05; CloudPosture/CSPM below carries the posture surface for both.)
+
+The 2026-08-01 Advisor export contains **5 rows** of "Microsoft Defender for Resource Manager should be
+enabled" and **2 rows** of "Microsoft Defender for Key Vault should be enabled", both rated **High**.
+
+**These two statements cannot both be current.** Either the deprecation was real and Advisor is
+recommending a plan that can no longer be newly enabled (Advisor's recommendation catalogue is known to
+lag retirements), or the deprecation reading was wrong and the estate removed two working plans on a
+mistaken basis, leaving a posture gap that Advisor is correctly flagging.
+
+**This must not be resolved from memory or from the existing comment.** It is exactly the class the
+project has been bitten by twice at apply time (NSG flow logs, the Dns Defender plan): a lifecycle claim
+that `validate` and `plan` both accept and only the live API adjudicates. The answer needs a current
+Microsoft documentation check dated at the time of the decision, plus the ADR-040 text itself re-read to
+establish what it actually claimed.
+
+**Options being considered:**
+
+- **A.** Deprecation confirmed. Re-affirm ADR-040, and record in the plan document that these 7 Advisor
+  rows are permanently un-actionable so nobody re-opens them at the next export. Zero code.
+- **B.** Deprecation was a misreading. Restore `KeyVaults` and `Arm` to `defender_extended_plans`, with a
+  dated addendum on ADR-040 recording the correction. Cost-bearing, and it interacts with OQ-071's
+  question of which subscriptions carry Defender at all.
+- **C.** Partial: one of the two plans is deprecated and the other is not. Treat them separately.
+
+**Recommended:** verify first, decide after. Do not schedule the work until the lifecycle status is
+established, and note that whichever way it resolves, `CloudPosture` is claimed in the same comment to
+carry "the posture surface for both" - that claim is also unverified and should be checked in the same
+pass.
+
+---
+
+### OQ-071: Defender for Cloud is enabled on ONE of the five estate subscriptions, and two further subscriptions in the tenant sit outside the landing zone entirely
+
+- **Raised:** 2026-08-02 (Advisor export evaluation, `docs/advisor-remediation-plan.md` group D)
+- **Section:** 6 (Defender for Cloud + Sentinel) / 2 (Management Group Hierarchy)
+- **Blocking:** No. Blocks phase 4 of the post-rebuild hardening wave. Cost-bearing, so it needs a user
+  answer rather than an architect default.
+- **Priority:** High (it is the largest genuine posture gap the Advisor export surfaced)
+
+**Question:**
+
+**Limb A - Defender covers 1 of 5 subscriptions.** `azurerm_security_center_subscription_pricing` is a
+subscription-scoped resource, and every instance of it lives in `platform/security`, which is a
+single-subscription root. So the six plans in `local.defender_extended_plans`
+(`platform/security/defender.tf:29-36`) plus the foundational plans in `main.tf` apply to the **security**
+subscription only. Nothing in this repository extends them to connectivity, identity, management, or
+landing zones.
+
+Advisor confirms this from the outside: 5 rows for Defender for Storage, 5 for CSPM, 5 for Resource
+Manager, one per estate subscription. This is not drift and not a bug in anyone's work - the root was
+scoped to one subscription by construction and the gap was never named.
+
+There is a second, narrower half: even on the subscription that IS covered, the Storage plan is enabled
+at `tier = "Standard"` without the **Malware Scanning** or **Sensitive Data Threat Detection**
+sub-features, which is specifically what Advisor's High-severity row asks for. And **Defender for APIs**
+is absent from the plan set, which mattered less before `bank-app-p1` had an APIM instance and matters
+now.
+
+**Limb B - two subscriptions are outside the estate.** The export covers **7** subscriptions. The managed
+estate is **5**. `sub-app-01` and `sub-avd-poc-01` appear only in the Service Health row. They are outside
+every management group assignment, policy, Defender plan and diagnostic configuration this repository
+creates. Whether that is correct is a separate question from whether it is *declared* - right now it is
+not declared anywhere, which is the same shape as the undeclared CI SP grants in OQ-061.
+
+**Options being considered (limb A):**
+
+- **A.** Extend the Defender plan set to all five estate subscriptions via a subscription-scoped module
+  or an ALZ DINE policy assignment at the MG scope. Most complete, matches the CAF intent that posture is
+  a platform property and not a per-root one. Highest cost: Defender plans bill per resource, per plan,
+  per subscription.
+- **B.** Extend only the plans with a real subject in each subscription (Storage everywhere,
+  CloudPosture everywhere, Containers only where AKS exists). Cheaper, and it needs a per-subscription
+  inventory to stay correct as the estate changes, which is a maintenance obligation of the kind ADR-062
+  ruled against.
+- **C.** Extend CSPM (`CloudPosture`) estate-wide and leave the workload plans on security only. CSPM is
+  the cheapest broad-posture plan and gives the asset graph and attack paths across the whole estate.
+  Partial but defensible, and it is the single best cost-to-posture ratio in the set.
+- **D.** Accept the current scope for the POC and record it as a deviation.
+
+**Recommended:** **C** as the default, with the Storage sub-features enabled on the subscriptions that
+actually hold data (landing zones, management). **A** if the portfolio claim needs to be "Defender for
+Cloud across the estate" without qualification. The cost delta between C and A should be estimated before
+the decision, since this is the one item in the whole Advisor evaluation with a recurring bill attached.
+
+**For limb B:** the answer is to declare, not necessarily to change. Either bring the two subscriptions
+under the hierarchy or record in `ARCHITECTURE.md` why they sit outside it.
+
+---
+
 ### OQ-070: `envs/poc.tfvars` is a single-state file describing a POST-rebuild estate, so `banking` is never greenfield-dispatchable between rebuilds and carries a latent Step-1 and Step-9 failure by default
 
 - **Raised:** 2026-08-01 (architect, pre-clearance refresh #4)
