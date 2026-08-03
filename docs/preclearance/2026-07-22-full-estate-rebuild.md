@@ -3064,3 +3064,34 @@ re-derivable +2, with an architect disposition recorded in ADR-074 - which is th
 Rule 1, not an exception to it.
 
 **Step 2's operator instruction changes by one number: expect 38, not 36.**
+
+---
+
+# 2026-08-02 REFRESH #5, AMENDMENT B - PR #100 (stale-date class fix) has ZERO plan-bar effect; refresh #5 carries to `7b40f4c`
+
+**Type:** AMENDMENT to refresh #5. Append-only.
+
+**Why it exists.** The standing gate is that no apply proceeds without a current pre-clearance. Refresh
+#5 cleared `c4da1bc`; Amendment A extended it over ADR-074 (`5797880`); PR #100 has since merged
+(`7b40f4c`). This records why that merge does not require a refresh #6, rather than leaving it assumed.
+
+**What PR #100 changed, and the bar effect of each:**
+
+| Change | Bar effect |
+|---|---|
+| `envs/poc.tfvars` `budget_start_date` `2026-07-01` -> `2026-08-01` | **Zero.** A value change on an existing resource argument. No address added or removed. Step 2 stays **38** |
+| `landing-zones/bank-data-p1/policy_exemptions.tf` - two new `locals` and `expires_on` switched to reference one | **Zero.** Locals are not addresses and never appear in a plan count. Step 8 stays **76** |
+| Same file - `lifecycle { ignore_changes = [expires_on] }` added | **Zero on the create.** `ignore_changes` governs subsequent diffs, not the initial create. Step 8 stays **76** |
+| `synthetic/cost_patterns.tf`, `synthetic/cost_guardrails.tf` | **Zero.** `synthetic` is not one of the fourteen dispatched steps and `enable_synthetic_workload` is `false` |
+| `OPEN-QUESTIONS.md` | Docs |
+
+**No `.tf` file in any of the fourteen dispatched roots gained or lost a resource address.** All fourteen
+bars carry unchanged from refresh #5 W6 as amended by A: 537 / **38** / 48 / 696, 24 / 24 / 26 / **76** /
+67, 16 / 10, 1, 3 / 223.
+
+**One forward-looking note.** `budget_start_date = "2026-08-01T00:00:00Z"` is correct only through
+2026-08-31 UTC. If Step 2's apply has not landed by 2026-09-01 the identical failure reproduces. That is
+the reason OQ-070's durable fix is a property assertion rather than another literal, and it is deferred
+to after the rebuild by operator ruling.
+
+**Verdict unchanged: GO.**
