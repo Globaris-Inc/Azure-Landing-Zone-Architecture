@@ -1779,7 +1779,7 @@ would drift further every rebuild cycle.
   leaves an unowned Standard plan drifting in the estate and re-raises this same question every cycle.
 
 **Recommended default:** A, actioned before 2026-08-15. It is a single command and it does not touch
-the rebuild, so it can be done at any convenient point and is NOT a gate on B0a.
+the rebuild, so it can be done at any convenient point and is NOT a gate on B0a.~~
 
 **LIVE CONFIRMATION 2026-08-02 (pre-clearance refresh #5, PC-1AI).** The estimate is now a measured
 date. Read from `az security pricing show -n AI --subscription sub-security-poc-01`:
@@ -1800,6 +1800,19 @@ this entry:** `Discovery` and `FoundationalCspm`. Neither is in `local.defender_
 the foundational set in `main.tf`. Who enabled them and whether either bills was **not** determined -
 named here rather than implied, and it should be resolved in the same pass that dispositions the AI
 plan.
+
+**RESOLVED 2026-08-02 (user): OPTION C - accept it and let it convert.** Leave the `AI` plan at
+`Standard`; take no action before the ~2026-08-14 conversion. The same ruling covers `Discovery` and
+`FoundationalCspm`. **PC-1AI** in pre-clearance refresh #5 is dispositioned by this and is no longer an
+open item on any rebuild.
+
+**The standing consequence, recorded because option C's own text named it and it should not be lost in
+the resolution:** the estate now knowingly carries three `Standard` Defender plans that Terraform does
+not manage, that appear in no root's state, and that a teardown **cannot disarm**. That last part is not
+theoretical - it was demonstrated on 2026-08-02: the teardown's Phase 0 disarm set all 8 estate-managed
+plans to `Free`, and these three survived at `Standard` precisely because nothing in this repository
+owns them. Expected cost is near zero, which is why the trade is acceptable; the drift is real
+regardless and is the thing to remember if a future cost review asks where these came from.
 
 ### OQ-051: The ADR-041 temporary tenant-root grants are five days past their time-box and have no revocation owner - who revokes, when, and what replaces them
 
