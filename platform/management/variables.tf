@@ -119,6 +119,31 @@ variable "enable_om_phase1" {
 }
 
 # ---------------------------------------------------------------------------
+# Region restriction (ADR-074)
+# ---------------------------------------------------------------------------
+
+variable "allowed_locations" {
+  description = "Azure regions the estate is permitted to deploy into, enforced as Deny at the Globaris root management group (ADR-074). Continental US only. Authoritative value is envs/poc.tfvars; this default only matches it. Deliberately EXCLUDES the four US canary regions (centraluseuap, eastus2euap, eastusstg, southcentralusstg), which are Early Update Access / staging regions that a naive geographyGroup=='US' filter would include."
+  type        = list(string)
+  default = [
+    "centralus",
+    "eastus",
+    "eastus2",
+    "northcentralus",
+    "southcentralus",
+    "westcentralus",
+    "westus",
+    "westus2",
+    "westus3",
+  ]
+
+  validation {
+    condition     = length(var.allowed_locations) > 0
+    error_message = "allowed_locations must not be empty - an empty allow-list would Deny every resource creation in the estate."
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Common
 # ---------------------------------------------------------------------------
 
