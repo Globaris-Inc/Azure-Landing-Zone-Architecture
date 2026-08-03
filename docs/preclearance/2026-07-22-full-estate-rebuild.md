@@ -2946,3 +2946,121 @@ evidence they predate a green 1,721-resource rebuild and its teardown; new PC-1K
 soft-deleted Key Vaults inert at source via random_id with no keepers; PC-1REG' and PC-1TF verification
 commands both corrected after failing to run as written
 ```
+
+---
+
+# 2026-08-02 REFRESH #5, AMENDMENT A - ADR-074 region restriction folded into the rebuild; Step 2's bar moves 36 to 38
+
+**Type:** AMENDMENT to refresh #5, same day. Append-only: nothing above this line was edited, including
+refresh #5's own W6 table, which this amendment supersedes for one row only.
+
+**Why this amendment exists.** Refresh #5 certified all fourteen bars as carrying unchanged and recorded
+that the entire apply-path delta since refresh #4 was one file. **Both statements were true when written
+and are now superseded**, because the user identified a genuine governance gap after refresh #5 was
+authored and ruled that the fix be folded into the rebuild rather than deferred (ADR-074 decision 7).
+
+Recording this as an amendment rather than editing W6 in place is the point: a bar that changes silently
+is the exact failure Rule 1 exists to prevent.
+
+## A1. What changed on the apply path
+
+| File | Change |
+|---|---|
+| `platform/management/region-restriction.tf` | **NEW.** Two `azurerm_management_group_policy_assignment` resources at `local.globaris_mg_id` |
+| `platform/management/variables.tf` | **NEW** variable `allowed_locations`, `list(string)`, defaulted to the nine continental US regions, with a non-empty validation |
+| `envs/poc.tfvars` | `allowed_locations` set explicitly, matching the default |
+
+No other root is touched. `envs/poc.tfvars` is shared across all ten roots, so the other nine will emit
+Terraform's "Value for undeclared variable" **warning** for `allowed_locations`. That is the estate's
+pre-existing pattern for every root-specific tfvars entry (`identity_location`,
+`enable_acr_kubelet_binding` and others behave identically) and it is a warning, not an error.
+
+## A2. The bar
+
+| Step | Root | Refresh #5 bar | **Amended bar** | Basis |
+|---|---|---|---|---|
+| 2 | `platform/management` | 36 | **38** | Exactly two new addresses: `azurerm_management_group_policy_assignment.allowed_locations_resources` and `.allowed_locations_resource_groups`. Both are native `azurerm` resources, **not** AVM modules, so they carry **no `modtm_telemetry` or `random_uuid` pseudo-resources** and the delta is exactly +2 with no telemetry component. The `allowed_locations` variable and the `local` are not addresses. **No `time_sleep` and no policy exemption unit is added**, because every region the estate deploys into is on the allow-list, so no protected resource needs to wait on propagation. |
+
+**All thirteen other bars are unchanged**, and Step 13 (`platform/management` B7) stays at **3**: it
+plans the AMBA delta only, and these two assignments will already exist in state from Step 2.
+
+**Rule 1 still applies unchanged.** The Step 2 plan must read exactly **38 to add, 0 to change, 0 to
+destroy**. Anything else, including 37 or 39, is a STOP requiring a fresh disposition.
+
+## A3. Risk assessment for the rebuild
+
+**This policy cannot block a correct apply OF THE FOURTEEN DISPATCHED STEPS, and the reasoning is
+empirical rather than theoretical.** The scope qualifier is not padding: see A3a, which the
+code-reviewer BLOCKED this change to add.
+
+- The 2026-07-31 rebuild created **1,808** resources **exclusively** in `centralus` and `eastus2`. Both
+  are on the allow-list, which contains nine regions, so the list is strictly wider than observed usage.
+  (1,808 is the authoritative per-step sum in `docs/estate-bom.md:370`, which explicitly names the
+  "roughly 1,721" running total this amendment first cited as a superseded narrative checkpoint.)
+- **`global` is excluded by the built-in rule itself**, verified against the live policy definition on
+  2026-08-02, not assumed. This is the single most important safety property here: `platform/connectivity`
+  creates 89 private DNS zones at `location = global`, and had the built-in lacked that clause the Step 4
+  apply would have been denied wholesale.
+- Resource groups always carry a real region, so the RG policy needs no `global` carve-out.
+- The assignment lands in the same apply as `platform/management`'s own resources, all of which are in
+  `centralus`. Policy propagation is not a race here because nothing being created is outside the list.
+
+**The one residual risk, stated rather than hidden:** if any root creates a resource in a region not on
+the list, that apply now fails with `RequestDisallowedByPolicy` where previously it would have
+succeeded. A new region would require the tfvars list to change first, which is the intended behaviour
+of a residency control and not a defect.
+
+## A2a. Global correction: every "roughly 1,721" in refresh #5 should read 1,808
+
+Refresh #5 uses "roughly 1,721 resources" as the size of the 2026-07-31 rebuild, notably in the PC-1MFA
+row. **`docs/estate-bom.md:370` is the authority and it says 1,808**, naming "roughly 1,721" explicitly
+as a mid-build narrative checkpoint that should not be used as the baseline.
+
+Refresh #5 is append-only, so it is corrected here rather than edited in place. **The correction is the
+class, not the instance:** every occurrence of that figure in refresh #5 should be read as 1,808.
+Nothing that depends on it changes - PC-1MFA's discharge rests on the MFA assignments predating the
+rebuild and its teardown, which is a date comparison and not a count - but a figure the repository has
+already superseded should not be quoted as evidence.
+
+## A3a. One root DOES create outside the allow-list, and this amendment first said otherwise
+
+**Added at the code-reviewer gate, which BLOCKED on it.** The first draft of A3 asserted "nothing in the
+current estate does so". **That is false as a statement about the estate's code**, and it is a doctrine
+1a overclaim of exactly the kind this project keeps paying for.
+
+`synthetic/red_team.tf:157` creates `azurerm_resource_group.red_team_secondary` at
+`var.red_team_geo_location`, default **`westeurope`** (`synthetic/variables.tf:63`), with further
+resources at `:301` and `:367`. `synthetic`'s provider targets the landingzones subscription, which is
+under the `globaris` MG this Deny governs. The placement is **deliberate**: the second Container Apps
+Environment is on the far side of the world so the impossible-travel detection scenario produces a real
+signal.
+
+**It cannot fire during this rebuild**, and both limbs of that are checked rather than assumed:
+`enable_synthetic_workload = false` in `envs/poc.tfvars`, and `synthetic` is not one of the fourteen
+dispatched steps (the runbook states it is not dispatched at all, ADR-036/037). **So this changes
+nothing about the rebuild's risk profile.**
+
+What it changes is the honesty of the claim, and one forward commitment: **this Deny will block Section
+13.3 the day it ships.** Raised as **OQ-073** with four options and a recommended default.
+**Standing instruction: do not flip `enable_synthetic_workload` to true before OQ-073 is resolved.**
+
+## A4. Verification run on this change
+
+| Check | Result |
+|---|---|
+| `terraform fmt -check -diff` on `platform/management` | **exit 0**, clean |
+| `terraform init -backend=false` + `terraform validate` | **Success.** The configuration is valid |
+| Warnings introduced by this change | **None.** The two `validate` warnings are pre-existing: `main.tf:232` and `:675` use the deprecated `management_group_id` argument on `azurerm_policy_set_definition`, and the `platform_law` module uses a deprecated attribute. The new resources use `azurerm_management_group_policy_assignment`, where `management_group_id` is the current, non-deprecated form |
+| Policy definition IDs | Both read from live ARM on 2026-08-02, not from memory |
+| `effect` parameter | Both built-ins expose `effect` as a parameter, so it is passed **explicitly** as `Deny` per OQ-016 |
+| Assignment name lengths (LESSON 27) | MG-scope assignment names cap at 24 characters. Rendered with `org_prefix = "globaris"`: `allow-loc-res-globaris` = **22**, `allow-loc-rg-globaris` = **21** |
+| `shellcheck` / `actionlint` | **UNRUN**, not passed. Neither is installed, and this change contains no shell or YAML |
+| Code-reviewer gate | **NOT YET RUN.** This is the first non-docs change of the session and it must not be committed without an APPROVE plus the `scripts/review-approve.sh` stamp |
+
+## A5. Amended verdict
+
+**GO, unchanged in substance.** The one bar that moves does so by an exactly computed and independently
+re-derivable +2, with an architect disposition recorded in ADR-074 - which is the sanctioned path under
+Rule 1, not an exception to it.
+
+**Step 2's operator instruction changes by one number: expect 38, not 36.**

@@ -48,6 +48,32 @@ primary_location = "centralus"
 # Secondary / DR region
 secondary_location = "eastus2"
 
+# Data-residency guardrail (ADR-074). Enforced as Deny at the Globaris root
+# management group by platform/management/region-restriction.tf, so it governs every
+# resource and resource group in all five estate subscriptions.
+#
+# CONTINENTAL US ONLY. This list is the nine US regions Azure reports with
+# regionType=Physical, MINUS the four canary regions - centraluseuap, eastus2euap,
+# eastusstg, southcentralusstg - which are Early Update Access / staging regions that
+# a naive geographyGroup=="US" filter WOULD include. Do not add them.
+#
+# The estate itself only uses centralus and eastus2, so this list is deliberately
+# wider than observed usage and cannot block a correct apply. Narrowing it to just
+# those two would tighten the residency claim but would make any future region move a
+# policy change first. Resources whose location is "global" (the 89 private DNS zones,
+# among others) are excluded by the built-in policy rule itself and are unaffected.
+allowed_locations = [
+  "centralus",
+  "eastus",
+  "eastus2",
+  "northcentralus",
+  "southcentralus",
+  "westcentralus",
+  "westus",
+  "westus2",
+  "westus3",
+]
+
 # Identity pillar region - identity VNet, Entra Domain Services managed domain,
 # identity RSV. Co-located with the primary hub it peers to. AADDS cannot be
 # moved after creation, so this must never silently diverge from primary_location.

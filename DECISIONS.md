@@ -49,6 +49,140 @@
 
 <!-- Newest at the top. -->
 
+### ADR-074: This estate has had NO enforcing region restriction at any scope, and three separate things disguised that: a Microsoft-managed tenant-root assignment that looks like ours, an ALZ archetype policy whose NAME reads like a geography control but is a resource-group CONSISTENCY audit, and a 57-assignment landing-zone archetype with no location policy in it. The fix is the two built-in allowed-locations policies assigned at the GLOBARIS root MG (never Tenant Root) at effect Deny, parameterised to the nine continental US regions MINUS the four US canary regions, and it is folded into the rebuild rather than deferred because a preventive control applied after the estate exists has never prevented anything
+
+- **Date:** 2026-08-02
+- **Section:** 2 (Management Group Hierarchy) / 7 (FinOps and Governance). Raised by the user from an
+  Azure Advisor review (`docs/advisor-remediation-plan.md`). **Amends pre-clearance refresh #5**, whose
+  Step 2 bar moves 36 -> 38. **Applies OQ-016** (never rely on a built-in policy's implicit effect
+  default). **Relates to OQ-071 limb B** (the two unmanaged subscriptions are the reason the scope is
+  Globaris and not Tenant Root) and to ADR-069 (the `centralus`/`eastus2` pair this list must contain).
+  Does NOT change the `deny_public_network_access` Audit ruling in `platform/management/main.tf`.
+- **Status:** Accepted (user decision on both sequencing and region scope, 2026-08-02).
+- **Landed:** `platform/management/region-restriction.tf` (new), `platform/management/variables.tf`
+  (`allowed_locations`), `envs/poc.tfvars`. Pending the code-reviewer gate and merge; update this field
+  by dated addendum with the commit.
+
+**Context, and why the gap was invisible.**
+
+The user noticed from an Advisor review that the tenant appeared to block only West Europe. The real
+finding is worse and simpler: **there was no enforcing region restriction at all.** Three separate
+things disguised it, and each is worth naming because each would mislead the next reader:
+
+1. **`sys.blockwesteurope` is not ours.** It is enforcing at Tenant Root and its display name is
+   "Microsoft Azure region access restriction blocking West Europe region", but it carries the `sys.`
+   prefix and was created 2025-11-11 by a Microsoft service principal. It is Azure's own restriction on
+   the subscription type, it blocks exactly one region this estate never uses, and it is not ours to
+   manage. Reading it as "our region control, scoped too narrowly" leads to the wrong fix.
+2. **`Audit-ResourceRGLocation` reads like a geography control and is not one.** It is present in the
+   ALZ `root` archetype at library `platform/alz` `2026.04.2`. It audits whether a resource's location
+   MATCHES ITS RESOURCE GROUP's location. That is a consistency check, not a residency control, and its
+   effect is Audit.
+3. **The ALZ `landing_zones` archetype carries 53 policy assignments and not one constrains location.**
+   Neither `Deny-Resource-Locations` nor `Deny-RSG-Locations` appears in either archetype at this
+   library version. (The 53 is counted from the PINNED library artifact in
+   `platform/management-groups/.alzlib`. A first draft of this ADR said 57, taken from a summary of the
+   upstream repository rather than from the pinned artifact that was sitting locally; corrected at the
+   code-reviewer gate, and recorded because it is a doctrine 1f violation of exactly the kind this
+   project keeps paying for.)
+
+Verified 2026-08-02: no `listOfAllowedLocations`, `Deny-Resource-Locations`, `Deny-RSG-Locations` or
+either built-in GUID appeared anywhere in `.tf`, `.tfvars`, `.json` or `.yaml` before this decision.
+
+**Decision 1 - use the two built-in allowed-locations policies, both parameters passed explicitly.**
+`Allowed locations` (`e56962a6-4747-49cd-b67b-bf8b01975c4c`, mode `Indexed`, resources) and
+`Allowed locations for resource groups` (`e765b5de-1225-4ba3-bd56-1ac6695af988`, mode `All`, resource
+groups). **Both expose `effect` AS A PARAMETER**, confirmed against the live definitions rather than
+assumed, so both are passed `effect = "Deny"` EXPLICITLY per OQ-016. An earlier reading that the effect
+was hardcoded in the rule was wrong and is recorded here so it is not repeated.
+
+**Decision 2 - scope is the GLOBARIS root management group, never Tenant Root.** Globaris covers all
+five estate subscriptions. Tenant Root would additionally capture `sub-app-01` and `sub-avd-poc-01`,
+the two subscriptions outside the landing zone recorded in OQ-071 limb B, which this project does not
+own, cannot test against, and must not silently constrain.
+
+**Decision 3 - effect is Deny, not Audit, and this deliberately differs from the neighbouring ruling.**
+`deny_public_network_access` in the same root is held at Audit because a Deny under `landingzones`
+would block legitimate POC workloads. That reasoning does not transfer: the 2026-07-31 rebuild created
+**1,808** resources (the authoritative per-step sum recorded in `docs/estate-bom.md:370`, which
+explicitly names the "roughly 1,721" running total as a superseded narrative checkpoint) exclusively in
+`centralus` and `eastus2`, both on the allow-list, so the allow-list is strictly wider than observed
+usage and cannot block a correct apply **of the fourteen dispatched steps**.
+
+**Decision 3a - the scope of that claim is the fourteen dispatched steps, NOT the repository, and the
+difference is load-bearing.** An earlier draft of this ADR asserted, unqualified, that "nothing the
+estate creates falls outside the allow-list". **That is false as a statement about the estate's code,**
+and the code-reviewer blocked on it. `synthetic/red_team.tf:157` creates
+`azurerm_resource_group.red_team_secondary` at `var.red_team_geo_location`, whose default is
+`westeurope` (`synthetic/variables.tf:63`), and `:301` and `:367` place further resources there. It is
+**deliberately** outside the US so the impossible-travel detection scenario produces a real signal, and
+`synthetic`'s provider targets the landingzones subscription, which sits under the `globaris` MG this
+Deny governs.
+
+It cannot fire during this rebuild: `enable_synthetic_workload = false` and `synthetic` is not one of
+the fourteen steps. But **this Deny will block it the day Section 13.3 ships**, behind a clean plan, at
+PUT time - the precise failure class LESSON 40/41 exists to prevent. Raised as **OQ-073** with four
+options: exempt the red-team RG (the ADR-070 shape), narrow the assignment scope, relocate the second
+pole to a US region, or accept that the scenario does not ship.
+
+**A note on the relocate option, because this ADR got it wrong first.** The OQ initially asserted that
+moving the second pole to a US region would lose the impossible-travel signal, on the grounds that
+cross-country US travel is not impossible travel. **The code-reviewer BLOCKED on that and was right.**
+Read from Microsoft's documentation 2026-08-02, neither candidate detection has any country term:
+Atypical travel (`unlikelyTravel`) keys on "geographically distant locations" plus "the time it would
+take for the user to travel", and Impossible travel (`mcasImpossibleTravel`) on "geographically distant
+locations within a time period shorter than the time it takes to travel". `centralus` to `westus3` is
+roughly 1,150 miles great-circle fired 5 minutes apart, which is as infeasible as a transatlantic hop. **The relocate
+option is therefore the recommended one in OQ-073, not the trap this ADR first called it**, and the
+exemption may not be needed at all. Recorded because it is the SECOND overclaim in this change and both
+were caught by the same gate.
+
+**Do not flip `enable_synthetic_workload` before OQ-073 is resolved.**
+
+**Decision 4 - the allow-list is the nine continental US regions MINUS the four canary regions.**
+Include `centralus`, `eastus`, `eastus2`, `northcentralus`, `southcentralus`, `westcentralus`,
+`westus`, `westus2`, `westus3`. **Exclude `centraluseuap`, `eastus2euap`, `eastusstg`,
+`southcentralusstg`.** This is the trap in the decision: all four report `regionType = Physical` and
+`geographyGroup = US`, so the obvious query to build this list would include them, and they are Early
+Update Access and staging regions rather than production ones. There is no Alaska or Hawaii Azure
+region, so for Azure purposes continental US and US are the same set minus those four. US Gov is a
+separate cloud and does not appear in this tenant.
+
+**Decision 5 - `global` needs no special handling, and this was verified rather than reasoned.** The
+`Allowed locations` rule carries an explicit `{"field": "location", "notEquals": "global"}` clause, read
+from the live definition on 2026-08-02. The estate's 89 private DNS zones and every other global-scoped
+resource are therefore outside its reach. The resource-group policy has no such clause and needs none,
+because a resource group always carries a real region. Had this NOT been true, the policy would have
+failed `platform/connectivity`'s 696-resource apply.
+
+**Decision 6 - it lives in `platform/management` (Step 2), not in the ALZ library at Step 1.** That root
+already owns MG-scoped native policy assignments (`deny_public_network_access` at `main.tf:669` and
+`:711`), so this follows an established precedent instead of hand-editing ALZ archetype JSON. It also
+moves the smaller bar. Assigning at Step 2 is sufficient because management groups carry no location
+and every resource-creating step runs later.
+
+**Decision 7 - fold it into the rebuild rather than deferring it to the hardening wave, reversing the
+2026-08-02 nothing-folded-in ruling FOR THIS ITEM ONLY.** The Advisor items are corrective and apply
+cleanly day-2. This is a PREVENTIVE control: applied after the estate exists it has never prevented
+anything, and its first real test would be some future create. Applied at Step 2 it is in force for
+Steps 3 to 14 and the build itself becomes the evidence. The cost is bounded and exactly computable,
+which is what makes the exception defensible.
+
+**Consequences:**
+- Positive: the estate gains a real data-residency guardrail, in force during the build that proves it.
+  Closes the largest governance gap found in the Advisor review.
+- Negative / trade-offs: **Step 2's certified plan bar moves 36 -> 38** and pre-clearance refresh #5
+  needs an amendment for that row. No `time_sleep` or exemption unit is required, because nothing the
+  **fourteen dispatched steps** create falls outside the allow-list. A future region expansion becomes a
+  policy change first. **And it puts a live constraint on Section 13.3** (decision 3a, OQ-073), which is
+  a real cost this decision accepts rather than a side effect it ignores.
+- Follow-ups required: amend refresh #5 (done in the same change); re-verify the 38 at Step 2 plan time
+  and treat any other delta as a Rule 1 STOP; **resolve OQ-073 before `enable_synthetic_workload` is
+  ever flipped**; consider whether the two unmanaged subscriptions in OQ-071 limb B should be brought
+  under the hierarchy so they inherit this.
+
+---
+
 ### ADR-073: The Log Analytics soft-delete RECOVERY KEY is a FOUR-part key that includes REGION, established from Microsoft's own documentation and the REST contract, so two soft-deleted workspaces sharing one ARM resource ID are individually addressable and a `centralus` create CANNOT silently recover the `eastus2` entry. The rebuild's pre-Step-2 disposition is nevertheless PURGE BOTH via CI, because the two-entry case itself is undocumented and a recovered workspace is an ADR-067 FM-1 shape. OQ-063's single-name purge generalises to a DISCOVERY-based sweep across all five estate subscriptions, gated by containment plus a blast-radius cap, whose per-entry completion check must be a `deletedWorkspaces` RE-LIST and never an ARM GET on the shared ID. Root cause is a one-line provider-features asymmetry between `platform/security` and `platform/management`
 
 - **Date:** 2026-08-01

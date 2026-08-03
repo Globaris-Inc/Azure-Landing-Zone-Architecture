@@ -31,6 +31,103 @@
 
 <!-- Newest at the top. -->
 
+### OQ-073: ADR-074's continental-US Deny will block Section 13.3's red-team second pole, which is in `westeurope` BY DESIGN so the impossible-travel detection scenario has a real signal
+
+- **Raised:** 2026-08-02 (found by the code-reviewer while gating ADR-074; it BLOCKED on it)
+- **Section:** 13.3 (Synthetic Workload and Security Signals) / 2 (Management Group Hierarchy)
+- **Blocking:** **No for the rebuild** - `enable_synthetic_workload = false` and `synthetic` is not one
+  of the fourteen dispatched steps, so nothing fires. **Yes for Section 13.3**, which cannot ship until
+  this is answered.
+- **Priority:** Medium (it blocks nothing today and blocks that wave completely)
+
+**Question:**
+
+ADR-074 assigns `Allowed locations` at Deny on the `globaris` MG, restricted to nine continental US
+regions. `synthetic/red_team.tf:157` creates `azurerm_resource_group.red_team_secondary` at
+`var.red_team_geo_location`, whose default is **`westeurope`** (`synthetic/variables.tf:63`), with
+further resources at `:301` and `:367`. `synthetic`'s provider targets the landingzones subscription,
+which is under `globaris`.
+
+**The `westeurope` placement is not an accident or a leftover. It is the point.** The second Container
+Apps Environment is deliberately on the far side of the world from the primary so that a sign-in from
+each produces a genuine **impossible-travel** signal for Defender and Sentinel to detect. Relocating it
+to a US region does not "fix" it; it removes the detection scenario the wave exists to demonstrate.
+
+So ADR-074 and Section 13.3 as currently designed are **mutually exclusive**, and nothing in the
+repository said so until the code-reviewer found it. The first symptom would otherwise have been a
+`RequestDisallowedByPolicy` at PUT time behind a clean plan, months from now, which is exactly the
+class LESSONS 40 and 41 exist to prevent.
+
+**Options being considered:**
+
+- **A (RECOMMENDED). A scoped policy exemption for the red-team secondary resource group**, in the same
+  shape as the ADR-070 DINE exemptions already in this estate: an RG-scoped exemption plus the
+  propagation `time_sleep` plus `depends_on` from the protected resources (LESSON 35). Keeps the
+  residency guardrail meaningful everywhere else, keeps the detection scenario intact, and the exemption
+  is itself the documentation of why one resource group is outside the policy. Cost: one exemption unit
+  on a root that is currently gated off.
+- **B. Narrow the assignment scope** so it covers `platform` and the production landing zones but not
+  whatever MG the synthetic workload lands under. Structurally clean, but it weakens the guardrail on a
+  real landing-zone subscription and the synthetic root currently shares the landingzones subscription
+  rather than having its own MG.
+- **C. Move the second pole to a US region** (for example `westus3` against a `centralus` primary).
+  Zero policy work, zero exemption, and it keeps the residency guarantee absolute.
+
+  **CORRECTED 2026-08-02 at the code-reviewer gate.** This option first read "loses the
+  impossible-travel signal, since both poles would then be domestic; cross-country US travel is not
+  impossible travel." **That claim is unsupported and almost certainly wrong**, and it was the reviewer's
+  second BLOCK on this change. Neither detection this scenario could rely on has any country or border
+  term. Microsoft's own wording, read 2026-08-02:
+
+  - **Atypical travel** (Entra ID Protection, `unlikelyTravel`, P2, offline): "identifies two sign-ins
+    originating from **geographically distant locations**... The algorithm takes into account multiple
+    factors including **the time between the two sign-ins and the time it would take for the user to
+    travel** from the first location to the second."
+  - **Impossible travel** (Defender for Cloud Apps, `mcasImpossibleTravel`): "identifies user activities
+    ... originating from **geographically distant locations within a time period shorter than the time
+    it takes to travel** from the first location to the second."
+
+  Both are pure distance-and-elapsed-time feasibility calculations. `centralus` (Iowa) to `westus3`
+  (Arizona) is roughly 1,150 miles great-circle, and `synthetic/README.md:146-147` fires the two poles **5 minutes
+  apart**. That is as physically impossible as a transatlantic hop, so **option C very plausibly retains
+  the signal at zero cost**, which makes it a serious contender rather than the trap this entry
+  originally painted it as.
+
+  What is genuinely lost under C is narrower and should be stated accurately: any detection keyed to
+  **nationality** rather than distance, such as `newCountry` (`Activity from infrequent country`), and
+  the existing `blocked_country_signin` rule in `platform/security/sentinel.tf`, which keys off
+  `approved_sign_in_countries`. Whether this scenario was ever meant to exercise those is unresolved.
+
+- **D. Accept that Section 13.3 does not ship** while ADR-074 stands, and record it as a deliberate
+  trade of a demo capability for a residency guarantee. Section 13 is already REPOSITIONED and deferred
+  (ADR-036/037), so this may cost nothing real.
+
+**Recommended:** **C first, then A only if C is proven insufficient.** C is free, keeps the residency
+guarantee unqualified, and on the documented behaviour of both detections it very likely preserves the
+scenario. A costs an exemption unit and punches a permanent hole in the guardrail, which is a real price
+to pay for a geo-separation that may not be needed. **D** remains the honest interim state and costs
+nothing today.
+
+**Two things to establish before this is finally resolved, neither of which is settled:**
+
+1. **Which mechanism actually fires this scenario.** `platform/security/sentinel.tf` contains **no**
+   impossible-travel or atypical-travel analytics rule - verified 2026-08-02. So the scenario depends on
+   a **built-in** detection, not on repo-owned KQL. `docs/worklog/2026-06-04.md:43` refers to a
+   "different country in <30 min" threshold and no implementing rule was found, so that phrasing may be
+   the origin of the incorrect claim corrected above.
+2. **Whether either detection can fire here at all.** Both are **P2**, and Impossible travel
+   additionally needs Defender for Cloud Apps licensing. Atypical travel also carries "an initial
+   learning period of the earliest of 14 days or 10 logins" - a freshly created honeypot account in a
+   short-lived POC may sit inside that window for the whole demo and never trigger. **If that is so, the
+   region of the second pole is moot and C is free**, which would resolve this entry outright.
+
+**Do not resolve this by silently flipping the default in `synthetic/variables.tf`** - whichever option
+wins, it should be recorded here first.
+
+**Standing instruction until resolved: do not flip `enable_synthetic_workload` to true.**
+
+---
+
 ### OQ-072: ADR-040 removed the Defender Key Vault and Resource Manager plans as "deprecated for new enablement"; Azure Advisor now recommends enabling both on 7 subscription rows - one of the two is wrong
 
 - **Raised:** 2026-08-02 (Advisor export evaluation, `docs/advisor-remediation-plan.md` group D)
