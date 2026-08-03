@@ -297,10 +297,20 @@ resource "azurerm_consumption_budget_resource_group" "sandbox_overrun" {
   time_grain        = "Monthly"
 
   time_period {
-    # Budgets require a first-of-month start_date. Pin to a known-past month so
-    # the resource is idempotent across re-applies; the actual spend window
-    # rolls forward monthly inside Azure.
-    start_date = "2026-06-01T00:00:00Z"
+    # Budgets require a first-of-month start_date.
+    #
+    # CORRECTED 2026-08-02. This previously read `start_date = "2026-06-01T00:00:00Z"`
+    # with the comment "pin to a known-past month so the resource is idempotent across
+    # re-applies". That belief is FALSE and was disproved live: Azure's Consumption API
+    # rejects a start date prior to the current month with
+    # `400: Start date for monthly time grain should not be prior to current month`,
+    # which failed all 8 budgets in Step 2 of the 2026-08-02 rebuild (run 30776463447)
+    # and cost a full teardown. A known-past month is precisely the value that CANNOT
+    # be created. Dormant here only because `enable_synthetic_workload` is false.
+    #
+    # Uses the same first-of-current-month value as envs/poc.tfvars; see OQ-070 for the
+    # durable preflight assertion that stops this class recurring.
+    start_date = "2026-08-01T00:00:00Z"
     end_date   = "2030-12-01T00:00:00Z"
   }
 

@@ -281,7 +281,11 @@ resource "azurerm_consumption_budget_subscription" "synthetic_guardrails" {
   time_grain      = "Monthly"
 
   time_period {
-    start_date = "2026-06-01T00:00:00Z"
+    # CORRECTED 2026-08-02, same class as cost_patterns.tf: a start_date prior to the
+    # current month is rejected by Azure with `400: Start date for monthly time grain
+    # should not be prior to current month`, proven live in Step 2 of the 2026-08-02
+    # rebuild. Dormant only because `enable_synthetic_workload` is false. See OQ-070.
+    start_date = "2026-08-01T00:00:00Z"
     end_date   = "2030-12-01T00:00:00Z"
   }
 

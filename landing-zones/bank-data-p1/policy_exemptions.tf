@@ -42,6 +42,34 @@ locals {
       description                     = "Waiver for the VNet flow-log storage account of the bank-data-p1 spoke, which must keep public network access Enabled: Network Watcher is not a storage trusted-service bypass, so flow-log delivery breaks if publicNetworkAccess is Disabled. Scoped to rg-bank-data-p1-network for StorageDenyPaasPublicIP only. See ADR-028 + OQ-024."
     }
   }
+
+  # Self-healing expiry for the dbstorage waiver below. ADDED 2026-08-02 after the
+  # code-reviewer's class sweep found this armed.
+  #
+  # THE DEFECT IT CLOSES. `expires_on` was the static literal "2026-08-01T00:00:00Z",
+  # chosen because it sat past the ADR-045 EOW teardown. That date PASSED on
+  # 2026-08-01, and `enable_data_platform` is true, so Step 8 of the next rebuild
+  # would have created this exemption ALREADY EXPIRED. An expired exemption is
+  # preserved for record-keeping but is no longer honoured, so it would not have
+  # failed at its own PUT - the Databricks managed-RG dbstorage create it exists to
+  # protect would have been denied instead, by StorageDenyPaasPublicIP, two files
+  # away from the cause. Under the standing "any failure means full teardown" ruling
+  # that is a whole rebuild cycle for a stale literal.
+  #
+  # THE PATTERN IS NOT NEW. modules/finops/main.tf:31-39 already guards the cost
+  # export exactly this way, and its own comment records that "this exact class
+  # already bit the budgets, commit 7dde32b". The guard was correct and was applied
+  # to ONE of the estate's four date sites. This is the same guard, generalised.
+  #
+  # Behaviour: while the requested literal is still in the future it is used
+  # verbatim, so the plan is deterministic and does NOT churn on plantimestamp().
+  # Only once it goes stale does it fall back to 90 days from plan time, which
+  # keeps the estate deployable instead of failing. Locals are not addresses, so
+  # Step 8's plan bar of 76 is unaffected.
+  dbx_exemption_requested_expiry = "2026-12-01T00:00:00Z"
+  dbx_exemption_expires_on = timecmp(local.dbx_exemption_requested_expiry, plantimestamp()) > 0 ? (
+    local.dbx_exemption_requested_expiry
+  ) : timeadd(plantimestamp(), "2160h")
 }
 
 resource "azurerm_resource_group_policy_exemption" "corp_paas" {
@@ -95,11 +123,24 @@ resource "azurerm_subscription_policy_exemption" "dbx_managed_storage" {
   policy_assignment_id            = local.deny_public_endpoints_assignment_id
   policy_definition_reference_ids = ["StorageDenyPaasPublicIP", "Deny-Storage-Public-Access"]
   exemption_category              = "Waiver"
-  expires_on                      = "2026-08-01T00:00:00Z"
+  expires_on                      = local.dbx_exemption_expires_on
 
   display_name = "Databricks managed-RG dbstorage create waiver (ADR-048)"
   # Provider limit: description must be <= 512 chars (validate-enforced).
-  description = "Wave B5 guarantee half of the ADR-048 dbstorage collision unit: the Databricks RP creates the workspace DBFS storage account in its managed RG at workspace create, and the RP PUT sequencing vs the corp StorageDenyPaasPublicIP Deny is not verifiable pre-apply. Subscription-scoped because the managed RG does not exist until the create is in flight. Single-member scope; self-expires 2026-08-01. Posture half: default storage firewall keeps the SA private. See docs/b5-data-platform-design.md section 4."
+  description = "Wave B5 guarantee half of the ADR-048 dbstorage collision unit: the Databricks RP creates the workspace DBFS storage account in its managed RG at workspace create, and the RP PUT sequencing vs the corp StorageDenyPaasPublicIP Deny is not verifiable pre-apply. Subscription-scoped because the managed RG does not exist until the create is in flight. Single-member scope; self-expiring (see locals). Posture half: default storage firewall keeps the SA private. See docs/b5-data-platform-design.md section 4."
+
+  # REQUIRED BY THE PATTERN THIS GUARD IS COPIED FROM, and omitted in the first
+  # draft. `modules/finops/main.tf:37` states it explicitly - "ignore_changes on
+  # the export keeps later plans from churning the date" - and its
+  # `azapi_resource.cost_export` carries the equivalent block. Without this, the
+  # moment `local.dbx_exemption_requested_expiry` goes stale the local resolves to
+  # `timeadd(plantimestamp(), "2160h")`, which recomputes on EVERY plan and
+  # produces a perpetual "~ update in place" diff on this resource - the
+  # noise-that-trains-operators-to-override class (doctrine 1d), and the same
+  # shape as the OQ-032 tag churn this estate already lives with.
+  lifecycle {
+    ignore_changes = [expires_on]
+  }
 }
 
 # 300s async-propagation buffer before the access connector + workspace create
