@@ -115,7 +115,17 @@ budget_alert_thresholds = [50, 75, 90, 100]
 # (400 "Start date for monthly time grain should not be prior to current month"
 # on budgets AND cost-export scheduled actions). Bump to the first of the
 # CURRENT month whenever platform/management is freshly deployed.
-budget_start_date = "2026-07-01T00:00:00Z"
+#
+# THIS FIRED FOR REAL ON 2026-08-02, and the warning above did not prevent it.
+# The value was 2026-07-01, valid throughout the 2026-07-31 rebuild, and became
+# invalid at 00:00 on 2026-08-01 with no code change at all - the calendar armed
+# it. Step 2 of the rebuild failed with all 8 budgets rejected (3 MG-scope,
+# 5 subscription-scope), run 30776463447, and the estate was torn down.
+# Pre-clearance refreshes #4 and #5 both read this file and both passed it,
+# because PC-1TF enumerated two tfvars traps and this was a third.
+# A comment is not a control (ADR-062). Tracked as OQ-070's second instance;
+# the durable fix is a preflight assertion that this reads the current month.
+budget_start_date = "2026-08-01T00:00:00Z"
 
 # Cost export end date — set far enough in the future to cover the POC lifecycle.
 export_end_date = "2030-12-01T00:00:00Z"

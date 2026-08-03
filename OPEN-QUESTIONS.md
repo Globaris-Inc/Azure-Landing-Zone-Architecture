@@ -293,6 +293,56 @@ describing the wrong state at the wrong time.
 
 ---
 
+**SECOND LIVE INSTANCE, 2026-08-02, and it cost a rebuild.** `envs/poc.tfvars:118`
+`budget_start_date = "2026-07-01T00:00:00Z"` failed **Step 2** of the rebuild: Azure's Consumption API
+returned `400: Start date for monthly time grain should not be prior to current month` for all **8**
+budgets (3 MG-scope, 5 subscription-scope), run `30776463447`. Under the standing operator ruling the
+whole estate **is being** torn down (run `30777047207`) and the rebuild **will restart** from Step 1
+once this fix lands.
+
+**Three things make this the stronger version of the same argument, not merely another example.**
+
+1. **The trap armed itself with no code change.** The value was correct throughout the 2026-07-31
+   rebuild and became wrong at 00:00 on 2026-08-01 because the month rolled over. The other two traps at
+   least required someone to flip a flag; this one needed nobody to do anything.
+2. **The file already documented its own failure mode, verbatim, including the exact 400 text and the
+   required action** ("Bump to the first of the CURRENT month whenever platform/management is freshly
+   deployed"). The control existed as prose and did not fire. That is ADR-062's thesis demonstrated
+   rather than argued.
+3. **Two consecutive pre-clearance refreshes read this file and passed it.** PC-1TF enumerated two
+   tfvars traps and there were three. **The pre-clearance itself was an enumerated list where a property
+   assertion was needed** - the same anti-pattern ADR-062 named in the teardown VERIFY sweep,
+   independently reproduced here by the architect lane. (Corrected at the review gate: an earlier draft
+   said this was "the very file the ruling is about", which overstates ADR-062. That ADR is about Phase 3
+   VERIFY being broader than the Phase 2 sweep, not about `envs/poc.tfvars`. The principle transfers by
+   analogy; the subject does not.)
+
+4. **A fourth site of the identical class was found by the reviewer's sweep, armed and undetected.**
+   `landing-zones/bank-data-p1/policy_exemptions.tf` carried `expires_on = "2026-08-01T00:00:00Z"` on the
+   Databricks dbstorage waiver, with `enable_data_platform = true`. It would not have failed at its own
+   PUT - an expired exemption creates but is not honoured - so **Step 8's dbstorage create would have
+   been denied instead**, two files from the cause, costing another full teardown. Two more sites sit
+   dormant in `synthetic/` behind a false comment claiming a past month is safe. **The self-healing guard
+   for this class already existed at `modules/finops/main.tf:31-39`, complete with a comment recording
+   that it had bitten the budgets once before, and had been applied to exactly ONE of the estate's four
+   date sites.** That is the strongest argument in this entry: the control existed, was correct, and was
+   not generalised.
+
+**This widens option A rather than adding a new option.** The recommended `preflight.sh` greenfield
+assertion must NOT be a second enumerated list of known-bad lines. It needs to assert a PROPERTY per
+class:
+
+- `budget_start_date` parses as RFC 3339 **and** its year-month equals the current year-month.
+- `enable_om_phase1 = false` and `enable_acr_kubelet_binding` is absent or `false`, **unless** an
+  explicit past-Step-12 marker is present.
+- Any future date-valued or state-valued tfvars entry carries a machine-checkable assertion at the point
+  it is added, not a comment.
+
+**Deferred by user ruling 2026-08-02:** implement after the rebuild completes, so no shell change lands
+mid-run. The immediate fix was the one-line bump to `2026-08-01T00:00:00Z`.
+
+---
+
 ### OQ-069: Teardown's soft-deleted-workspace purge only ever looks at ONE named workspace in ONE subscription, and two soft-deleted Log Analytics workspaces are sitting in the MANAGEMENT subscription right now
 
 - **Raised:** 2026-08-01 (architect, while ruling ADR-072 on the `platform/management` teardown orphans)
