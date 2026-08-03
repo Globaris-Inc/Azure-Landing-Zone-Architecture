@@ -132,7 +132,7 @@ Read from Microsoft's documentation 2026-08-02, neither candidate detection has 
 Atypical travel (`unlikelyTravel`) keys on "geographically distant locations" plus "the time it would
 take for the user to travel", and Impossible travel (`mcasImpossibleTravel`) on "geographically distant
 locations within a time period shorter than the time it takes to travel". `centralus` to `westus3` is
-roughly 1,400 miles fired 5 minutes apart, which is as infeasible as a transatlantic hop. **The relocate
+roughly 1,150 miles great-circle fired 5 minutes apart, which is as infeasible as a transatlantic hop. **The relocate
 option is therefore the recommended one in OQ-073, not the trap this ADR first called it**, and the
 exemption may not be needed at all. Recorded because it is the SECOND overclaim in this change and both
 were caught by the same gate.

@@ -88,7 +88,7 @@ class LESSONS 40 and 41 exist to prevent.
     it takes to travel** from the first location to the second."
 
   Both are pure distance-and-elapsed-time feasibility calculations. `centralus` (Iowa) to `westus3`
-  (Arizona) is roughly 1,400 miles, and `synthetic/README.md:146-147` fires the two poles **5 minutes
+  (Arizona) is roughly 1,150 miles great-circle, and `synthetic/README.md:146-147` fires the two poles **5 minutes
   apart**. That is as physically impossible as a transatlantic hop, so **option C very plausibly retains
   the signal at zero cost**, which makes it a serious contender rather than the trap this entry
   originally painted it as.
