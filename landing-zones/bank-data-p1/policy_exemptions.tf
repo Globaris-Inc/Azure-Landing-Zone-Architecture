@@ -127,7 +127,20 @@ resource "azurerm_subscription_policy_exemption" "dbx_managed_storage" {
 
   display_name = "Databricks managed-RG dbstorage create waiver (ADR-048)"
   # Provider limit: description must be <= 512 chars (validate-enforced).
-  description = "Wave B5 guarantee half of the ADR-048 dbstorage collision unit: the Databricks RP creates the workspace DBFS storage account in its managed RG at workspace create, and the RP PUT sequencing vs the corp StorageDenyPaasPublicIP Deny is not verifiable pre-apply. Subscription-scoped because the managed RG does not exist until the create is in flight. Single-member scope; self-expires 2026-08-01. Posture half: default storage firewall keeps the SA private. See docs/b5-data-platform-design.md section 4."
+  description = "Wave B5 guarantee half of the ADR-048 dbstorage collision unit: the Databricks RP creates the workspace DBFS storage account in its managed RG at workspace create, and the RP PUT sequencing vs the corp StorageDenyPaasPublicIP Deny is not verifiable pre-apply. Subscription-scoped because the managed RG does not exist until the create is in flight. Single-member scope; self-expiring (see locals). Posture half: default storage firewall keeps the SA private. See docs/b5-data-platform-design.md section 4."
+
+  # REQUIRED BY THE PATTERN THIS GUARD IS COPIED FROM, and omitted in the first
+  # draft. `modules/finops/main.tf:37` states it explicitly - "ignore_changes on
+  # the export keeps later plans from churning the date" - and its
+  # `azapi_resource.cost_export` carries the equivalent block. Without this, the
+  # moment `local.dbx_exemption_requested_expiry` goes stale the local resolves to
+  # `timeadd(plantimestamp(), "2160h")`, which recomputes on EVERY plan and
+  # produces a perpetual "~ update in place" diff on this resource - the
+  # noise-that-trains-operators-to-override class (doctrine 1d), and the same
+  # shape as the OQ-032 tag churn this estate already lives with.
+  lifecycle {
+    ignore_changes = [expires_on]
+  }
 }
 
 # 300s async-propagation buffer before the access connector + workspace create

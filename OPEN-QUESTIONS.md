@@ -319,14 +319,21 @@ once this fix lands.
 
 4. **A fourth site of the identical class was found by the reviewer's sweep, armed and undetected.**
    `landing-zones/bank-data-p1/policy_exemptions.tf` carried `expires_on = "2026-08-01T00:00:00Z"` on the
-   Databricks dbstorage waiver, with `enable_data_platform = true`. It would not have failed at its own
-   PUT - an expired exemption creates but is not honoured - so **Step 8's dbstorage create would have
-   been denied instead**, two files from the cause, costing another full teardown. Two more sites sit
-   dormant in `synthetic/` behind a false comment claiming a past month is safe. **The self-healing guard
-   for this class already existed at `modules/finops/main.tf:31-39`, complete with a comment recording
-   that it had bitten the budgets once before, and had been applied to exactly ONE of the estate's four
-   date sites.** That is the strongest argument in this entry: the control existed, was correct, and was
-   not generalised.
+   Databricks dbstorage waiver, with `enable_data_platform = true`. **Best-evidenced failure mode, stated
+   as inference rather than confirmed behaviour:** Microsoft documents that an exemption past `expiresOn`
+   is "preserved for record-keeping" but "no longer honoured", and documents no create-time validation
+   either way, so it most likely creates silently and **Step 8's dbstorage create is denied instead** -
+   two files from the cause, and a harder diagnosis than the budget failure. Confirming which of the two
+   fires would mean applying it against live Azure, which was correctly out of scope. Either way it was
+   armed. Two more sites sit dormant in `synthetic/` behind a false comment claiming a past month is safe.
+
+   **The self-healing guard for this class already existed at `modules/finops/main.tf:31-39`**, complete
+   with a comment recording that it had bitten the budgets once before. Counting precisely: there are
+   **five** date-sensitive sites in the estate. **One** (the finops cost export) was correctly guarded
+   and never broke. The other **four** - `budget_start_date`, the dbstorage exemption, and the two
+   synthetic budgets - carried bare literals, and three of those four were already stale. That is the
+   strongest argument in this entry: the control existed, was correct, was documented as having fired
+   before, and was applied to one site out of five.
 
 **This widens option A rather than adding a new option.** The recommended `preflight.sh` greenfield
 assertion must NOT be a second enumerated list of known-bad lines. It needs to assert a PROPERTY per
