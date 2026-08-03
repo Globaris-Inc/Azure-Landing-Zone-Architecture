@@ -3095,3 +3095,56 @@ the reason OQ-070's durable fix is a property assertion rather than another lite
 to after the rebuild by operator ruling.
 
 **Verdict unchanged: GO.**
+
+---
+
+# 2026-08-03 REFRESH #5, AMENDMENT C - ADR-075 security-LAW re-identification folded into the rebuild; all fourteen bars carry unchanged, Step 3 stays 48; attempt-4 restart conditions bound
+
+**Type:** AMENDMENT to refresh #5. Append-only. **CONDITIONAL**: it takes effect only when the
+ADR-075 implementation merges to `banking` with a diff confined to the change-set envelope below.
+The operator verifies the envelope at merge and appends one dated line with the merge SHA under
+"Envelope verification" at the bottom of this amendment. Until that line exists, attempt 4 does NOT
+dispatch.
+
+**Why it exists.** Rebuild attempts 2 (run 30784028698) and 3 (run 30844075060) both failed Step 3
+(`platform/security`) on the same nine Sentinel scheduled rules. Root mechanism per ADR-075: a stale
+Azure service-side binding behind the reused workspace name `law-security-globaris-poc` routes
+scheduled-rule query validation to a purged predecessor GUID. The fix is repo-side re-identification
+(generation token, name becomes `law-security-globaris-poc-r2`), which changes VALUES, never resource
+addresses, so no refresh #6 is needed - this amendment records why, rather than leaving it assumed
+(the Amendment B pattern).
+
+**Change-set envelope (the ONLY changes the implementation PR may carry), and the bar effect of
+each:**
+
+| Change | Bar effect |
+|---|---|
+| `platform/security/variables.tf` gains `variable "security_law_generation"` (default `"r2"`, with validation) | **Zero.** Variables are not addresses and never appear in a plan count |
+| `platform/security/main.tf` name expression gains the token suffix | **Zero.** A value change on an existing resource address. No address added or removed. Step 3 stays **48** |
+| `envs/poc.tfvars` gains `security_law_generation = "r2"` | **Zero.** tfvars row, PC-1TF'' visibility pattern |
+| `demo/04-reset.sh` / `demo/06-acceptance.sh` `SECURITY_LAW` defaults gain `-r2`; `demo/06-acceptance.md` / `demo/README.md` literals updated | **Zero.** The demo lane is not one of the fourteen dispatched steps |
+| Dated doc notes: `RUNBOOK.md`, `SECURITY.md`, `docs/estate-bom.md`; `platform/security/README.md` regenerated | Docs |
+
+**No `.tf` file in any dispatched root gains or loses a resource address.** All fourteen bars carry
+unchanged from refresh #5 W6 as amended by A and B: 537 / 38 / **48** / 696, 24 / 24 / 26 / 76 / 67,
+16 / 10, 1, 3 / 223.
+
+**Restart conditions.** ADR-075's A4-RC1 through A4-RC8 are the authoritative statement (DECISIONS.md);
+summarised: teardown green + greenfield verified live (A4-RC1); envelope-confined merge, reviewer
+gated (A4-RC2); the decision-6 discriminating state-blob read RUN and logged (A4-RC3); PC-1TF'' by
+value + PC-1SEC on the `law-security-*` wildcard + headSha check (A4-RC4); this amendment's SHA line
+appended (A4-RC5); the per-run gates PC-3C, PC-2X', PC-2X, PC-2R re-discharged LIVE in their windows -
+they die with every teardown and are never carried (A4-RC6); bars and plan-scan shape unchanged, and a
+scan must see the `Plan:`/`Apply complete!` line before trusting any zero (A4-RC7); Step 3's apply is
+the live test of ADR-075, and a reproduction under the virgin name is a STOP back to the architect,
+never a blind bump to `r3` (A4-RC8).
+
+**One naming note for scanners.** From this amendment on, the security workspace in every check,
+query and log is `law-security-globaris-poc-r2`. The retired exact name is BURNED (ADR-075 decision
+3); any check written against it must use the `law-security-*` prefix instead.
+
+**Verdict: GO for attempt 4, conditional on the envelope verification line below.**
+
+**Envelope verification (operator appends, dated):**
+
+- (pending - implementation PR not yet merged)
