@@ -3147,4 +3147,9 @@ query and log is `law-security-globaris-poc-r2`. The retired exact name is BURNE
 
 **Envelope verification (operator appends, dated):**
 
-- (pending - implementation PR not yet merged)
+- ~~(pending - implementation PR not yet merged)~~
+- **2026-08-03: VERIFIED.** PR #103 merged as `2c2fd0123a5331aca191c8ac184ce60d8027ef6d` (head
+  `fc793d7`, staged tree `4c2f804` = the reviewer-APPROVED tree). The merged file list read from the
+  GitHub API is exactly the 11-file envelope above - no rider. Docs PR #102 merged alongside as
+  `f07a1a4`. **Amendment C is now UNCONDITIONAL: GO for attempt 4.** (A4-RC5 satisfied; operator
+  merged both PRs and directed the continuation this session.)
