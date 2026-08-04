@@ -464,6 +464,15 @@ approved_sign_in_countries = ["US", "CA", "GB"]
 # Defender for Cloud + Sentinel  (Section 6)
 # ---------------------------------------------------------------------------
 
+# Security LAW generation token (ADR-075). Bump only under the ADR-075 trigger:
+# a stale-workspace resolution error on Sentinel scheduled-rule creation (400
+# 'workspace ... could not be found' naming a GUID that is not the live workspace,
+# or its non-disclosing 401 variant). After ANY teardown that purges the current
+# generation, the bump is MANDATORY before the next rebuild (ADR-075 decision 6,
+# EQUAL branch, measured 2026-08-03). Never reuse a burned value;
+# law-security-globaris-poc (no suffix) is burned.
+security_law_generation = "r2"
+
 # Globaris root MG ARM resource ID — scope of the NIST + CIS compliance assignments.
 root_management_group_id = "/providers/Microsoft.Management/managementGroups/globaris"
 

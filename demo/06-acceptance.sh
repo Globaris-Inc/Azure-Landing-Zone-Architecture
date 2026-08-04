@@ -21,7 +21,8 @@ set -uo pipefail
 ORG_PREFIX="${ORG_PREFIX:-globaris}"
 ENVIRONMENT="${ENVIRONMENT:-poc}"
 SECURITY_RG="${SECURITY_RG:-rg-security-${ORG_PREFIX}-${ENVIRONMENT}}"
-SECURITY_LAW="${SECURITY_LAW:-law-security-${ORG_PREFIX}-${ENVIRONMENT}}"
+# ADR-075: -r2 generation suffix; keep in sync with security_law_generation in envs/poc.tfvars.
+SECURITY_LAW="${SECURITY_LAW:-law-security-${ORG_PREFIX}-${ENVIRONMENT}-r2}"
 SYNTHETIC_DIR="${SYNTHETIC_DIR:-$(cd "$(dirname "$0")/.." && pwd)/synthetic}"
 TFVARS_PATH="${TFVARS_PATH:-$(cd "$(dirname "$0")/.." && pwd)/envs/poc.tfvars}"
 

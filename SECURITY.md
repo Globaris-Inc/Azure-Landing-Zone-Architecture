@@ -19,7 +19,7 @@
 | Subscriptions | management, connectivity, identity, security, landingzones (5) | - |
 | Connectivity | 2-region hub-spoke (primary eastus2 `10.0.0.0/16`, secondary centralus `10.1.0.0/16`); Azure Firewall **Premium** per hub with **IDPS in Alert mode**; independent Premium firewall policies (ADR-009); hub-to-hub **Global VNet Peering** (module native mesh, `allow_gateway_transit = true`); VPN Gateway (VpnGw1AZ) + DNS Private Resolver in primary hub only; ~89 `privatelink.*` private DNS zones | `platform/connectivity` |
 | Identity | Microsoft Entra Domain Services (`aadds.globaris.org`, 2 DCs, Standard) in an isolated identity VNet peered to the primary hub; RSV; 8 Conditional Access policies (report-only) | `platform/identity` |
-| Security | Dedicated RBAC-isolated security LAW (`law-security-globaris-poc`); Microsoft Sentinel onboarded; Defender for Cloud Standard plans; NIST SP 800-53 R5 + CIS Azure 2.0.0 regulatory-compliance initiatives (audit); security Key Vault | `platform/security` |
+| Security | Dedicated RBAC-isolated security LAW (`law-security-globaris-poc-r2`, ADR-075 generation suffix); Microsoft Sentinel onboarded; Defender for Cloud Standard plans; NIST SP 800-53 R5 + CIS Azure 2.0.0 regulatory-compliance initiatives (audit); security Key Vault | `platform/security` |
 | Landing zones | corp-a1 (eastus2 `10.10.0.0/16`), corp-a2 (centralus/DR `10.11.0.0/16`), online-p1 (eastus2, live App Gateway WAF_v2 + Static Web App) | `landing-zones/*` |
 | Management / FinOps | Platform LAW (`law-platform-globaris-poc`), Automation Account, platform action group (`ag-platform-globaris-poc`), budgets (sub + MG scope), daily cost exports, cost anomaly alert | `platform/management` |
 

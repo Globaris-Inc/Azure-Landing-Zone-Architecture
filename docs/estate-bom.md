@@ -4,6 +4,8 @@
 
 **Purpose:** mechanical baseline for comparing a future teardown-and-rebuild cycle against this estate. Every section states what a diff should check and how to tell real drift from expected non-determinism.
 
+**ADR-075 note (2026-08-03):** the security Log Analytics workspace name recorded in this baseline, `law-security-globaris-poc`, is BURNED (stale-workspace resolution failure on Sentinel scheduled rules). Rebuilds from ADR-075 onward deploy it as `law-security-globaris-poc-<generation>` (currently `law-security-globaris-poc-r2`, driven by `security_law_generation` in `envs/poc.tfvars`). When diffing a future rebuild against this document, the security LAW name difference is EXPECTED, not drift; the three occurrences of the unsuffixed name below (sections 1.4, 3, 5) are left as captured on 2026-08-01.
+
 **Scope:** the 5 estate subscriptions - `sub-connectivity-poc-01`, `sub-identity-poc-01`, `sub-landingzones-poc-01`, `sub-management-poc-01`, `sub-security-poc-01` - plus tenant-level management groups and policy objects. `sub-app-01` and `sub-avd-poc-01` are explicitly OUT of scope (confirmed: both sit directly under Tenant Root Group, not under the `globaris` hierarchy at all).
 
 **Identifiers:** all subscription IDs, tenant ID, and principal IDs are redacted to abstract references below (per standing repo rule). Where an ID is structurally necessary it is shown as a placeholder. Subscription IDs are actually STABLE across rebuilds in this estate (the 5 subscriptions are pre-provisioned, not created by Terraform) but are still redacted from this committed document.
