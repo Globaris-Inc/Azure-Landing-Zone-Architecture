@@ -49,6 +49,255 @@
 
 <!-- Newest at the top. -->
 
+### ADR-075: Attempt 2's nine Sentinel-rule 401s and attempt 3's seven 400s are ONE failure class - the Sentinel scheduled-rule query-validation path dereferences a PURGED predecessor workspace GUID behind the reused name `law-security-globaris-poc` - and the repo-side fix is to RE-IDENTIFY the security workspace with a var-driven generation token (`law-security-<org>-<env>-r2`) so no rebuild consults the stale binding again. The retired name is BURNED, the ADR-067/ADR-073 purge-on-destroy posture stands UNCHANGED on both roots, the platform workspace keeps its name under a defined watch trigger, and Step 3's plan bar stays 48
+
+- **Date:** 2026-08-03
+- **Section:** 6 (Defender for Cloud + Sentinel, the failing surface) / 8 (Standard Platform
+  Components, where the workspace lives) / 10 (Pipeline and Tooling, restart conditions). **Corrects
+  the evidentiary record on OQ-027 and OQ-028** (dated notes there). **Raises OQ-074** (the Azure-side
+  stale binding this repo cannot remove). **Applies ADR-067** (a rebuild creates fresh objects) and
+  **ADR-073** (purge posture) rather than reversing either. **Refines LESSON 49**: a Sentinel 401 can
+  be Azure's non-disclosing variant of a workspace-RESOLUTION failure, not an authorization signal.
+  Relates to OQ-051 (unchanged: the Security Administrator role was verified PRESENT, so the 401s say
+  nothing about the grants) and to ADR-061/PC-2X (customer-id re-set, unaffected).
+- **Status:** Accepted (architect ruling on the operator-gathered evidence chain in
+  `docs/worklog/2026-08-02.md` and `docs/worklog/2026-08-03.md`)
+- **Landed:** NOT IMPLEMENTED. Decision 2 is a written spec for the Cloud Engineer (one variable, one
+  name expression, one tfvars row, demo-script defaults, doc notes). Decision 6 is a read-only
+  forensic step for the operator lane. Update this field by dated addendum when the PR merges.
+- **Decision makers:** claude (architect); user/operator (gathered every live measurement cited,
+  including the state-blob forensics that killed the fresh-versus-recovered hypothesis)
+
+**Context:**
+
+**Two greenfield rebuilds failed Step 3 (`platform/security`) on the same nine
+`azurerm_sentinel_alert_rule_scheduled` resources at the same ~13-minute position.** Attempt 2
+(2026-08-02, run 30784028698): all nine returned 401 Unauthorized, "Make sure you have the necessary
+permissions on all the workspaces in your query." Attempt 3 (2026-08-03, run 30844075060): the SAME
+nine failed, but seven returned 400 BadRequest, "Failed to run the analytics rule query. Log Analytics
+workspace '<law-workspace-id>' could not be found", and two returned the 401 form. The split follows no
+rule-domain line, so one cause has two surfaces, and the disclosing 400 names the mechanism: **the
+Sentinel scheduled-rule query-validation path resolves the rule's workspace to a GUID that no longer
+exists.** The 401 is the non-disclosing variant of the same resolution failure, which is why attempt 2
+read as an auth problem and burned a day of directory-role investigation.
+
+**The evidence chain, each limb measured (citations in the two day files):**
+
+1. The ghost GUID `<law-workspace-id>` appears nowhere: not in the repo (zero grep hits, re-derived today),
+   not the current security workspace (`a28c484f-...`), not the platform workspace (`2878a2da-...`),
+   and not the 2026-07-31 green build's workspace either - the 07-31 pre-teardown state blob
+   (recovered via the state SA's blob versioning) records `workspace_id = a03e2dc1-...`.
+2. The 2026-07-31 build therefore also ran against a workspace whose id is NOT the ghost, and it ran
+   behind the PC-1SEC gate (zero live AND zero soft-deleted `law-security-*`), so its create was
+   fresh. Fresh-versus-recovered is refuted as the differentiator: fresh succeeded on 07-31 and fresh
+   failed on 08-02 and 08-03.
+3. The CI SP's `Security Administrator` directory role was verified PRESENT by three independent
+   reads hours before attempt 3 reproduced the failure. Directory-role revocation is refuted.
+   Hypothesis ledger: eight dead, one mechanism established by direct error text plus state-blob
+   forensics.
+4. The LA query front door resolves the CURRENT workspace correctly by both customerId and ARM path
+   (probes returned `NspValidationFailedError` naming the right workspace - a network denial, not a
+   resolution failure). The dangling reference is SPECIFIC to the Sentinel scheduled-rule validation
+   path. The rule queries carry no workspace GUID; the GUID enters service-side.
+5. The only estate-level events between green (07-31 18:02Z) and first failure (08-02): the PC-1M
+   permanent purge of every soft-deleted Log Analytics workspace (2026-08-01, PR #90) plus two full
+   teardowns. While a soft-deleted predecessor existed, a stale service-side reference could still
+   dereference it; purged, it cannot.
+6. Reproduced across more than 24 hours and two independent greenfield rebuilds: deterministic, not
+   transient. Also observed: `azurerm_sentinel_alert_rule_ms_security_incident.mdc_high` failed with
+   "Provider produced inconsistent result after apply ... Root object was present, but now absent",
+   and the live rule count on the workspace was zero - the same service-side confusion surfacing on a
+   second resource type.
+
+**Diagnosis, at its honest epistemic level:** a stale Azure service-side binding, most plausibly keyed
+on the REUSED workspace name `law-security-globaris-poc` (possibly the full ARM path), routes Sentinel
+scheduled-rule query validation to a purged predecessor's GUID. The keying is UNPROVEN (Azure's
+internals are unobservable from here); what is established is that the reference is service-side,
+dangling, deterministic, and specific to this name's validation path while the front door resolves
+correctly. **The repo cannot fix the binding; it can only stop colliding with it.** The ghost GUID's
+exact ancestry (which purged generation it was) is unconfirmed and does not change the fix space, but
+it does discriminate between two sub-mechanisms with different recurrence behaviour - decision 6
+specifies the cheap read that settles it.
+
+**Decision:**
+
+**1. The mechanism above is accepted as the working diagnosis, and the fix is repo-side
+re-identification, not service-side repair.** Waiting (option c below) is refuted by the evidence;
+support escalation (option b) is unbounded and runs in parallel at most (OQ-074); un-purging (option
+d) is a non-fix that also reverses deliberate posture.
+
+**2. The security Log Analytics workspace is re-identified with a var-driven generation token.**
+Exact spec for the Cloud Engineer - no new module, no new provider surface, and the one AVM input
+touched (`name` on `Azure/avm-res-operationalinsights-workspace/azurerm` 0.5.1) is already in use at
+`platform/security/main.tf` line 74 (re-derived today), so there is nothing new to verify on the
+registry:
+
+- `platform/security/variables.tf` - add:
+
+  ```hcl
+  variable "security_law_generation" {
+    description = "Generation token appended to the security Log Analytics workspace name (ADR-075). Bump the value (r2 -> r3) only under the ADR-075 trigger: Sentinel scheduled-rule creation failing with a stale-workspace resolution error (400 'workspace ... could not be found' naming a GUID that is not the live workspace, or its non-disclosing 401 variant). Never reuse a burned value."
+    type        = string
+    default     = "r2"
+
+    validation {
+      condition     = can(regex("^[a-z0-9]{1,8}$", var.security_law_generation))
+      error_message = "security_law_generation must be 1-8 lowercase alphanumeric characters."
+    }
+  }
+  ```
+
+- `platform/security/main.tf` line 74 - the name expression becomes
+  `name = "law-security-${var.org_prefix}-${var.environment}-${var.security_law_generation}"`
+  (yields `law-security-globaris-poc-r2`, 28 chars, inside the 4-63 workspace limit at any token
+  length up to 8).
+- `envs/poc.tfvars` - add an explicit `security_law_generation = "r2"` row with a comment citing this
+  ADR, so the live value is visible and gate-checkable the same way `enable_om_phase1` is (PC-1TF''
+  pattern; the workflow already feeds this file to every root via `-var-file`, verified at
+  `.github/workflows/_tf-root.yml` lines 380/395 today).
+- `demo/04-reset.sh` line 27 and `demo/06-acceptance.sh` line 24 - the `SECURITY_LAW` env default
+  gains the `-r2` suffix with a comment tying it to this ADR (the env override stays). Update the
+  matching literals in `demo/06-acceptance.md` and `demo/README.md`.
+- Dated doc notes (same PR, docs lane): `RUNBOOK.md` (three occurrences), `SECURITY.md` (component
+  table), `docs/estate-bom.md` (three occurrences). Regenerate `platform/security/README.md` so the
+  new input appears in the variables table.
+
+Everything else follows automatically: every Sentinel child, diagnostic setting, Defender contact
+export and workbook references `module.security_law.resource_id`, not the name.
+
+**3. The retired name `law-security-globaris-poc` is BURNED.** It is never reused in this tenant, by
+any root, for any purpose, because a service-side record keyed to it cannot be proven gone. Any check
+that previously matched the exact name uses the `law-security-*` prefix pattern, which covers every
+generation (PC-1SEC already does; the teardown purge sweep is discovery-based with RG containment
+per ADR-073 decision 4 and carries no workspace-name selector, re-derived today from
+`scripts/teardown-common.sh`).
+
+**4. The purge-on-destroy posture stands UNCHANGED on BOTH roots.**
+`permanently_delete_on_destroy = true` stays in `platform/security/providers.tf` and
+`platform/management/providers.tf` (both re-read today). Dropping it (option d) was weighed and
+rejected twice over: (a) it is a NON-FIX for the live problem - the predecessors are already purged,
+so attempt 4's create is fresh regardless of the flag, and the binding dangles today; the flag only
+shapes FUTURE teardowns; (b) it would reverse posture ADR-067 and ADR-073 chose deliberately, for
+reasons this incident does not touch: a recovered workspace is the FM-1 shape whose Sentinel children
+come back live-but-stateless and produce the Class-2 `already exists` import wall (the exact incident
+OQ-063 was raised on), recovery is partial by Microsoft's own documentation (solutions and linked
+services are never restored), and ADR-066's greenfield-proof posture requires genuine greenfield.
+Accidentally-working-by-recovery is not a design.
+
+**5. Scope: security workspace ONLY, with a defined watch on the platform workspace.**
+`law-platform-globaris-poc` keeps its name. Rationale: the failing surface is Sentinel scheduled-rule
+query validation, which only the security workspace has; the platform workspace's consumers bind by
+ARM resource id (diagnostics, Traffic Analytics, DCRs) and its Step 2 applied green twice AFTER the
+PC-1M purge (2026-08-02 and 2026-08-03), which is live evidence the class does not bite its surfaces
+today. A preemptive rename would drag `PLATFORM_LAW_CUSTOMER_ID` handling, the NWTA naming
+inheritance, and the OQ-027 KQL reference for zero observed benefit. **Watch trigger, pre-authorized:**
+if any failure names a GUID that is not the live platform workspace's customerId in a
+resolution-style error (the 400 form or its 401 variant), the same generation-token mechanism is
+applied to `platform/management`'s workspace name by dated addendum to this ADR - no new ADR needed.
+Corollary for OQ-027: any re-enable of `firewall_threat_intel_hit` MUST use the fully-qualified
+ARM-resource-id `workspace()` form, never the name form - this incident is direct evidence that
+name-keyed resolution in the Sentinel validation path can dereference stale service-side state.
+
+**6. The discriminating measurement runs BEFORE the attempt-4 dispatch (doctrine 2a: state the
+refuting measurement and run it before acting on the diagnosis).** Read-only, operator lane: recover
+the attempt-2 pre-teardown `platform/security` state blob version (87,930 bytes, written by run
+30784028698's partial apply) via the state SA's blob versioning - the same technique that recovered
+the 07-31 version - and read the security workspace's customer id from it. Compare with the ghost:
+
+- **EQUAL** (the ghost IS attempt 2's workspace): the binding lags exactly one generation - it holds
+  the PREVIOUS build's id at rule-create time. Then the rename fixes attempt 4 (virgin name, no
+  predecessor), but a LATER rebuild under the same `r2` name would dangle again after `r2`'s first
+  purge. Consequence, pre-authorized: the token bump (`r2` -> `r3` -> ...) becomes a MANDATORY
+  pre-dispatch step of every future rebuild that follows a purge of the current security-workspace
+  generation. A bump is one tfvars edit with zero bar effect.
+- **NOT EQUAL** (the ghost is an older ancestor): the binding is anchored, a one-time rename most
+  likely suffices, and the bump stays REACTIVE - executed only if the trigger in decision 2's
+  variable description ever fires.
+
+Either way attempt 4 proceeds with `r2`; the measurement sets recurrence policy, not the fix. It is
+required to RUN before dispatch, not required to return a particular value.
+
+**7. No Azure support ticket is opened as a project dependency.** The binding is Azure-side debris
+with an unbounded remediation timeline; the rename removes the dependency on it. OQ-074 records the
+quarantine-versus-ticket question with the evidence pack listed, so a ticket can be filed at any time
+without re-forensics.
+
+**Alternatives considered:**
+
+- **(b) Azure support ticket as the fix** - rejected as the primary path: unbounded timeline on a POC
+  rebuild's critical path, and the estate cannot verify service-side cleanup even if Microsoft
+  reports it done. Kept available in parallel via OQ-074.
+- **(c) Wait-and-retry passes** - rejected on evidence: the binding survived more than 24 hours, two
+  full teardowns and two greenfield rebuilds. A retry without change is the definition of buying
+  another teardown (the day file's own "NOT a fix" entry).
+- **(d) Stop purging the security workspace / drop `permanently_delete_on_destroy` so rebuilds
+  recover instead of recreate** - rejected, decision 4: non-fix for the live dangle, and a reversal
+  of ADR-067/ADR-073's deliberate posture that would reintroduce the recovered-workspace FM-1 class
+  this root already failed on once.
+- **(A1) Hard-coded `-r2` literal instead of a variable** - rejected: if the class ever re-fires the
+  remedy becomes a code change plus review cycle instead of a tfvars edit, and decision 6's EQUAL
+  branch would make that a per-rebuild code change.
+- **Renaming BOTH workspaces preemptively** - rejected, decision 5: zero observed failures on the
+  platform workspace's surfaces post-purge, and real blast radius. Watch trigger defined instead.
+
+**Consequences:**
+
+- Positive: attempt 4's Step 3 stops colliding with the stale binding by construction; the fix is
+  testable on the next rebuild; recurrence has a pre-authorized one-line remedy; the platform
+  workspace question has a defined trigger instead of an open worry.
+- Negative / trade-offs: the workspace name no longer matches the pure `law-security-<org>-<env>`
+  convention - the generation token is now part of this estate's naming standard for any resource
+  class where Azure retains name-keyed service-side state across purge cycles. One name is
+  permanently retired in this tenant. Docs and demo defaults carry a literal that must move if the
+  token ever bumps.
+- Risk stated honestly: if the binding is NOT name-keyed (e.g. keyed on resource group or
+  subscription), the rename will not dodge it and attempt 4's Step 3 fails identically under the
+  virgin name. That outcome REFUTES the name-key hypothesis, narrows the class (doctrine 2b), and
+  returns the disposition here - see restart condition A4-RC8. It is the cheapest available
+  discriminator either way.
+- Follow-ups required: (1) Cloud Engineer implements decision 2 as ONE PR, code-reviewer gated;
+  (2) operator runs decision 6's read before dispatch; (3) `LESSONS.md` should gain the
+  401-non-disclosing-resolution lesson (main lane assigns the number when it lands); (4) OQ-074
+  tracks the Azure-side debris.
+
+**Restart conditions for rebuild attempt 4 (all must hold before Step 1 re-dispatches):**
+
+- **A4-RC1 (estate):** the 2026-08-03 post-attempt-3 teardown (`target=all`, `mode=terraform`) GREEN
+  through Phase 3 VERIFY and Phase 4 STATE RESET, then greenfield verified LIVE on the standard
+  limbs: zero estate RGs in all five subscriptions, zero soft-deleted LAWs in all five (PC-1M), MG
+  count 1 (Tenant Root only), all state blobs at the canonical empty baseline.
+- **A4-RC2 (code):** the decision-2 change set merged to `banking` via a cloud-engineer PR with a
+  code-reviewer APPROVE, diff confined to the Amendment C envelope
+  (`docs/preclearance/2026-07-22-full-estate-rebuild.md`). No other `.tf` change rides along.
+- **A4-RC3 (measurement):** decision 6's discriminating read executed and its result logged in the
+  day file. It does not gate dispatch on its value; it gates on having been RUN.
+- **A4-RC4 (pre-dispatch gates):** PC-1TF'' re-read by VALUE (`enable_acr_kubelet_binding = false`,
+  `enable_om_phase1 = false`; line numbers are not the gate); PC-1SEC re-verified with the
+  `law-security-*` wildcard (covers the `r2` name); dispatch `headSha` equals the post-merge
+  `banking` head.
+- **A4-RC5 (pre-clearance currency):** refresh #5 + Amendments A + B + C is the current clearance;
+  Amendment C's merge-SHA line appended by the operator after verifying the diff envelope. No
+  refresh #6 needed while the envelope holds.
+- **A4-RC6 (in-run gates - these die with every teardown and are re-discharged LIVE, never carried):**
+  PC-3C after Step 1 and before Step 4 (`Enable-DDoS-VNET` DoNotEnforce at both `connectivity` and
+  `landingzones`, with `MSYS_NO_PATHCONV=1` on MG-scope `az` calls from Git Bash); PC-2X' after
+  Step 2 (8 budgets live-counted); PC-2X after Step 2 (re-set `PLATFORM_LAW_CUSTOMER_ID`
+  unconditionally, ADR-061 - the fresh platform workspace has a new customerId); PC-2R before Step 3
+  (the 8 estate-managed Defender plans read `Free`).
+- **A4-RC7 (bars):** ALL fourTEEN certified bars carry unchanged, Step 3 explicitly stays **48** - a
+  rename changes no resource address and the new variable is not an address. Standard plan-scan shape
+  on every step: zero replace, zero destroy, zero import, zero `already exists`; and a scan must see
+  the `Plan:` / `Apply complete!` line before trusting any zero (the 08-03 BlobNotFound near-miss).
+  Note for any future non-greenfield reader: against a LIVE estate this rename would plan a
+  destroy-and-recreate of the workspace and every Sentinel child (name is ForceNew); it merges only
+  while the estate is greenfield, and the zero-replace bar catches it if that assumption ever breaks.
+- **A4-RC8 (the live test and its STOP):** Step 3's apply IS the live test of this ADR. Pass: 48/48
+  with all nine scheduled rules created. If the same resolution-failure class reproduces under the
+  virgin `r2` name, STOP - do NOT bump to `r3`, do not retry: that result refutes the name-key
+  hypothesis, the surviving candidates (resource-group-path or subscription-keyed binding) need a
+  different fix shape, and the disposition returns to the architect with one more discriminating data
+  point in hand.
+
 ### ADR-074: This estate has had NO enforcing region restriction at any scope, and three separate things disguised that: a Microsoft-managed tenant-root assignment that looks like ours, an ALZ archetype policy whose NAME reads like a geography control but is a resource-group CONSISTENCY audit, and a 57-assignment landing-zone archetype with no location policy in it. The fix is the two built-in allowed-locations policies assigned at the GLOBARIS root MG (never Tenant Root) at effect Deny, parameterised to the nine continental US regions MINUS the four US canary regions, and it is folded into the rebuild rather than deferred because a preventive control applied after the estate exists has never prevented anything
 
 - **Date:** 2026-08-02

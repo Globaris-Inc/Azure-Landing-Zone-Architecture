@@ -31,6 +31,41 @@
 
 <!-- Newest at the top. -->
 
+### OQ-074: The stale Sentinel-validation binding behind the burned name `law-security-globaris-poc` is Azure-side debris this repo cannot remove - quarantine the name forever, or file the support ticket?
+
+- **Raised:** 2026-08-03 (architect, ADR-075)
+- **Section:** 6 (Defender for Cloud + Sentinel) / 10 (Pipeline and Tooling)
+- **Blocking:** No - ADR-075's generation-token rename sidesteps the binding entirely; this tracks
+  the debris left behind, not the rebuild path.
+- **Priority:** Low
+
+**Question:**
+Two greenfield rebuilds (2026-08-02 run 30784028698, 2026-08-03 run 30844075060) established that
+Azure's Sentinel scheduled-rule query-validation path dereferences a PURGED predecessor workspace
+GUID (`<law-workspace-id>`) behind the reused workspace name `law-security-globaris-poc`, while the LA
+query front door resolves the current workspace correctly (full chain: ADR-075 and the two day
+files). The repo-side fix is shipped as ADR-075 (rename with generation token, name burned). The
+service-side binding itself remains: nothing this repo can run proves it gone, and if the keying is
+what the evidence suggests, a purge SHOULD have invalidated it - which makes this a reportable Azure
+defect, not just local debris. Do we file, or just never touch the name again?
+
+**Options being considered:**
+- A (recommended default): **Quarantine only.** The name is burned (ADR-075 decision 3); nothing is
+  filed. Cost: one retired name in one tenant, zero effort. The binding starves with nothing to
+  collide against.
+- B: **File an Azure support ticket** with the evidence pack: run ids 30784028698 and 30844075060,
+  the 400 error text naming the ghost GUID, the 401 non-disclosing variant, the PC-1M purge event
+  (2026-08-01, PR #90) as the estate-side trigger, the front-door probes that resolve correctly, and
+  the more-than-24h / two-rebuild reproduction window. Upside: Microsoft cleans the binding and gets
+  a bug report a purge-invalidation fix could come from. Downside: unbounded timeline; must never be
+  coupled to any rebuild step.
+- C: **File only on escalation** - if the class re-fires under the virgin `r2` name (which refutes
+  name-keying and changes the diagnosis, ADR-075 A4-RC8), or if the platform-workspace watch trigger
+  (ADR-075 decision 5) ever fires.
+
+**Recommended default:** A now, with B's evidence pack kept listed here precisely so it can be filed
+at any later date without re-forensics. Escalate per C's triggers.
+
 ### OQ-073: ADR-074's continental-US Deny will block Section 13.3's red-team second pole, which is in `westeurope` BY DESIGN so the impossible-travel detection scenario has a real signal
 
 - **Raised:** 2026-08-02 (found by the code-reviewer while gating ADR-074; it BLOCKED on it)
@@ -2640,6 +2675,15 @@ KeyVaults/Arm at Standard is now NEW enablement of blocked plans = deterministic
 (CloudPosture) carries the posture surface. Effectively Option B, forced by the teardown rather than chosen;
 the posture delta is recorded in ADR-040.
 
+**Evidentiary note 2026-08-03 (architect, ADR-075 - the resolution above is unaffected):** this OQ is
+cited jointly with OQ-027 across the repo (e.g. `docs/acceptance-validation.md`) as the tenant-plane /
+Security-Administrator-gated content story, so the correction is recorded here too: the 2026-08-02
+nine Sentinel-rule 401s (rebuild attempt 2, run 30784028698) are NOT evidence about tenant-plane
+permissions. Attempt 3 (run 30844075060) reproduced them with a disclosing 400 naming a purged
+predecessor workspace GUID; the 401 was Azure's non-disclosing variant of a workspace-resolution
+failure (full chain in ADR-075). The `Security Administrator` role was verified PRESENT before the
+reproduction. Nothing in either run bears on this OQ's subject or its 2026-07-12 resolution.
+
 ### OQ-027: Re-enable path for the firewall_threat_intel_hit cross-workspace analytics rule (fully-qualified reference + Sentinel cross-workspace RBAC)?
 
 - **Raised:** 2026-07-10 (platform/security run-2, architect)
@@ -2664,6 +2708,20 @@ require in a persistent environment?
   single-workspace - rejected in design for the POC (duplicate ingestion cost) but simplest operationally.
 - C: Leave gated off - acceptable for the POC; the firewall threat-intel signal is still visible in the
   platform workspace and Defender for Cloud.
+
+**Evidentiary note 2026-08-03 (architect, ADR-075 - correction of the record, the OQ stays open):**
+the 2026-08-02 rebuild attempt 2 failure (run 30784028698, nine scheduled-rule 401s) was initially
+read against the tenant-plane permission surface this OQ and OQ-028 are jointly cited for across the
+repo. That reading is CORRECTED: attempt 3 (run 30844075060) reproduced the same nine failures with
+seven in the disclosing 400 form, naming a PURGED predecessor workspace GUID, which establishes those
+401s as Azure's non-disclosing variant of a workspace-RESOLUTION failure, not an authorization
+signal. The CI SP's `Security Administrator` role was verified PRESENT by three independent reads
+hours before the reproduction. No tenant-plane permission conclusion may be drawn from either run.
+Two consequences for THIS OQ: (1) its premise is unchanged - the name-only `workspace()` reference
+still does not resolve cross-subscription at rule-create time; (2) ADR-075 decision 5 HARDENS option
+A: any re-enable of `firewall_threat_intel_hit` MUST use the fully-qualified ARM-resource-id
+`workspace()` form, never the name form, because this incident is direct evidence that name-keyed
+resolution in the Sentinel validation path can dereference stale service-side state.
 
 ### OQ-026: Corp-spoke workload tier (App Service + SQL) is fully offer-capped off - for a persistent environment, request quota / relocate, or redesign to serverless?
 
