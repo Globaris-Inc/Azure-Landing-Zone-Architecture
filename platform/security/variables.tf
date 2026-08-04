@@ -1,6 +1,6 @@
 # Purpose: Input variables for the Security platform root module.
 # Section: 8 - Standard Platform Components / extended in Section 6 (Defender + Sentinel)
-# Last updated: 2026-05-29
+# Last updated: 2026-08-03
 
 variable "tenant_id" {
   description = "Azure Active Directory tenant ID."
@@ -32,6 +32,17 @@ variable "environment" {
 # ---------------------------------------------------------------------------
 # Security Log Analytics Workspace
 # ---------------------------------------------------------------------------
+
+variable "security_law_generation" {
+  description = "Generation token appended to the security Log Analytics workspace name (ADR-075). Bump the value (r2 -> r3) only under the ADR-075 trigger: Sentinel scheduled-rule creation failing with a stale-workspace resolution error (400 'workspace ... could not be found' naming a GUID that is not the live workspace, or its non-disclosing 401 variant). Never reuse a burned value."
+  type        = string
+  default     = "r2"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]{1,8}$", var.security_law_generation))
+    error_message = "security_law_generation must be 1-8 lowercase alphanumeric characters."
+  }
+}
 
 variable "security_law_retention_days" {
   description = "Log Analytics workspace data retention period in days (30-730) for the RBAC-isolated Security workspace."

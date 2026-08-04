@@ -1,7 +1,7 @@
 # Purpose: Security platform root module - RBAC-isolated Security LA workspace,
 #          Microsoft Sentinel, Key Vault for security secrets, Defender for Cloud plans.
 # Section: 8 - Standard Platform Components
-# Last updated: 2026-05-14
+# Last updated: 2026-08-03
 #
 # Apply order: After platform/management (platform LA workspace ID not required here;
 #              security workspace is intentionally isolated). After platform/connectivity
@@ -71,7 +71,7 @@ module "security_law" {
   source  = "Azure/avm-res-operationalinsights-workspace/azurerm"
   version = "0.5.1"
 
-  name                = "law-security-${var.org_prefix}-${var.environment}"
+  name                = "law-security-${var.org_prefix}-${var.environment}-${var.security_law_generation}" # ADR-075: generation token re-identifies the workspace; the unsuffixed name is burned
   resource_group_name = azurerm_resource_group.security.name
   location            = var.primary_location
 
