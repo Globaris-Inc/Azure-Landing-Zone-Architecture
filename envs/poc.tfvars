@@ -471,7 +471,11 @@ approved_sign_in_countries = ["US", "CA", "GB"]
 # generation, the bump is MANDATORY before the next rebuild (ADR-075 decision 6,
 # EQUAL branch, measured 2026-08-03). Never reuse a burned value;
 # law-security-globaris-poc (no suffix) is burned.
-security_law_generation = "r2"
+# 2026-08-04: bumped r2 -> r3 per the ADR-075 decision-6 EQUAL-branch mandate.
+# The 2026-08-04 full teardown (operator-directed clean-run validation reset)
+# purges the r2 generation, so r2 is burned the moment that teardown's Phase 1
+# destroys platform/security. Zero bar effect (value change, no address change).
+security_law_generation = "r3"
 
 # Globaris root MG ARM resource ID — scope of the NIST + CIS compliance assignments.
 root_management_group_id = "/providers/Microsoft.Management/managementGroups/globaris"
