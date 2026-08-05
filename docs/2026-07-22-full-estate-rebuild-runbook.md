@@ -8,9 +8,11 @@
 > **Dated note 2026-08-03 (ADR-075, code-reviewer advisory):** the workspace literal
 > `law-security-globaris-poc` at lines ~309 and ~322 below is the PRE-ADR-075 name, kept as written
 > because this runbook is a dated record of a specific completed rebuild. That exact name is now
-> BURNED (ADR-075 decision 3); the live workspace is `law-security-globaris-poc-r2` and any current
-> check must use the `law-security-*` prefix. Do not copy-paste those two commands against the
-> post-ADR-075 estate without substituting the current name.
+> BURNED (ADR-075 decision 3), and every purged generation burns its token with it (`-r2` burned by
+> the 2026-08-04 teardown; dated update in this note). The live workspace carries the CURRENT
+> `security_law_generation` token - read it from `envs/poc.tfvars`, do not trust any literal in prose -
+> and any current check must use the `law-security-*` prefix. Do not copy-paste those two commands
+> against the post-ADR-075 estate without substituting the current name.
 >
 > **What this run is (user framing):** a PROCESS VALIDATION that the full estate can be stood up as a
 > real production environment. Cost is not a gating input today. Correctness of sequence and honest

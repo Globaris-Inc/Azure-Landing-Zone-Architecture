@@ -21,7 +21,7 @@ Required env vars (with sensible defaults):
 | `ORG_PREFIX`   | `globaris` | All criteria — RG / LAW naming |
 | `ENVIRONMENT`  | `poc`      | All criteria |
 | `SECURITY_RG`  | `rg-security-${ORG_PREFIX}-${ENVIRONMENT}` | Criterion 1 |
-| `SECURITY_LAW` | `law-security-${ORG_PREFIX}-${ENVIRONMENT}-r2` (ADR-075 generation suffix) | Criterion 1 |
+| `SECURITY_LAW` | `law-security-${ORG_PREFIX}-${ENVIRONMENT}-r3` (ADR-075 generation suffix) | Criterion 1 |
 | `LANDINGZONES_SUB_ID` | _(required)_ | Criteria 2, 3, 5 |
 
 ---
