@@ -475,7 +475,10 @@ approved_sign_in_countries = ["US", "CA", "GB"]
 # The 2026-08-04 full teardown (operator-directed clean-run validation reset)
 # purges the r2 generation, so r2 is burned the moment that teardown's Phase 1
 # destroys platform/security. Zero bar effect (value change, no address change).
-security_law_generation = "r3"
+# 2026-08-05: bumped r3 -> r4, same mandate. The 2026-08-05 full teardown
+# (standing-rule-1 response to the attempt-5 Step 7 Azure-side 500 on the
+# App Gateway create) purges the r3 generation; r3 is burned. Zero bar effect.
+security_law_generation = "r4"
 
 # Globaris root MG ARM resource ID — scope of the NIST + CIS compliance assignments.
 root_management_group_id = "/providers/Microsoft.Management/managementGroups/globaris"
