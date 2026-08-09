@@ -1,7 +1,7 @@
 # .github/workflows/_tf-root.yml
 # Purpose: Reusable Terraform workflow for a SINGLE root — plan | apply | destroy.
 # Section: 10 — Pipeline & Tooling (ADR-019). Called by deploy.yml and teardown.yml.
-# Last updated: 2026-07-30
+# Last updated: 2026-08-08
 #
 # Auth: OIDC federated credential — no secrets stored for login. Gated callers
 # pass a GitHub Environment via `gh_environment`; an EMPTY string = ungated
@@ -25,6 +25,14 @@
 # target=all Phase 1, ADR-066, 2026-07-29); the default_action flip races only on CONCURRENT
 # flips against the same state SA (deploy.yml's target=all apply jobs run in parallel and
 # never enable this input at all - ADR-060).
+# SEQUENTIAL-RUN RACE (2026-08-07, run 31219463271): concurrency is not the only race.
+# A run dispatched ~1 min after the previous run's exit can hit
+# StorageAccountOperationInProgress on the flip, because the PREVIOUS run's exit-restore
+# still holds the account's exclusive-operation lock. The error is transient
+# (self-clears in ~1-2 min), so the flip and restore below both retry bounded. Note the
+# failed CLI call's operation can still land ASYNCHRONOUSLY after the error - that run
+# left the SA at Allow with the restore step disarmed - so the restore is armed BEFORE
+# the first flip attempt, not after its success.
 #
 # Destroy resilience (ADR-054 / docs/teardown-redesign.md, F1 fix): action=destroy runs a
 # `terraform state list` pre-step first and skips the actual destroy (exit 0) when state is
@@ -288,15 +296,36 @@ jobs:
           RG_NAME="$(grep -E '^\s*resource_group_name'  "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
           CONTAINER="$(grep -E '^\s*container_name'     "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
           echo "Flipping default_action=Allow on $SA_NAME (rg $RG_NAME) for this run"
-          # ONLY default_action changes here. `az storage account update --default-action`
-          # does not touch --ip-address rules or --bypass, so the static ip_rules and the
-          # AzureServices bypass set in bootstrap are preserved. Restored to Deny on exit.
-          az storage account update \
-            --name "$SA_NAME" --resource-group "$RG_NAME" \
-            --default-action Allow --output none
+          # Arm the exit-restore BEFORE the first flip attempt: a failed
+          # `az storage account update` can still land its operation asynchronously
+          # after the CLI error (observed 2026-08-07, run 31219463271 - SA left at
+          # Allow with the restore step disarmed). Restoring Deny on an SA that never
+          # actually flipped is a no-op, so arming early is safe in every branch.
           echo "STATE_SA_NAME=$SA_NAME" >> "$GITHUB_ENV"
           echo "STATE_SA_RG=$RG_NAME"   >> "$GITHUB_ENV"
           echo "SA_OPENED=1"            >> "$GITHUB_ENV"
+          # ONLY default_action changes here. `az storage account update --default-action`
+          # does not touch --ip-address rules or --bypass, so the static ip_rules and the
+          # AzureServices bypass set in bootstrap are preserved. Restored to Deny on exit.
+          # Bounded retry: the previous run's exit-restore holds an exclusive-operation
+          # lock on the account for ~1-2 min (StorageAccountOperationInProgress on a
+          # dispatch that follows it closely - the sequential-run race, 2026-08-07).
+          flipped=0
+          for attempt in 1 2 3 4 5; do
+            if az storage account update \
+                 --name "$SA_NAME" --resource-group "$RG_NAME" \
+                 --default-action Allow --output none; then
+              flipped=1; break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              echo "Flip attempt $attempt/5 failed (likely a still-running operation from the previous run) - retrying in 30s..."
+              sleep 30
+            fi
+          done
+          if [ "$flipped" != "1" ]; then
+            echo "::error::Could not flip default_action=Allow on $SA_NAME after 5 attempts (~2 min of retries)."
+            exit 1
+          fi
           # default_action=Allow is monotonic once propagated (unlike a single pinned IP,
           # which can be admitted for the probe yet rejected seconds later because the
           # runner SNATs across a dynamic pool and IP-rule propagation is per front-end
@@ -522,7 +551,21 @@ jobs:
         run: |
           set -uo pipefail
           echo "Restoring default_action=Deny on $STATE_SA_NAME"
-          az storage account update \
-            --name "$STATE_SA_NAME" --resource-group "$STATE_SA_RG" \
-            --default-action Deny --output none || \
-            echo "::warning::Failed to restore Deny on $STATE_SA_NAME — set default_action=Deny manually."
+          # Same bounded retry as the flip: this restore is the exact operation that
+          # holds the exclusive lock the NEXT run's flip can collide with, and it can
+          # itself collide with a lingering operation (sequential-run race, 2026-08-07).
+          restored=0
+          for attempt in 1 2 3 4 5; do
+            if az storage account update \
+                 --name "$STATE_SA_NAME" --resource-group "$STATE_SA_RG" \
+                 --default-action Deny --output none; then
+              restored=1; break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              echo "Restore attempt $attempt/5 failed - retrying in 30s..."
+              sleep 30
+            fi
+          done
+          if [ "$restored" != "1" ]; then
+            echo "::warning::Failed to restore Deny on $STATE_SA_NAME after 5 attempts - set default_action=Deny manually."
+          fi
