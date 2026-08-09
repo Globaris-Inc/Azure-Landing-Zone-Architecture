@@ -890,7 +890,13 @@ jobs:
       # precedent (it has no Terraform root/backend_rel context to reuse _tf-root.yml's step
       # from, and this job has none either). This job is always the LAST job in a target=all
       # run that ever touches the state SA (it needs every Phase 1 job plus verify), so exactly
-      # one flip is ever open at a time (LESSON 31) - safe by construction.
+      # one flip is ever open at a time (LESSON 31) - safe by construction against CONCURRENT
+      # flips. The SEQUENTIAL race remains (2026-08-07, run 31219463271): the immediately
+      # preceding job's exit-restore can still hold the account's exclusive-operation lock
+      # when this flip fires - and this job runs directly after Phase 1's restores, a tighter
+      # window than the cross-run gap that failed live. Hence the bounded retry below, and
+      # the restore-arming BEFORE the first attempt (a failed CLI call's operation can land
+      # asynchronously after the error, leaving the SA at Allow with the restore disarmed).
       - name: Open state SA firewall for this run (ADR-025)
         env:
           BACKEND_HCL: envs/poc.backend.hcl
@@ -900,12 +906,25 @@ jobs:
           RG_NAME="$(grep -E '^\s*resource_group_name'  "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
           CONTAINER="$(grep -E '^\s*container_name'     "$BACKEND_HCL" | sed -E 's/.*=\s*"?([^"#[:space:]]+)"?.*/\1/')"
           echo "Flipping default_action=Allow on $SA_NAME (rg $RG_NAME) for this state-reset run"
-          az storage account update \
-            --name "$SA_NAME" --resource-group "$RG_NAME" \
-            --default-action Allow --output none
           echo "STATE_SA_NAME=$SA_NAME" >> "$GITHUB_ENV"
           echo "STATE_SA_RG=$RG_NAME"   >> "$GITHUB_ENV"
           echo "SA_OPENED=1"            >> "$GITHUB_ENV"
+          flipped=0
+          for attempt in 1 2 3 4 5; do
+            if az storage account update \
+                 --name "$SA_NAME" --resource-group "$RG_NAME" \
+                 --default-action Allow --output none; then
+              flipped=1; break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              echo "Flip attempt $attempt/5 failed (likely a still-running operation from a prior job) - retrying in 30s..."
+              sleep 30
+            fi
+          done
+          if [ "$flipped" != "1" ]; then
+            echo "::error::Could not flip default_action=Allow on $SA_NAME after 5 attempts (~2 min of retries)."
+            exit 1
+          fi
           # default_action=Allow is monotonic once propagated but NOT instant and NOT
           # consistent across front-end nodes at the moment it flips (same caveat _tf-root.yml
           # documents) - require 3 CONSECUTIVE successful blob-list probes, 8s apart, before
@@ -954,10 +973,21 @@ jobs:
         run: |
           set -uo pipefail
           echo "Restoring default_action=Deny on $STATE_SA_NAME"
-          az storage account update \
-            --name "$STATE_SA_NAME" --resource-group "$STATE_SA_RG" \
-            --default-action Deny --output none || \
-            echo "::warning::Failed to restore Deny on $STATE_SA_NAME - set default_action=Deny manually."
+          restored=0
+          for attempt in 1 2 3 4 5; do
+            if az storage account update \
+                 --name "$STATE_SA_NAME" --resource-group "$STATE_SA_RG" \
+                 --default-action Deny --output none; then
+              restored=1; break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              echo "Restore attempt $attempt/5 failed - retrying in 30s..."
+              sleep 30
+            fi
+          done
+          if [ "$restored" != "1" ]; then
+            echo "::warning::Failed to restore Deny on $STATE_SA_NAME after 5 attempts - set default_action=Deny manually."
+          fi
 
   # Scorched earth (OQ-012 = false by default). The SP cannot delete its own OIDC app
   # (needs Entra/Graph rights, not ARM Owner) and the state-backend RG name is
