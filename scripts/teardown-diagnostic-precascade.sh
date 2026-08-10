@@ -21,16 +21,17 @@
 # 33 minutes 50 seconds, AFTER APIM and AKS had already provisioned).
 #
 # THE ORDERING REGRESSION THIS FIXES, which is the same one ADR-066 decision 4 already found and
-# fixed for Databricks. Phase 2's step 2-pre sweeps this exact class, but it can only see a setting
-# whose host is still LIVE, and it sits in Phase 2, which `needs` all of Phase 1. Under ADR-066,
-# `mode=terraform` at `target=all` runs the per-root terraform destroys FIRST - deleting the hosts -
-# so by the time step 2-pre runs there is nothing left for it to enumerate. On that path the sweep
-# is structurally unable to catch precisely the residue it was written for. Moving the operation
-# ahead of Phase 1, while the hosts are provably still there, is the whole fix.
+# fixed for Databricks. Phase 2's step 1-pre (renamed from step 2-pre, ADR-076 decision 1) sweeps
+# this exact class, but it can only see a setting whose host is still LIVE, and it sits in Phase 2,
+# which `needs` all of Phase 1. Under ADR-066, `mode=terraform` at `target=all` runs the per-root
+# terraform destroys FIRST - deleting the hosts - so by the time step 1-pre runs there is nothing
+# left for it to enumerate. On that path the sweep is structurally unable to catch precisely the
+# residue it was written for. Moving the operation ahead of Phase 1, while the hosts are provably
+# still there, is the whole fix.
 #
 # GATED IDENTICALLY TO THE DATABRICKS PRECASCADE (see teardown.yml): target=all AND mode=terraform
 # only. `mode=az-sweep` is deliberately NOT wired: Phase 1 never runs in that path (every Phase 1
-# job gates on inputs.mode == 'terraform'), so step 2-pre there already executes while hosts are
+# job gates on inputs.mode == 'terraform'), so step 1-pre there already executes while hosts are
 # live and a second call would be a redundant duplicate rather than a fix. Same reasoning, same
 # words, as the Databricks job's own header.
 #
@@ -40,15 +41,27 @@
 # recovered by runbook B1 (delete the survivor, rerun the same root, never import) - which is the
 # interim two-applies rule this job exists to retire, not an incident.
 #
+# AMENDED 2026-08-10 (ADR-076 decisions 1-3, strategic review docs/strategic-review-2026-08-09.md).
+# This job now ALSO `needs` (ordering only, `!cancelled()` form - never a gate) to run strictly
+# BEFORE `databricks-precascade` in teardown.yml: the two were previously wired as concurrent
+# (`needs: [guard]` only each, "disjoint object classes" per the old comment), which is false for
+# a Databricks-hosted diagnostic setting - `diag-dbw-*` is an extension object keyed to the
+# workspace URI that `databricks-precascade` force-deletes, so whichever job reached the workspace
+# first silently won the race. Live evidence this raced badly: teardown run 31350223388's
+# enumeration died on a Databricks-managed RG the concurrent Databricks precascade had already
+# force-deleted out from under it (ResourceGroupNotFound). `sweep_resource_diagnostic_settings`
+# (teardown-common.sh) itself also gained a completeness assertion so a single vanished host can
+# never again silently strand the rest of the sweep - see that function's own comment.
+#
 # SCOPE BOUNDARY, documented rather than fixed here: this job runs only for target=all, matching
 # DISARM, the Databricks precascade and every other Phase 0/2/3 job (see teardown.yml's own "Scope
 # note"). A standalone single-root destroy does not get this belt. That is the existing
 # single-root exclusion the teardown design already accepts, not a new gap.
 #
-# Shares its entire body with Phase 2's step 2-pre via `sweep_resource_diagnostic_settings`
-# (teardown-common.sh) so the two call sites cannot drift on the exact az invocation, api-version,
-# containment predicate or confirm-GET - the same anti-drift reason `databricks_force_delete_cascade`
-# is shared.
+# Shares its entire body with Phase 2's step 1-pre (renamed from step 2-pre, ADR-076 decision 1)
+# via `sweep_resource_diagnostic_settings` (teardown-common.sh) so the two call sites cannot drift
+# on the exact az invocation, api-version, containment predicate or confirm-GET - the same
+# anti-drift reason `databricks_force_delete_cascade` is shared.
 #
 # ACCEPTANCE (ADR-071 decision 4b + T3). The next `target=all mode=terraform` teardown shows this
 # job deleting at least the settings the estate holds, and the next greenfield first apply of
@@ -69,5 +82,5 @@ if ! sweep_resource_diagnostic_settings; then
 fi
 
 echo "Diagnostic-settings precascade complete."
-echo "A zero-deletion result here is NOT self-evidently correct: on a deployed estate these settings exist (nine are composed by this repository across bank-data-p1, bank-app-p1 and online-p1), so zero means either a prior run already swept them or the enumeration did not reach them. Phase 2's step 2-pre remains the belt for whatever this missed, and the real acceptance test is T3 - zero 'already exists' on the next greenfield first apply."
+echo "SUCCESS here is now a mechanical assertion, not a comment (ADR-076 decision 2, ADR-062): sweep_resource_diagnostic_settings only returns 0 when settings-found == settings-confirmed-gone AND mid-sweep-unreachable-hosts == 0, printed above. This retires the old 'a zero-deletion result is not self-evidently correct' prose warning - a zero-found, zero-unreachable result IS self-evidently correct now, because an unreachable host is counted and fails the job instead of passing silently. Phase 2's step 1-pre remains the belt for the mode=az-sweep path and whatever this missed, and the real acceptance test is still T3 - zero 'already exists' on the next greenfield first apply."
 exit 0
