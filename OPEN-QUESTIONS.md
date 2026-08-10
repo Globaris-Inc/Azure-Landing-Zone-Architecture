@@ -31,6 +31,84 @@
 
 <!-- Newest at the top. -->
 
+### OQ-076: Ratify the rebuild model (draft ADR-077) and promote the ADR-071 4b class fix (draft ADR-076)?
+
+- **Raised:** 2026-08-09 (architect, strategic review `docs/strategic-review-2026-08-09.md`)
+- **Section:** 10 (Pipeline and Tooling) / 12 (Acceptance Criteria Validation)
+- **Blocking:** Was Yes - the 2026-08-09 standing directive held all rebuild activity on this
+  decision. Now resolved; attempt 8 is unblocked once its preconditions land.
+- **Priority:** High (was Blocking)
+
+**Question:**
+The strategic review put two coupled drafts to the operator: ADR-076 (the diagnostic-precascade
+class fix: ordering barrier + per-setting completeness assertion + scoped azapi conversion of
+the Databricks workspace setting) and ADR-077 (retire the one-clean-pass validation gate in
+favour of a documented-bounded-recovery claim, evidence-bound same-step retries, layer scoring
+as claim structure, a hardening-pass/claim-pass split, and standing rule 1 replaced by
+classify-then-disposition). Adopt both, one, or neither?
+
+**Options being considered:**
+- A: adopt both as drafted (architect recommendation).
+- B: adopt ADR-076 only; keep the one-clean-pass standard and standing rule 1.
+- C: adopt with a narrowed retry bar.
+- D: operator's own composition.
+
+**RESOLVED 2026-08-10 (operator ruling, in-channel): option B - RATIFY ADR-076 ONLY; ADR-077
+is DECLINED and recorded as REJECTED.** The one-clean-pass standard and standing rule 1 stay
+in force for attempt 8; the operator accepts the forfeit odds (the review's estimate: at the
+observed ~1.5 percent per-run vendor-fault rate, roughly one attempt in three forfeits across
+the 28 serial runs even with a fully correct repo). Consequences, stated so they are not
+rediscovered mid-failure: same-step retries are NOT available for any class, including
+evidence-bound Azure-side transients; layer scoring is NOT adopted (attempt 7's platform-layer
+green is history, not a claim unit); the validation claim standard is unchanged; any attempt-8
+failure at any step means full teardown and restart, with the ADR-075 generation bump whenever
+a teardown purges the current security-LAW generation. Attempt-8 preconditions now: ADR-076's
+two implementation PRs (DevSecOps: decisions 1-3; Cloud Engineer: decision 4) merged, PR #110
+(the r5 bump) merged, greenfield re-verified live, pre-clearance refreshed past the
+post-attempt-7 PRs, and the OQ-070 budget window checked (valid to 2026-08-31).
+
+### OQ-075: Did the 2026-08-09 teardown clear the dbw diagnostic-setting orphan, and what protects attempt 8's Step 8?
+
+- **Raised:** 2026-08-09 (architect, strategic review Part 1 section 1.6)
+- **Section:** 10 (Pipeline and Tooling) / 9 (Landing Zone Spokes)
+- **Blocking:** Was High - gates attempt 8's Step 8 risk posture. Now resolved.
+- **Priority:** High
+
+**Question:**
+The FM-3 orphan `diag-dbw-bank-data-p1-globaris-poc` sat on the live recreated workspace when
+the attempt-7 teardown dispatched, so that teardown's `diagnostic-precascade` was the first
+sweep since the mint (teardown `30685705802`, 2026-07-31) with the setting reachable - IF it
+beat the concurrent `databricks-precascade` to the host. Once the host is gone no read can see
+the setting (ADR-076 decision 5: ARM 403 routing, no ARG indexing, activity log forensics
+only). The decisive read: does the run's `diagnostic-precascade` job log show
+`Deleting resource-scoped diagnostic setting diag-dbw-bank-data-p1-globaris-poc` with a
+passing confirm-GET?
+
+**Options being considered:**
+- A: log shows the deletion + confirm-GET -> orphan CLEARED; land the azapi conversion as belt.
+- B: log does not -> orphan presumed live and invisible; the azapi conversion is the only
+  deterministic Step 8 protection.
+- C: conversion rejected -> pre-authorize a single-setting evidence-bound recovery at Step 8
+  (a dated, bounded exception to the PC-1DIAG ruling for exactly this named object, once).
+
+**RESOLVED 2026-08-09/10: worse than option B - the sweep never completed its enumeration.**
+Teardown `31350223388`'s DIAGNOSTIC PRECASCADE **FAILED loudly mid-enumeration**:
+`resource list failed for RG rg-bank-data-p1-dbx-managed-globaris-poc ... (ResourceGroupNotFound)`,
+exit 1 - the ADR-076 limb-1 race in its loud expression (the Databricks RP deleted the managed
+RG asynchronously under the concurrent force-delete while the sweep was enumerating). Every
+host after the failure point went unswept while alive, so **the orphan set entering the next
+rebuild is UNKNOWN and unverifiable by construction** (evidence: `docs/worklog/2026-08-09.md`,
+the `31350223388` entries; estate reached verified greenfield via Phase 2/3/4 regardless).
+Disposition: ADR-076 is Accepted (OQ-076), so decision 4's azapi conversion - the
+deterministic Step 8 protection - is an attempt-8 PRECONDITION, not a belt; under the retained
+one-clean-pass standard a Step 8 `already exists` would forfeit the whole attempt. Option C is
+moot. Optional non-blocking forensic reads, renamed to avoid colliding with the rejected
+ADR-077's retry-class labels: **F-1** - run `30685705802`, `bank-data-p1 / destroy` job log:
+did the dbw setting log a normal `Destruction complete` or drop at refresh (host-gone), with
+the `diag-aif-*`/`diag-srch-*` siblings as the in-order contrast; **F-2** - same run,
+`databricks-precascade` job log: the force-delete submission timestamp versus the destroy
+job's. Both close ADR-076's provenance from "best fit" to "measured"; neither blocks anything.
+
 ### OQ-074: The stale Sentinel-validation binding behind the burned name `law-security-globaris-poc` is Azure-side debris this repo cannot remove - quarantine the name forever, or file the support ticket?
 
 - **Raised:** 2026-08-03 (architect, ADR-075)

@@ -49,6 +49,179 @@
 
 <!-- Newest at the top. -->
 
+### ADR-077: Replace the one-clean-pass rebuild-validation standard with greenfield-to-green-plus-documented-bounded-recovery (evidence-bound same-step retries, layer scoring as claim structure, a hardening-pass/claim-pass split, and standing rule 1 replaced by classify-then-disposition) - REJECTED by operator ruling: the one-clean-pass standard and standing rule 1 stay in force for attempt 8
+
+- **Date:** 2026-08-09 (drafted, strategic review); ruled 2026-08-10
+- **Section:** 10 (Pipeline and Tooling) / 12 (Acceptance Criteria Validation)
+- **Status:** REJECTED (operator ruling 2026-08-10, OQ-076 partial ratification). Recorded, not
+  erased: a rejected recommendation is a decision too, and the analysis it rests on remains the
+  costing of record for any future re-open.
+- **Landed:** N/A - rejected, nothing to implement
+- **Decision makers:** user/operator (the ruling); claude (architect, the recommendation)
+
+**Context:** After attempt 7 failed at Step 8 on the FM-3 diagnostic-setting orphan (run
+`31348557765`, 75/76 created), the operator's 2026-08-09 standing directive held all rebuild
+activity for a strategic review of the rebuild model itself. The full analysis is
+`docs/strategic-review-2026-08-09.md` Part 3: seven attempts, roughly 65 plan/apply runs, no
+fixed class ever recurring, every failure a new class, exactly one pure Azure-side stochastic
+fault (attempt 5's App Gateway 500), and a transient-only model putting a fully-correct repo's
+per-attempt completion probability at roughly 57-75 percent across the 28 serial runs.
+
+**Decision (the question put, and the ruling):** The architect recommended retiring the
+one-clean-pass gate in favour of a reframed validation claim (greenfield-to-green with
+documented bounded recovery), an evidence-bound same-step retry bar (Azure 5xx and
+pre-Terraform lane classes only, one retry per step, two per attempt), layer scoring as claim
+structure, attempt 8 designated a hardening pass with fix-and-continue, and standing rule 1
+replaced by classify-then-disposition. **The operator DECLINED the recommendation in full
+(2026-08-10, in-channel, OQ-076): the one-clean-pass standard and standing rule 1 remain in
+force for attempt 8, and the operator accepts the forfeit odds.**
+
+**Consequences of the ruling, stated so nobody rediscovers them mid-failure:** attempt 8 is
+all-or-nothing - any failure at any step, including an evidence-bound Azure-side transient,
+triggers the full teardown and restart of standing rule 1; the same-step retry classes defined
+in the draft are NOT available; layer scoring is NOT adopted (attempt 7's platform-layer green
+is history, not a bankable claim unit); the validation claim standard is unchanged; every
+teardown that purges the current security-LAW generation still mandates the ADR-075 bump
+before the next Step 3. ADR-076's class fix and its attempt-8 preconditions are unaffected -
+they were ratified in the same ruling.
+
+**Alternatives considered:** the full option set (status quo, bounded retry, layer
+checkpoints, reframed claim, and their compositions) is costed in
+`docs/strategic-review-2026-08-09.md` Part 3 and is not restated here.
+
+### ADR-076: The attempt-7 Step 8 orphan is NOT a regression of ADR-071 4b but a coverage hole that predates it - the Databricks force-delete precascade deletes the one out-of-band host while the diagnostic sweep has no ordering barrier and no completeness assertion, so a miss is silent (or, as live-confirmed in teardown 31350223388, a loud mid-enumeration abort that leaves every later host unswept). The fix is an ordering barrier (diag sweep strictly before ANY host-deleting actor, both modes) plus an expectation-anchored per-setting verification whose SUCCESS is found==confirmed-gone AND unreachable-hosts==0, plus the pre-authorized scoped azapi conversion of the Databricks workspace setting. FM-3 remains undetectable while the host is absent - verified against ARM routing, Azure Resource Graph, and this estate's own recorded 403 - so no greenfield gate is built
+
+- **Date:** 2026-08-09 (drafted, strategic review); Accepted 2026-08-10
+- **Section:** 10 (Pipeline and Tooling - the teardown belts) / 9 (Landing Zone Spokes - the
+  azapi conversion). **Extends ADR-071** (decision 4b's coverage; exercises the decision-4a
+  pre-authorization on its stated T3 trigger, which has now fired). **Extends ADR-072's**
+  sweep-ordering table with a third row: a Phase 0.5 host-deleting actor is a Phase 1 destroy
+  brought forward, and the G-1 rule ("sweep before the host dies") binds against it
+  identically. **Corrects the `teardown.yml` Phase 0.5 comment** ("disjoint object classes" -
+  false for Databricks-hosted diagnostic settings). Applies ADR-062 (a comment is not a
+  control), LESSON 59 (one consolidated fix-spec per failure set), doctrine 2d
+  (fixture-RED-first). Refines the 2026-08-02 PC-1DIAG ruling's prediction (it fired; the
+  reading is refined, not reversed).
+- **Status:** Accepted (operator ruling 2026-08-10, OQ-076 partial ratification)
+- **Landed:** NOT IMPLEMENTED. Decisions 1-3 are a written spec for DevSecOps (one PR:
+  `teardown.yml` ordering edge, `teardown-az-sweep.sh` step reorder,
+  `sweep_resource_diagnostic_settings` two-pass accounting plus error discrimination,
+  regression-suite extension). Decision 4 is a written spec for the Cloud Engineer (one PR:
+  the bank-data-p1 azapi conversion). Both PRs are attempt-8 preconditions. Update this field
+  by dated addendum as each merges.
+- **Decision makers:** claude (architect); user/operator (ratification, and the surgical
+  declines and teardown dispositions that produced the evidence chain)
+
+**Context:**
+
+**The failure.** Attempt 7 (2026-08-09) ran Steps 1-7 GREEN on exact bars and failed Step 8
+(`landing-zones/bank-data-p1`, apply `31348557765`) on ONE resource of 76:
+`module.databricks_workspace["main"].azurerm_monitor_diagnostic_setting.this["platform_law"]`,
+`already exists` on `diag-dbw-bank-data-p1-globaris-poc` - the PC-1DIAG class, a live-confirmed
+FM-3 orphan targeting the name-stable platform-LAW ARM path.
+
+**The four limbs that let a miss coexist with a green precascade** (full analysis:
+`docs/strategic-review-2026-08-09.md` Part 1):
+
+1. **Host-liveness dependency, raced by the teardown's own sibling.** The sweep
+   (`sweep_resource_diagnostic_settings`, shared by the Phase 0.5 `diagnostic-precascade` job
+   and az-sweep step 2-pre) can only see a setting whose host is live at enumeration time.
+   The `databricks-precascade` (ADR-066 decision 4) force-deletes the estate's ONE
+   out-of-band host with `--no-wait --force-deletion`, runs CONCURRENTLY with the diagnostic
+   sweep (`needs: [guard]` only, both jobs), and the az-sweep path even orders it backwards
+   (step 1 force-delete at lines 384-387 BEFORE step 2-pre at 429-430).
+2. **The mint predates the precascade.** In teardown `30685705802` (2026-07-31), the
+   Databricks force-delete deleted the host out-of-band before `bank-data-p1`'s in-order
+   destroy; Terraform then dropped the state-held setting on a host-gone read with no
+   effective backend delete. Every sweep since ran against estates where the host did not
+   exist - structurally invisible (FM-3). The discriminating signature is in attempt 7's own
+   failure pattern: `diag-aif-*` and `diag-srch-*` (hosts destroyed in-order, settings
+   deleted first) created clean at Step 8; ONLY the force-deleted host's setting collided.
+3. **Error conflation.** The sweep's noise branch skips ANY non-auth per-resource LIST
+   failure, conflating type-does-not-support (skippable) with host-mid-delete and persistent
+   transport failure (must be loud).
+4. **SUCCESS asserts loop completion, not completeness.** No inventory snapshot, no
+   found/deleted/confirmed accounting, no unreachable-host assertion; the script's "zero is
+   not self-evidently correct" text is an echo, and a comment is not a control (ADR-062).
+   Third teardown-completeness defect in four where job-level green did not mean per-object
+   completeness (NWTA DCE, out-of-state App Gateway carcass, this).
+
+**Live confirmation, added at acceptance (2026-08-09, teardown `31350223388`):** the race
+fired in its LOUD variant during the very teardown that followed the ruling - the sweep
+hard-errored mid-enumeration with `ResourceGroupNotFound` on
+`rg-bank-data-p1-dbx-managed-globaris-poc` (the Databricks MANAGED RG, deleted asynchronously
+by the RP under the concurrent force-delete) and exited 1, leaving **every host after the
+failure point unswept while alive**. The race therefore has two expressions - a silent
+per-host miss and a loud whole-tail abort - and decision 1 closes both with the same barrier.
+Consequence on the estate: the orphan set entering the next rebuild is UNKNOWN and
+unverifiable by construction (decision 5), which is what makes decision 4 an attempt-8
+precondition rather than a belt.
+
+**Decision:**
+
+1. **Ordering barrier.** `databricks-precascade` runs strictly AFTER `diagnostic-precascade`
+   (a `needs` edge in the `!cancelled()` form - ordering, never gating, preserving ADR-071
+   "not a gate" and ADR-066 INV-1). `teardown-az-sweep.sh` runs the diagnostic sweep BEFORE
+   the Databricks force-delete submission. Standing rule, added to the teardown docs and the
+   ADR-072 mirror table: **any job or step that deletes an estate host outside its owning
+   root's in-order destroy MUST order after the diagnostic sweep.**
+2. **Expectation-anchored verification.** The sweep snapshots its inventory before any
+   deletion, then deletes and confirm-GETs; SUCCESS requires settings-found ==
+   settings-confirmed-gone AND mid-sweep-unreachable-hosts == 0, printed in the job summary.
+   Host-absence-shaped errors (`ResourceNotFound`, `ResourceGroupNotFound`, the recorded
+   403-on-gone-host form) are LOUD; only type-unsupported-shaped errors remain skippable. The
+   "zero is not self-evidently correct" echo is retired in favour of the mechanical assertion.
+3. **Test discipline.** `scripts/test-teardown-diagnostic-sweep.sh` is extended under
+   fixture-RED-first: the new assertions must be shown failing against the unfixed code, with
+   the numbers stated, before the fix lands.
+4. **Scoped azapi conversion (ADR-071 4a, triggered).** The bank-data-p1 Databricks workspace
+   diagnostic setting moves from the AVM module's `diagnostic_settings` input to a root-level
+   `azapi_resource` (`Microsoft.Insights/diagnosticSettings@2021-05-01-preview`); the
+   idempotent PUT overwrites any surviving orphan instead of colliding (live precedent: the
+   estate's `module.datalake` azapi-based setting never failed in the runs that killed three
+   azurerm siblings - ADR-071 4a). Scoped to THIS setting only - the only setting whose host
+   is deleted out-of-band by design (ADR-072 C4). Step 8's plan bar stays 76 (1:1 resource
+   swap). The azapi body's categories are verified against the live API at implementation;
+   prefer `categoryGroup` over hand-listed categories if the type supports it (LESSON 27
+   surface - verify, do not assume).
+5. **No FM-3 greenfield gate is built.** Verified unavailable, three ways: ARM routes
+   extension-resource calls through the host scope (this estate's recorded 403 with the host
+   gone, ADR-072 decision 4 table); Azure Resource Graph does not index
+   `microsoft.insights/diagnosticsettings` even for live hosts (Microsoft Q&A
+   `/answers/questions/1665007/`, checked 2026-08-09); Activity Log diffs are forensics with
+   a 90-day window, not a gate. A vacuously-passing gate would be worse than none.
+
+**Alternatives considered:** a post-precascade assertion pass (subsumed by decision 2's
+accounting); generation-suffixed HOST names generalizing ADR-075 (rejected as primary:
+symptom-side, multiplies burned-name lists and doc-literal sweeps across up to nine hosts,
+leaves FM-3 debris accumulating in the tenant - retained as a single-host fallback only if
+the azapi conversion proves unavailable); do-nothing-plus-runbook-B1 (rejected: the
+2026-08-02 ruling stands and the class just cost a full rebuild attempt).
+
+**Acceptance:** (i) the suite extension shown RED against unfixed code, then green; (ii) the
+next `target=all mode=terraform` teardown of an estate holding a live Databricks workspace
+shows, in-log and in-order, the `diag-dbw-*` deletion plus confirm-GET COMPLETING BEFORE the
+Databricks delete submission line, with found==confirmed-gone and unreachable-hosts==0 in the
+summary; (iii) the next greenfield Step 8 apply reports zero `already exists` (ADR-071 T3,
+restated - and under the OQ-076 ruling this is also an attempt-8 survival condition, since a
+Step 8 `already exists` forfeits the attempt under standing rule 1).
+
+**Consequences:**
+
+- Positive: the silent-miss class gets a mechanical completeness assertion; the known race is
+  closed by construction in both its expressions; Step 8 becomes orphan-immune at apply as a
+  belt against the unknown orphan set `31350223388` left behind.
+- Negative / trade-offs: the sweep grows a second pass (minutes of wall-clock); the azapi
+  conversion hand-authors a category body on the AVM module's supported interface (the
+  ADR-038 / LESSON 27 trade ADR-071 4a priced and accepted for exactly this scope); the
+  ordering rule is one more constraint future teardown work must honour (mitigated by the
+  ADR-072 table row).
+- Follow-ups required: (1) DevSecOps PR for decisions 1-3; (2) Cloud Engineer PR for decision
+  4; (3) both merged before any attempt-8 dispatch; (4) the WORKLOG attempt-7 Step 8 row's
+  `30777047207` attribution corrected by dated addendum (the day-file correction is already
+  recorded 2026-08-09); (5) OQ-075's optional forensic reads on run `30685705802` remain
+  open, non-blocking.
+
 ### ADR-075: Attempt 2's nine Sentinel-rule 401s and attempt 3's seven 400s are ONE failure class - the Sentinel scheduled-rule query-validation path dereferences a PURGED predecessor workspace GUID behind the reused name `law-security-globaris-poc` - and the repo-side fix is to RE-IDENTIFY the security workspace with a var-driven generation token (`law-security-<org>-<env>-r2`) so no rebuild consults the stale binding again. The retired name is BURNED, the ADR-067/ADR-073 purge-on-destroy posture stands UNCHANGED on both roots, the platform workspace keeps its name under a defined watch trigger, and Step 3's plan bar stays 48
 
 - **Date:** 2026-08-03
