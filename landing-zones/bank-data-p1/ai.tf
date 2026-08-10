@@ -7,7 +7,7 @@
 #          networkAcls 037eea7a, search pna ee980b6d) - ZERO policy exemptions.
 #          Gated behind var.enable_ai_platform (default false, LESSON 42 flag pattern).
 # Section: Banking wave B6 (docs/b6-ai-platform-design.md sections 3-4; ADR-051)
-# Last updated: 2026-07-19
+# Last updated: 2026-08-10
 #
 # Modules (pins re-verified on the Terraform Registry 2026-07-19; schemas read from
 # the tag sources - FIRST estate consumption of both):
@@ -147,8 +147,16 @@ module "foundry" {
   # also the ARM InternalServerError storm and the active Databricks service
   # incident on this subscription the same evening). This exemption unit does not
   # remove it. Recovery is the runbook B1 action: delete the specific survivor,
-  # then rerun. Landing this file and dispatching without deleting diag-aif-*,
-  # diag-srch-* and diag-dbw-* first will fail identically a third time.
+  # then rerun. (2026-08-10 update, ADR-076: a mechanism is now established for
+  # the diag-dbw-* collision ONLY - the FM-3 orphan class, which requires the
+  # out-of-band Databricks force-delete. diag-aif-* and diag-srch-* sit on
+  # in-order-destroyed hosts, which FM-3 does NOT apply to, and both created
+  # clean on attempt 7 run 31348557765 - so they are shown clean of the FM-3
+  # class, and the ORIGINAL diag-aif-* cause above (runs 30661012325/30662610292)
+  # remains UNRESOLVED exactly as stated. The diag-dbw-* setting is now an
+  # idempotent azapi resource in databricks.tf. The B1 caveat here is retained
+  # for the azurerm-interface settings in THIS file should a survivor ever
+  # exist for them.)
   depends_on = [time_sleep.wait_dine_ownership_exemptions]
 }
 

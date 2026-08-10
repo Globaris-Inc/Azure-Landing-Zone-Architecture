@@ -1,6 +1,6 @@
 # Purpose: Provider configuration for the bank-data-p1 landing zone root module.
 # Section: Banking wave B1 - banking network foundation (docs/banking-platform-design.md)
-# Last updated: 2026-07-16
+# Last updated: 2026-08-10
 #
 # Apply order: After platform/connectivity (primary hub VNet ID and firewall IP required).
 #
@@ -21,8 +21,14 @@ terraform {
       version = "~> 4.71.0"
     }
     azapi = {
+      # Floor raised 2.5 -> 2.9 (ADR-076 decision 4, 2026-08-10):
+      # azapi_resource.dbw_diag_platform_law in databricks.tf uses
+      # ignore_other_items_in_list and list_unique_id_property, introduced in
+      # azapi v2.9.0 (provider CHANGELOG). The committed lock already selects
+      # 2.11.0, which satisfies both the old and new constraint, so this changes
+      # what the constraint ADMITS, not what any run USES.
       source  = "Azure/azapi"
-      version = "~> 2.5"
+      version = "~> 2.9"
     }
     modtm = {
       source  = "Azure/modtm"
