@@ -109,6 +109,22 @@ checkpoints, reframed claim, and their compositions) is costed in
   regression-suite extension). Decision 4 is a written spec for the Cloud Engineer (one PR:
   the bank-data-p1 azapi conversion). Both PRs are attempt-8 preconditions. Update this field
   by dated addendum as each merges.
+  - **ADDENDUM 2026-08-10: BOTH PRs MERGED - the repo-side implementation is LANDED.**
+    Decision 4 landed as **PR #115** (merge `ec0075a`, head `e6393f5`, reviewer stamp `3123223`;
+    one-round BLOCK on an over-broad `ai.tf` comment, reworded, re-verify APPROVE): the dbw
+    setting is `azapi_resource.dbw_diag_platform_law` in `landing-zones/bank-data-p1/
+    databricks.tf`, azapi floor `~> 2.9`, lock unchanged at 2.11.0, Step 8 bar re-derived 76.
+    Decisions 1-3 landed as **PR #116** (merge `e2c06f8`, head `0d9166d`, reviewer stamp
+    `d22d1e6`; BLOCK -> Case-12 coverage added -> re-verify APPROVE): ordering barrier
+    (`databricks-precascade` needs `diagnostic-precascade`; az-sweep step 1-pre before step 1),
+    `is_host_absent_error` three-way classification, per-setting ledger + the
+    found==confirmed-gone AND unreachable-hosts==0 summary assertion. Acceptance status:
+    **(i) DISCHARGED** (fixture-RED-first proven: 22/16 RED -> 34/4 GREEN, 38 assertions,
+    reviewer-reproduced); **(ii) PENDING** - discharges at the next `target=all mode=terraform`
+    teardown of an estate holding a live Databricks workspace; **(iii) PENDING** - discharges
+    at attempt 8 (Step 8's azapi setting is collision-immune by construction; the
+    azurerm-interface settings, Step 9 above all, remain the live T3 signal). Recorded by the
+    architect during pre-clearance refresh #6 (`docs/preclearance/2026-08-10-refresh-6-attempt-8.md`).
 - **Decision makers:** claude (architect); user/operator (ratification, and the surgical
   declines and teardown dispositions that produced the evidence chain)
 
