@@ -36,7 +36,7 @@ at teardown - see the teardown note in WORKLOG.
 | Resource | Name / pattern |
 |----------|----------------|
 | Platform LAW (ops, management sub) | `law-platform-globaris-poc` |
-| Security LAW (Sentinel/SecOps, security sub) | `law-security-globaris-poc-r4` (ADR-075 generation suffix; the unsuffixed name is burned) |
+| Security LAW (Sentinel/SecOps, security sub) | `law-security-globaris-poc-r5` (ADR-075 generation suffix; the unsuffixed name is burned) |
 | Platform action group (management sub) | `ag-platform-globaris-poc` |
 | Sentinel scheduled rules | `ar-<rule-key>-globaris-poc` |
 | Sentinel MDC incident rule | `ar-mdc-high-globaris-poc` |
@@ -145,7 +145,7 @@ achieved timings against A.1.
 
 ### B.0 Where the signals live
 
-- **Microsoft Sentinel** is onboarded to the **security LAW** (`law-security-globaris-poc-r4`, ADR-075) in the
+- **Microsoft Sentinel** is onboarded to the **security LAW** (`law-security-globaris-poc-r5`, ADR-075) in the
   security subscription. This is the SecOps workspace.
 - **Platform LAW** (`law-platform-globaris-poc`) in the management subscription is the operations workspace and
   holds Azure Firewall diagnostics + spoke VNet flow logs + Automation diagnostics. Cross-workspace query
@@ -170,7 +170,7 @@ present (persistent environment or after the connector grant).
 
 ### B.1 Triage a Sentinel incident
 
-1. **Pick up the incident.** Sentinel -> Incidents (on `law-security-globaris-poc-r4`, ADR-075). If `auto_assign` is
+1. **Pick up the incident.** Sentinel -> Incidents (on `law-security-globaris-poc-r5`, ADR-075). If `auto_assign` is
    configured, new incidents are already assigned to the SecOps owner group; otherwise assign yourself.
 2. **Read the rule context.** The incident title maps to an `ar-<key>-globaris-poc` rule. Open the rule to see
    its MITRE tactics/techniques and KQL. Example: `ar-brute_force_entra-globaris-poc` = >= 10 failed
