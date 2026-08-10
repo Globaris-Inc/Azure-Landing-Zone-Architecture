@@ -273,7 +273,29 @@
 # default behaviour (called without `--no-wait`) would have - see the step's own comment for why
 # this is accepted rather than solved here.
 #
+# AMENDED a thirteenth time 2026-08-10 (ADR-076 decisions 1-3, strategic review
+# docs/strategic-review-2026-08-09.md). The resource-scoped diagnostic-settings sweep (formerly
+# "step 2-pre", swept AFTER step 1's Databricks force-delete) is RENAMED "step 1-pre" and MOVED
+# to run BEFORE step 1, so it now precedes every host-deleting step in this script rather than
+# just the RG sweep. Root cause this closes deterministically (this script's own ordering was a
+# second, non-racy instance of the same defect ADR-076 found as a nondeterministic concurrency
+# race between teardown.yml's two Phase 0.5 jobs): `diag-dbw-*` is an extension object keyed to
+# the Databricks workspace URI, and step 1 force-deletes that workspace - running the sweep AFTER
+# step 1 meant it could never see that host's settings in the mode=az-sweep path (Phase 0.5 is
+# not wired for that mode, so this script's own step 1 is the one and only Databricks
+# force-delete there). `sweep_resource_diagnostic_settings` (teardown-common.sh) itself also
+# gained a three-way list-failure classification (type-unsupported stays silently skippable;
+# host-absent - a RG or resource vanished mid-sweep - is now loud and recorded rather than either
+# silently skipped or a job-killing hard stop; auth-shaped stays an immediate hard stop) and an
+# expectation-anchored completeness assertion (settings-found == settings-confirmed-gone AND
+# mid-sweep-unreachable-hosts == 0) - see that function's own comment for the full account and
+# the live incident (teardown run 31350223388) that motivated it.
+#
 # Order matters:
+#   1-pre. Resource-scoped diagnostic settings (ADR-063 decision 5; REORDERED here, ahead of
+#      step 1, by ADR-076 decision 1, 2026-08-10 - see that step's own comment for the race this
+#      closes). Must run before step 1 AND step 2, since both delete hosts a diagnostic setting
+#      may be keyed to.
 #   1. Databricks: submit the WORKSPACE delete --no-wait --force-deletion (never `az group
 #      delete` the managed RG directly - it still carries an RP deny-assignment, F2, even with
 #      --force-deletion in play; --force-deletion is what makes the WORKSPACE delete itself
@@ -368,9 +390,63 @@ if [ "${#SUBS[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# --- 1-pre. Resource-scoped diagnostic settings, swept BEFORE step 1 (Databricks force-delete)
+#     AND step 2 (RG sweep) below submit any deletes (ADR-063 decision 5, 2026-07-23; REORDERED
+#     ahead of step 1 - and renamed from "step 2-pre" - by ADR-076 decision 1, 2026-08-10: the
+#     two previously ran in the opposite order in THIS script, which is deterministic proof of
+#     the same race ADR-076 found as a nondeterministic concurrency race in teardown.yml's
+#     Phase 0.5 jobs - `diag-dbw-*` is an extension object keyed to the Databricks workspace URI
+#     that step 1 below force-deletes, so running step 1 first meant this sweep could never see
+#     that host's settings at all in the mode=az-sweep path. See this file's own "AMENDED a
+#     thirteenth time" header note). This class had no sweep anywhere in this codebase before
+#     2026-07-23 - RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION was referenced only by the read-only
+#     probe (scripts/teardown-probe-extensions.sh), whose enumeration shape this step reuses
+#     (discover_live_rgs -> az resource list per RG -> diagnosticSettings GET per resource id).
+#     G-1 (ADR-063): a resource-scoped diagnostic setting is an extension object keyed to its
+#     host resource's URI, and does NOT reliably cascade away just because the host resource is
+#     later deleted by step 1's workspace cascade or step 2's RG delete - the live proof is
+#     diag-aa-to-law (platform/management/main.tf:493, on the platform automation account inside
+#     rg-management-globaris-poc), which is what the 2026-07-23 rebuild collided on at Step 2
+#     ("already exists - needs to be imported") despite both the RG and the automation account
+#     having been deleted by an earlier teardown. Ownership is T1(c) containment
+#     (is_estate_owned --resource-id, teardown-common.sh, ADR-063 decision 6): the resource lives
+#     inside an RG discover_live_rgs already filtered to RG_SWEEP_QUERY, so every row found here
+#     is owned by definition - called explicitly below anyway (never hardcoded true) so this site
+#     can never silently drift from the shared predicate.
+#
+#     No separate Phase 3 VERIFY step exists for this class (by the time VERIFY runs, the
+#     resource and its RG are expected to be fully gone via step 1/2's own cascades, and there is
+#     no other class-specific completion gate for it) - this delete's own confirm-GET is
+#     therefore the ONLY completion check this class will ever get, same PRIMARY-evidence
+#     rationale FIX-1's MG-scope confirm-GETs already use (confirm_gone_or_fail_primary,
+#     teardown-common.sh).
+#
+#     List-call failure handling differs from every other list in this script (ADR-076 decision 2,
+#     2026-08-10): a resource-scoped diagnostic-settings GET (and the per-RG resource LIST that
+#     feeds it) can legitimately 404/BadRequest for a resource TYPE that does not support
+#     diagnostic settings at all (most do; some do not, per the probe's own established
+#     precedent) - that shape stays skipped, silently, same as always. A HOST-ABSENT shape
+#     (the RG or the resource itself vanished mid-sweep, `is_host_absent_error`) is now LOUD and
+#     recorded, but no longer aborts the whole sweep - it counts as an unreachable host and the
+#     sweep continues with everything else. Only a genuine auth-shaped failure still fails the
+#     whole sweep immediately.
+#     EXTRACTED 2026-08-01 (ADR-071 decision 4b) into `sweep_resource_diagnostic_settings`
+#     (teardown-common.sh) - see that function's own comment for the full current behaviour,
+#     including the ADR-076 completeness assertion (settings-found == settings-confirmed-gone AND
+#     mid-sweep-unreachable-hosts == 0). It is shared because Phase 0.5
+#     (teardown-diagnostic-precascade.sh) is now a SECOND caller, and the two must not drift.
+#     This step STAYS: it is the belt for the mode=az-sweep path (where Phase 0.5 is deliberately
+#     not wired, because Phase 1 never runs there and this step already executes while hosts are
+#     live) and the backstop for anything Phase 0.5 missed. Removing it would trade one gap for
+#     another.
+echo "== Phase 2 step 1-pre: resource-scoped diagnostic settings (before ANY host-deleting step below submits a delete) =="
+sweep_resource_diagnostic_settings || exit 1
+
 # --- 1. Databricks: submit the workspace delete --no-wait --force-deletion (never wait
 #     in-session, section 9.2a; --force-deletion is required to cascade the managed RG at all,
-#     architect pre-clearance C1 - see the header comment above) ---
+#     architect pre-clearance C1 - see the header comment above). Runs AFTER step 1-pre above
+#     (ADR-076 decision 1, 2026-08-10) so the diagnostic-settings sweep sees this workspace, and
+#     any other host, still live. ---
 # `enable_data_platform = true` is the LIVE setting (envs/poc.tfvars) - Databricks IS deployed
 # in this estate. In the mode=terraform + target=all path this step is now typically a no-op
 # belt: the new Phase 0.5 `databricks-precascade` job (teardown.yml) already force-deleted the
@@ -387,47 +463,6 @@ declare -a dbx_managed_rg_subs=()
 if ! databricks_force_delete_cascade dbx_managed_rgs dbx_managed_rg_subs; then
   exit 1
 fi
-
-# --- 2-pre. Resource-scoped diagnostic settings, swept BEFORE step 2 below submits its
-#     --no-wait RG deletes (ADR-063 decision 5, 2026-07-23). This class had no sweep anywhere in
-#     this codebase before today - RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION was referenced only
-#     by the read-only probe (scripts/teardown-probe-extensions.sh), whose enumeration shape this
-#     step reuses (discover_live_rgs -> az resource list per RG -> diagnosticSettings GET per
-#     resource id). G-1 (ADR-063): a resource-scoped diagnostic setting is an extension object
-#     keyed to its host resource's URI, and does NOT reliably cascade away just because the host
-#     resource is later deleted by step 2's RG delete - the live proof is diag-aa-to-law
-#     (platform/management/main.tf:493, on the platform automation account inside
-#     rg-management-globaris-poc), which is what the 2026-07-23 rebuild collided on at Step 2
-#     ("already exists - needs to be imported") despite both the RG and the automation account
-#     having been deleted by an earlier teardown. Ownership is T1(c) containment
-#     (is_estate_owned --resource-id, teardown-common.sh, ADR-063 decision 6): the resource lives
-#     inside an RG discover_live_rgs already filtered to RG_SWEEP_QUERY, so every row found here
-#     is owned by definition - called explicitly below anyway (never hardcoded true) so this site
-#     can never silently drift from the shared predicate.
-#
-#     No separate Phase 3 VERIFY step exists for this class (by the time VERIFY runs, the
-#     resource and its RG are expected to be fully gone via step 2's own cascade, and there is
-#     no other class-specific completion gate for it) - this delete's own confirm-GET is
-#     therefore the ONLY completion check this class will ever get, same PRIMARY-evidence
-#     rationale FIX-1's MG-scope confirm-GETs already use (confirm_gone_or_fail_primary,
-#     teardown-common.sh).
-#
-#     List-call failure handling differs from every other list in this script: a resource-scoped
-#     diagnostic-settings GET can legitimately 404/BadRequest for a resource TYPE that does not
-#     support diagnostic settings at all (most do; some do not, per the probe's own established
-#     precedent) - only an auth-shaped failure fails loud here; any other failure is expected
-#     noise and is skipped, not treated as "no diagnostic settings" for a class that never existed
-#     at all.
-#     EXTRACTED 2026-08-01 (ADR-071 decision 4b) into `sweep_resource_diagnostic_settings`
-#     (teardown-common.sh). The body moved verbatim - same api-version, same containment
-#     predicate, same auth-shaped-failure-only loud branch, same confirm-GET - so this site's
-#     behaviour is unchanged. It is shared because Phase 0.5 (teardown-diagnostic-precascade.sh)
-#     is now a SECOND caller, and the two must not drift. This step STAYS: it is the belt for the
-#     mode=az-sweep path (where Phase 0.5 is deliberately not wired, because Phase 1 never runs
-#     there and this step already executes while hosts are live) and the backstop for anything
-#     Phase 0.5 missed. Removing it would trade one gap for another.
-echo "== Phase 2 step 2-pre: resource-scoped diagnostic settings (before RG deletes are submitted) =="
-sweep_resource_diagnostic_settings || exit 1
 
 # --- 2. General RG sweep by naming pattern, across all 5 subs (--no-wait submission). The
 #     Databricks-managed RG is STILL excluded here even with --force-deletion in step 1: it

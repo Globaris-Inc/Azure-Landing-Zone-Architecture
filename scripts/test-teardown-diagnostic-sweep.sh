@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/test-teardown-diagnostic-sweep.sh - regression suite for
 # `sweep_resource_diagnostic_settings` (teardown-common.sh), the shared body behind BOTH Phase 0.5
-# (teardown-diagnostic-precascade.sh, ADR-071 decision 4b) and Phase 2 step 2-pre
-# (teardown-az-sweep.sh, ADR-063 decision 5).
+# (teardown-diagnostic-precascade.sh, ADR-071 decision 4b) and Phase 2 step 1-pre (renamed from
+# step 2-pre by ADR-076 decision 1) (teardown-az-sweep.sh, ADR-063 decision 5).
 #
 # Stubs `az` entirely with a bash function - never a real Azure call. Read-only against the live
 # estate, dispatches nothing.
@@ -27,6 +27,18 @@
 # not support diagnostic settings and skips only that resource); delete failure; a confirm-GET that
 # still reports the object LIVE; and RG-list failure. Every failure case asserts BOTH a non-zero
 # return AND the loud ::error:: text, never just one.
+#
+# ADR-076 (2026-08-10) ADDITIONS, fixture-RED-first (doctrine 2d) against the live incident
+# (teardown run 31350223388: the precascade died mid-enumeration on
+# rg-bank-data-p1-dbx-managed-globaris-poc, ResourceGroupNotFound, leaving every RG after it
+# unswept while the job still reported SUCCESS): a vanished RG mid-sweep (host-absent, loud, the
+# sweep continues to the REMAINING RGs instead of aborting); a vanished RESOURCE mid-sweep (same
+# shape, one level down); the found/confirmed/unreachable completeness accounting, exercised on
+# BOTH axes independently (unreachable-hosts > 0 alone, and found != confirmed alone via a partial
+# delete failure that does not stop the sweep from reaching a sibling setting); the ordering edge
+# added to teardown.yml (a block-scoped structural check, not a full YAML parse - see that case's
+# own comment for why); and the az-sweep step reorder in teardown-az-sweep.sh. Proved RED against
+# the pre-ADR-076 code before the fix landed - see docs/worklog for the exact before/after counts.
 #
 # Usage: scripts/test-teardown-diagnostic-sweep.sh
 # Exit 0 = all cases pass, 1 = at least one case failed.
@@ -231,6 +243,188 @@ record "RG list failure: returns non-zero" "$([ "$rc7" -ne 0 ] && echo 1 || echo
 record "RG list failure: reports it as an ::error:: and never reads it as 'no RGs'" \
   "$(printf '%s' "$out7" | grep -qF '::error::' && printf '%s' "$out7" | grep -qiF 'RG list failed' && echo 1 || echo 0)"
 unset -f az
+
+# ---------------------------------------------------------------------------------------------
+# Case 8 (ADR-076 decision 2): a RESOURCE GROUP vanishes MID-SWEEP - the per-RG `resource list`
+# call for one RG fails ResourceGroupNotFound-shaped (the exact live shape from teardown run
+# 31350223388: rg-bank-data-p1-dbx-managed-globaris-poc, force-deleted out-of-band by the
+# concurrently-racing Databricks precascade before this sweep's ordering barrier existed). This
+# must be LOUD (never silently read as "no resources here") and must NOT be a job-killing hard
+# stop - the sweep has to continue enumerating every RG queued after the vanished one.
+# ---------------------------------------------------------------------------------------------
+log8="$tmp/case8.log"; : > "$log8"
+RG_GONE="rg-vanished-globaris-poc"
+az() {
+  case "$*" in
+    *"group list"*) printf '%s\n%s\n' "$RG_GONE" "$RG"; return 0 ;;
+    *"resource list --resource-group ${RG_GONE} "*)
+      echo "ERROR: (ResourceGroupNotFound) Resource group '${RG_GONE}' could not be found." >&2; return 1 ;;
+    *"resource list"*)  printf '%s\n' "$RID1"; return 0 ;;
+    *"value[].name"*)   printf '%s\n' "diag-aks-1"; return 0 ;;
+    *"--method delete"*) echo "delete:$*" >> "$log8"; return 0 ;;
+    *"--method get"*)   echo "ERROR: (ResourceNotFound) not found." >&2; return 1 ;;
+    *) echo "UNEXPECTED:$*" >> "$log8"; return 1 ;;
+  esac
+}
+out8="$(sweep_resource_diagnostic_settings 2>&1)"; rc8=$?
+record "RG vanishes mid-sweep: returns non-zero (unreachable-hosts nonzero)" "$([ "$rc8" -ne 0 ] && echo 1 || echo 0)"
+record "RG vanishes mid-sweep: reported loud, with 'vanished mid-enumeration' in the text" \
+  "$(printf '%s' "$out8" | grep -qF '::error::' && printf '%s' "$out8" | grep -qF 'vanished mid-enumeration' && echo 1 || echo 0)"
+record "RG vanishes mid-sweep: does NOT abort the whole sweep - the SURVIVING RG is still swept" \
+  "$(grep -qF 'diagnosticSettings/diag-aks-1' "$log8" && echo 1 || echo 0)"
+record "RG vanishes mid-sweep: summary reports mid-sweep-unreachable-hosts=1" \
+  "$(printf '%s' "$out8" | grep -qF 'mid-sweep-unreachable-hosts=1' && echo 1 || echo 0)"
+unset -f az
+
+# ---------------------------------------------------------------------------------------------
+# Case 9 (ADR-076 decision 2): a single RESOURCE (not its whole RG) vanishes mid-sweep - its
+# diagnosticSettings LIST fails ResourceNotFound-shaped. Same requirement one level down: loud,
+# not silently folded into the "type does not support diagnostic settings" noise bucket, and the
+# SIBLING resource in the same RG must still be swept.
+# ---------------------------------------------------------------------------------------------
+log9="$tmp/case9.log"; : > "$log9"
+az() {
+  case "$*" in
+    *"group list"*)    printf '%s\n' "$RG"; return 0 ;;
+    *"resource list"*) printf '%s\n%s\n' "$RID1" "$RID2"; return 0 ;;
+    *"value[].name"*)
+      case "$*" in
+        *"managedClusters/aks-1"*)
+          echo "ERROR: (ResourceNotFound) The Resource 'Microsoft.ContainerService/managedClusters/aks-1' under resource group '${RG}' was not found." >&2; return 1 ;;
+        *) printf '%s\n' "diag-acr-1"; return 0 ;;
+      esac ;;
+    *"--method delete"*) echo "delete:$*" >> "$log9"; return 0 ;;
+    *"--method get"*)   echo "ERROR: (ResourceNotFound) not found." >&2; return 1 ;;
+    *) echo "UNEXPECTED:$*" >> "$log9"; return 1 ;;
+  esac
+}
+out9="$(sweep_resource_diagnostic_settings 2>&1)"; rc9=$?
+record "resource vanishes mid-sweep: returns non-zero" "$([ "$rc9" -ne 0 ] && echo 1 || echo 0)"
+record "resource vanishes mid-sweep: reported loud, with 'vanished mid-sweep' in the text" \
+  "$(printf '%s' "$out9" | grep -qF '::error::' && printf '%s' "$out9" | grep -qF 'vanished mid-sweep' && echo 1 || echo 0)"
+record "resource vanishes mid-sweep: the SIBLING resource's setting is still deleted" \
+  "$(grep -qF 'diagnosticSettings/diag-acr-1' "$log9" && echo 1 || echo 0)"
+record "resource vanishes mid-sweep: summary reports mid-sweep-unreachable-hosts=1" \
+  "$(printf '%s' "$out9" | grep -qF 'mid-sweep-unreachable-hosts=1' && echo 1 || echo 0)"
+unset -f az
+
+# ---------------------------------------------------------------------------------------------
+# Case 10 (ADR-076 decision 2, completeness accounting axis 1): settings-found ==
+# settings-confirmed-gone can STILL be true while mid-sweep-unreachable-hosts > 0 - SUCCESS
+# requires BOTH conjuncts, so this must fail even though every setting the sweep actually reached
+# was deleted and confirmed clean.
+# ---------------------------------------------------------------------------------------------
+RG_GONE2="rg-vanished2-globaris-poc"
+az() {
+  case "$*" in
+    *"group list"*) printf '%s\n%s\n' "$RG" "$RG_GONE2"; return 0 ;;
+    *"resource list --resource-group ${RG_GONE2} "*)
+      echo "ERROR: (ResourceGroupNotFound) Resource group '${RG_GONE2}' could not be found." >&2; return 1 ;;
+    *"resource list"*)  printf '%s\n' "$RID1"; return 0 ;;
+    *"value[].name"*)   printf '%s\n%s\n' "diag-a" "diag-b"; return 0 ;;
+    *"--method delete"*) return 0 ;;
+    *"--method get"*)   echo "ERROR: (ResourceNotFound) not found." >&2; return 1 ;;
+    *) return 1 ;;
+  esac
+}
+out10="$(sweep_resource_diagnostic_settings 2>&1)"; rc10=$?
+record "accounting axis 1: returns non-zero when unreachable-hosts > 0 even though found==confirmed" \
+  "$([ "$rc10" -ne 0 ] && echo 1 || echo 0)"
+record "accounting axis 1: summary states found=2 confirmed=2 unreachable=1" \
+  "$(printf '%s' "$out10" | grep -qF 'settings-found=2 settings-confirmed-gone=2 mid-sweep-unreachable-hosts=1' && echo 1 || echo 0)"
+unset -f az
+
+# ---------------------------------------------------------------------------------------------
+# Case 11 (ADR-076 decision 2, completeness accounting axis 2): mid-sweep-unreachable-hosts == 0
+# can STILL be true while settings-found != settings-confirmed-gone - one setting's DELETE fails,
+# the sweep must continue to its SIBLING setting rather than stopping, and the mismatch alone
+# (with zero unreachable hosts) must fail the job.
+# ---------------------------------------------------------------------------------------------
+log11="$tmp/case11.log"; : > "$log11"
+az() {
+  case "$*" in
+    *"group list"*)    printf '%s\n' "$RG"; return 0 ;;
+    *"resource list"*) printf '%s\n' "$RID1"; return 0 ;;
+    *"value[].name"*)  printf '%s\n%s\n' "diag-a" "diag-b"; return 0 ;;
+    *"--method delete"*"diagnosticSettings/diag-a?"*)
+      echo "ERROR: (Conflict) simulated delete failure for diag-a only." >&2; return 1 ;;
+    *"--method delete"*) echo "delete:$*" >> "$log11"; return 0 ;;
+    *"--method get"*)   echo "ERROR: (ResourceNotFound) not found." >&2; return 1 ;;
+    *) echo "UNEXPECTED:$*" >> "$log11"; return 1 ;;
+  esac
+}
+out11="$(sweep_resource_diagnostic_settings 2>&1)"; rc11=$?
+record "accounting axis 2: returns non-zero when found != confirmed, even though unreachable==0" \
+  "$([ "$rc11" -ne 0 ] && echo 1 || echo 0)"
+record "accounting axis 2: the SIBLING setting is still deleted (sweep continues past the failure)" \
+  "$(grep -qF 'diagnosticSettings/diag-b' "$log11" && echo 1 || echo 0)"
+record "accounting axis 2: summary states found=2 confirmed=1 unreachable=0" \
+  "$(printf '%s' "$out11" | grep -qF 'settings-found=2 settings-confirmed-gone=1 mid-sweep-unreachable-hosts=0' && echo 1 || echo 0)"
+unset -f az
+
+# ---------------------------------------------------------------------------------------------
+# Case 12 (ADR-076 decision 2, `is_host_absent_error`'s SECOND disjunct - code-review finding,
+# 2026-08-10): cases 8/9 only exercise the 404/NotFound-shaped disjunct (ResourceGroupNotFound /
+# ResourceNotFound); this case exercises the deleted-scope 403 disjunct instead
+# (AuthorizationFailed / "does not have authorization" / "ABAC condition" - the exact shape
+# ADR-072 decision 4's table records for a diagnostic-settings host that is gone). This text
+# deliberately ALSO matches `is_auth_error`'s broad net (it ends in the standard RBAC-denial
+# boilerplate "...please refresh your credentials", and `is_auth_error` matches bare
+# "credential") - the point of this case is proving `is_host_absent_error` is checked FIRST at
+# the list site, so the failure is classified unreachable end-to-end (loud, the sweep continues
+# to the surviving RG, the entry is counted in the ledger, and the job-level completeness
+# assertion fails at the end) rather than silently skipped OR hard-stopped as the auth/token
+# failure this text is not.
+# ---------------------------------------------------------------------------------------------
+log12="$tmp/case12.log"; : > "$log12"
+RG_GONE3="rg-vanished3-globaris-poc"
+az() {
+  case "$*" in
+    *"group list"*) printf '%s\n%s\n' "$RG_GONE3" "$RG"; return 0 ;;
+    *"resource list --resource-group ${RG_GONE3} "*)
+      echo "ERROR: (AuthorizationFailed) The client does not have authorization to perform action 'Microsoft.Resources/subscriptions/resourceGroups/read' over scope '/subscriptions/${SUB}/resourceGroups/${RG_GONE3}' or the scope is invalid. If access was recently granted, please refresh your credentials." >&2; return 1 ;;
+    *"resource list"*)  printf '%s\n' "$RID1"; return 0 ;;
+    *"value[].name"*)   printf '%s\n' "diag-aks-1"; return 0 ;;
+    *"--method delete"*) echo "delete:$*" >> "$log12"; return 0 ;;
+    *"--method get"*)   echo "ERROR: (ResourceNotFound) not found." >&2; return 1 ;;
+    *) echo "UNEXPECTED:$*" >> "$log12"; return 1 ;;
+  esac
+}
+out12="$(sweep_resource_diagnostic_settings 2>&1)"; rc12=$?
+record "AuthorizationFailed-shaped (deleted-scope 403): classified unreachable end-to-end - loud, sweep continues to the surviving RG, counted in the ledger/summary, NOT the auth hard-stop, job assertion fails" \
+  "$([ "$rc12" -ne 0 ] \
+     && printf '%s' "$out12" | grep -qF 'vanished mid-enumeration' \
+     && ! printf '%s' "$out12" | grep -qF 'with an auth/transport error' \
+     && grep -qF 'diagnosticSettings/diag-aks-1' "$log12" \
+     && printf '%s' "$out12" | grep -qF 'mid-sweep-unreachable-hosts=1' \
+     && echo 1 || echo 0)"
+unset -f az
+
+echo
+echo "== ordering barrier: teardown.yml (ADR-076 decision 1) =="
+# Block-scoped structural check, not a full YAML parse (this suite is self-contained bash with no
+# network dependency, matching every other case above - `npx js-yaml` is used separately, by hand,
+# for basic syntax validation at review time, per the environment's standing js-yaml fallback).
+# Extracts exactly the `databricks-precascade:` job's own block (from its own line up to, but not
+# including, the next top-level 2-space-indented job key) and asserts its `needs:` line names
+# `diagnostic-precascade` - the literal ordering edge ADR-076 decision 1 requires, checked where
+# it is actually declared rather than as a whole-file substring search (doctrine 1b).
+workflow_file="$repo_root/.github/workflows/teardown.yml"
+dbx_block="$(awk '
+  /^  databricks-precascade:$/ {flag=1; print; next}
+  flag && /^  [a-zA-Z_-]+:$/ {exit}
+  flag {print}
+' "$workflow_file")"
+record "ordering barrier: databricks-precascade's own needs: names diagnostic-precascade" \
+  "$(printf '%s' "$dbx_block" | grep -qE 'needs:.*diagnostic-precascade' && echo 1 || echo 0)"
+
+echo
+echo "== step order: teardown-az-sweep.sh (ADR-076 decision 1) =="
+azsweep_file="$repo_root/scripts/teardown-az-sweep.sh"
+pre_line="$(grep -n '^echo "== Phase 2 step 1-pre:' "$azsweep_file" | head -1 | cut -d: -f1)"
+dbx_line="$(grep -n '^echo "== Phase 2 step 1:' "$azsweep_file" | head -1 | cut -d: -f1)"
+record "step order: step 1-pre (diagnostic sweep) is defined before step 1 (Databricks force-delete)" \
+  "$([ -n "$pre_line" ] && [ -n "$dbx_line" ] && [ "$pre_line" -lt "$dbx_line" ] && echo 1 || echo 0)"
 
 echo
 echo "test-teardown-diagnostic-sweep: $pass passed, $failed failed"

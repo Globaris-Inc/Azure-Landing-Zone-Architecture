@@ -160,6 +160,22 @@
 # in `az_run_retry` too would just nest one bounded retry inside an already-retrying wait for no
 # behavioural gain. Never wired in at a DELETE/write call site - see `az_run_retry`'s own comment
 # for why.
+#
+# AMENDED 2026-08-10 (ADR-076 decisions 1-3, strategic review docs/strategic-review-2026-08-09.md).
+# `sweep_resource_diagnostic_settings` no longer hard-stops the ENTIRE sweep the instant one RG or
+# one resource vanishes mid-enumeration (live evidence: teardown run 31350223388 died on
+# ResourceGroupNotFound for the RP-deleted rg-bank-data-p1-dbx-managed-globaris-poc, racing the
+# concurrent Databricks precascade, and left every RG later in the loop unswept while the job
+# still reported SUCCESS). Added `is_host_absent_error` (new classifier, checked before
+# `is_auth_error` at every list site in that function) and an expectation-anchored completeness
+# assertion (settings-found == settings-confirmed-gone AND mid-sweep-unreachable-hosts == 0,
+# printed in the job summary with a per-setting ledger of what was left behind) - see that
+# function's own comment for the full account. `teardown.yml` gained a `needs` edge ordering
+# `databricks-precascade` strictly after `diagnostic-precascade` (ordering only, never a gate,
+# same `!cancelled()` form every other Phase 0.5 edge already uses), and
+# `scripts/teardown-az-sweep.sh` moved its diagnostic-settings sweep (renamed step 1-pre, from
+# step 2-pre) to run BEFORE the Databricks force-delete cascade (step 1) instead of after it - see
+# each file's own header for the exact reorder.
 
 # ARM management-plane base URL, used by every direct `az rest` call in teardown-disarm.sh,
 # teardown-az-sweep.sh, teardown-verify.sh, and scripts/teardown-probe-extensions.sh. Promoted
@@ -1095,11 +1111,11 @@ discover_live_rgs() {
 # EXTRACTED 2026-08-01 from teardown-az-sweep.sh's inline Phase 2 step 2-pre (ADR-071 decision 4b),
 # unchanged in behaviour, api-version, containment predicate, failure handling and confirm-GET. It
 # is shared for exactly the reason `databricks_force_delete_cascade` is: there are now TWO call
-# sites (Phase 0.5 precascade and Phase 2 step 2-pre) and they must not drift on the az invocation.
+# sites (Phase 0.5 precascade and Phase 2 step 1-pre) and they must not drift on the az invocation.
 # The ONLY difference from the original inline body is `return 1` where it said `exit 1`, so the
 # caller decides whether a failure is fatal - the two callers genuinely differ on that.
 #
-# WHY A SECOND CALL SITE EXISTS AT ALL (ADR-071 decision 4b, the ordering regression). Step 2-pre
+# WHY A SECOND CALL SITE EXISTS AT ALL (ADR-071 decision 4b, the ordering regression). Step 1-pre
 # can only see a setting whose HOST IS STILL LIVE, and it sits in Phase 2, which `needs` all of
 # Phase 1. Under ADR-066 `mode=terraform` at `target=all` runs the per-root `terraform destroy`
 # jobs FIRST, deleting the hosts, after which no enumeration can reach any setting the destroying
@@ -1111,14 +1127,38 @@ discover_live_rgs() {
 # why it silently re-collides on the next apply that recreates a same-named host, and why the fix
 # has to happen at teardown rather than at apply.
 #
-# LIST-FAILURE HANDLING DIFFERS FROM EVERY OTHER LIST IN THIS CODEBASE, deliberately. A
-# resource-scoped diagnosticSettings GET can legitimately 404/BadRequest for a resource TYPE that
-# does not support diagnostic settings at all (most do; some do not). Only an AUTH-shaped failure
-# fails loud; any other failure is expected noise and skips that one resource. It is never read as
-# "this resource has no diagnostic settings" for a class that never existed on it.
+# AMENDED 2026-08-10 (ADR-076 decisions 1-3, strategic review docs/strategic-review-2026-08-09.md).
+# Live evidence: teardown run 31350223388's precascade died mid-enumeration on
+# rg-bank-data-p1-dbx-managed-globaris-poc (ResourceGroupNotFound - the RG had already been
+# force-deleted out-of-band by the CONCURRENT Databricks precascade, limb 1 of the ADR's root
+# cause), leaving every RG later in the loop entirely unswept, while the job still reported
+# SUCCESS (limb 4 - a comment is not a control, ADR-062). Two changes:
+#   - THREE-WAY LIST-FAILURE CLASSIFICATION, not two. A resource-scoped diagnosticSettings GET
+#     (and, new here, the per-RG resource LIST that feeds it) can fail three structurally
+#     different ways: (i) the resource TYPE never supported diagnostic settings at all (genuinely
+#     skippable noise, unchanged); (ii) the HOST (the RG or the resource) vanished mid-sweep,
+#     racing a concurrent host-deleting actor or an already-force-deleted target
+#     (`is_host_absent_error`, NEW - must be LOUD, must NOT silently read as "no settings", and
+#     must NOT abort the rest of the sweep either); (iii) an auth/token failure
+#     (`is_auth_error`, unchanged - still an immediate hard stop, since a dead token cannot
+#     complete anything else either). Checked in that narrow-to-broad order at every list site
+#     (`is_host_absent_error` before `is_auth_error`, same precedence-flip precedent as
+#     `_is_authz_denied_design_gap` elsewhere in this codebase) so a host-absent 403 can never be
+#     misread as a live auth failure.
+#   - EXPECTATION-ANCHORED COMPLETENESS. The sweep no longer returns on the FIRST per-object
+#     problem it hits (a host-absent RG/resource, a failed delete, or a confirm-GET that still
+#     reads live) - it records the problem in a per-setting ledger (host, setting,
+#     deleted|unreachable|failed), keeps sweeping every remaining RG/resource/setting, and only
+#     at the end asserts SUCCESS = (settings-found == settings-confirmed-gone) AND
+#     (mid-sweep-unreachable-hosts == 0), printed in the job summary. A single vanished RG can
+#     therefore never again silently strand every RG that would have been enumerated after it.
+#     RETIRES teardown-diagnostic-precascade.sh's old "a zero-deletion result here is NOT
+#     self-evidently correct" prose comment in favour of this mechanical assertion (ADR-062).
 sweep_resource_diagnostic_settings() {
   local sub rg res_id name
   local rgnames_out rgnames resource_ids_out resource_ids diag_names_out diag_names diag_url diag_del_out
+  local diag_found=0 diag_confirmed=0 diag_unreachable=0
+  local -a diag_ledger=()
   for sub in $(teardown_subscriptions); do
     if ! discover_live_rgs rgnames_out "$sub"; then
       echo "::error::RG list failed for subscription ${sub} while discovering resource-scoped diagnostic-settings targets - a failed list is never read as 'no RGs' (section 9.4): ${AZ_RUN_STDERR}"
@@ -1128,6 +1168,12 @@ sweep_resource_diagnostic_settings() {
     for rg in "${rgnames[@]:-}"; do
       [ -z "$rg" ] && continue
       if ! az_run_retry resource_ids_out resource list --resource-group "$rg" --subscription "$sub" --query "[].id" -o tsv; then
+        if is_host_absent_error "$AZ_RUN_STDERR"; then
+          echo "::error::resource-scoped diagnostic-settings sweep: resource group ${rg} (sub ${sub}) vanished mid-enumeration (ADR-076 decision 2 - host absent, not a list failure to swallow). Any settings it held are now unreachable and undiscoverable (FM-3, ADR-068) - recorded as an unreachable host; the sweep continues with the remaining resource groups: ${AZ_RUN_STDERR}"
+          diag_unreachable=$((diag_unreachable + 1))
+          diag_ledger+=("host=${rg} (resource group, sub ${sub})|setting=(unknown - host vanished before its settings could be enumerated)|status=unreachable")
+          continue
+        fi
         echo "::error::resource list failed for RG ${rg} (sub ${sub}) while enumerating resources for the resource-scoped diagnostic-settings sweep: ${AZ_RUN_STDERR}"
         return 1
       fi
@@ -1137,6 +1183,12 @@ sweep_resource_diagnostic_settings() {
         if ! az_run_retry diag_names_out rest --method get \
             --url "${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}" \
             --query "value[].name" -o tsv; then
+          if is_host_absent_error "$AZ_RUN_STDERR"; then
+            echo "::error::resource-scoped diagnostic-settings list for ${res_id} failed because the host is gone (vanished mid-sweep, ADR-076 decision 2) - its settings, if any, are now unreachable and undiscoverable (FM-3, ADR-068); recorded as an unreachable host, sweep continues with the remaining resources: ${AZ_RUN_STDERR}"
+            diag_unreachable=$((diag_unreachable + 1))
+            diag_ledger+=("host=${res_id}|setting=(unknown - host vanished before its settings could be enumerated)|status=unreachable")
+            continue
+          fi
           if is_auth_error "$AZ_RUN_STDERR"; then
             echo "::error::resource-scoped diagnostic-settings list failed for ${res_id} with an auth/transport error: ${AZ_RUN_STDERR}"
             return 1
@@ -1155,21 +1207,44 @@ sweep_resource_diagnostic_settings() {
             echo "::error::resource-scoped diagnostic setting ${name} on ${res_id} did not classify as estate-owned by is_estate_owned - this should be structurally impossible for a resource inside an RG_SWEEP_QUERY-matched RG. Failing loud rather than silently skipping."
             return 1
           fi
+          diag_found=$((diag_found + 1))
           echo "  Deleting resource-scoped diagnostic setting ${name} (resource ${res_id})"
           diag_url="${ARM_BASE}${res_id}/providers/Microsoft.Insights/diagnosticSettings/${name}?api-version=${RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION}"
           if ! diag_del_out="$(az rest --method delete --url "$diag_url" --output none 2>&1)"; then
             echo "::error::resource-scoped diagnostic setting delete for ${name} (resource ${res_id}) failed: ${diag_del_out}"
-            return 1
+            diag_ledger+=("host=${res_id}|setting=${name}|status=failed (delete): ${diag_del_out}")
+            continue
           fi
           # This delete's own confirm-GET is the ONLY completion check this class will ever get:
           # by the time Phase 3 VERIFY runs, the host and its RG are expected to be gone, so there
           # is no later discovery that could re-observe the object (FM-3). Same PRIMARY-evidence
-          # rationale FIX-1's MG-scope confirm-GETs use.
-          confirm_gone_or_fail_primary "resource-scoped diagnostic setting ${name} (resource ${res_id})" "$diag_url" || return 1
+          # rationale FIX-1's MG-scope confirm-GETs use. A failure here is recorded and swept
+          # PAST (ADR-076 decision 2), not an immediate return, so one bad confirm-GET can never
+          # strand every setting still queued behind it.
+          if confirm_gone_or_fail_primary "resource-scoped diagnostic setting ${name} (resource ${res_id})" "$diag_url"; then
+            diag_confirmed=$((diag_confirmed + 1))
+            diag_ledger+=("host=${res_id}|setting=${name}|status=deleted")
+          else
+            diag_ledger+=("host=${res_id}|setting=${name}|status=failed (confirm-GET still live or indeterminate)")
+          fi
         done
       done
     done
   done
+
+  echo
+  echo "Resource-scoped diagnostic-settings sweep summary: settings-found=${diag_found} settings-confirmed-gone=${diag_confirmed} mid-sweep-unreachable-hosts=${diag_unreachable}"
+  if [ "$diag_found" -ne "$diag_confirmed" ] || [ "$diag_unreachable" -ne 0 ]; then
+    echo "::error::Resource-scoped diagnostic-settings sweep INCOMPLETE (ADR-076 decision 2 - SUCCESS requires settings-found == settings-confirmed-gone AND mid-sweep-unreachable-hosts == 0). Left behind:"
+    local entry
+    for entry in "${diag_ledger[@]:-}"; do
+      case "$entry" in
+        *"|status=deleted") ;;
+        *) echo "  ${entry}" ;;
+      esac
+    done
+    return 1
+  fi
   return 0
 }
 
@@ -1261,7 +1336,9 @@ databricks_force_delete_cascade() {
 #
 # ORDERING CONSTRAINT - the exact MIRROR of ADR-063 G-1 (a resource-scoped diagnostic setting,
 # keyed to its HOST's URI, must be swept BEFORE the host is destroyed - teardown-az-sweep.sh's
-# "step 2-pre"). An attachment object is keyed to its CONTAINER, not a host resource, so the
+# "step 1-pre", renamed from "step 2-pre" by ADR-076 decision 1 to reflect that it now runs
+# before the Databricks force-delete cascade too, not only before the RG sweep). An attachment
+# object is keyed to its CONTAINER, not a host resource, so the
 # ordering inverts: it must be swept AFTER every declaring root has destroyed (sweeping while a
 # creator is still live invites the live RP to simply recreate what was just deleted - Microsoft
 # explicitly documents Traffic Analytics as actively managing its pair) and BEFORE the
@@ -1588,6 +1665,37 @@ is_auth_error() {
 is_not_found_error() {
   local text="${1:-}"
   printf '%s' "$text" | grep -qiE 'NotFound|Not Found|404'
+}
+
+# is_host_absent_error "<text>" - classify captured az/curl stderr as a HOST-ABSENCE-SHAPED
+# signal (ADR-076 decision 2): the enumeration target (a resource group or a resource) no
+# longer exists, as distinct from a resource TYPE that never supported the class being
+# enumerated (still skippable) and distinct from a dead/expired token (is_auth_error, still
+# fail-loud-and-stop). Two shapes, both recorded live in this estate:
+#   - 404/NotFound-shaped (is_not_found_error: ResourceGroupNotFound, ResourceNotFound, a bare
+#     404) - the ordinary "the container or resource is gone" signal.
+#   - the deleted-scope 403 form this codebase has repeatedly documented for MG/budget/policy
+#     scopes and, per ADR-072 decision 4's own table, for a diagnostic-settings host too
+#     ("host gone, object unreachable and undiscoverable - 403, not 404"): ARM cannot resolve a
+#     deleted scope to evaluate RBAC against it, so it returns HTTP-403 `AuthorizationFailed`
+#     rather than a clean 404. Checked BEFORE is_auth_error at every call site (same ordering
+#     fix teardown-disarm.sh/teardown-az-sweep.sh's `_is_authz_denied_design_gap` already
+#     established, 2026-07-23 code-review round) because the literal AuthorizationFailed
+#     RBAC-denial text also contains the word "credential" ("...refresh your credentials"),
+#     which is_auth_error's broad net also matches - checking the narrow pattern first is safe
+#     because a dead/expired token fails at the AUTHENTICATION layer (AADSTS/
+#     ExpiredAuthenticationToken/"valid time range") before ARM ever evaluates authorization, so
+#     it structurally cannot produce this literal AuthorizationFailed code or either RBAC-denial
+#     phrase.
+#
+# Returns 0 (true - IS host-absent-shaped) on a match, 1 (false) otherwise. A caller that
+# matches this MUST NOT silently skip (that is limb 3's original defect, ADR-076 Part 1) and
+# MUST NOT hard-stop the whole sweep either (that is the job-killing defect the same ADR fixes)
+# - it records the host as unreachable and continues enumerating everything else.
+is_host_absent_error() {
+  local text="${1:-}"
+  is_not_found_error "$text" && return 0
+  printf '%s' "$text" | grep -qiE 'AuthorizationFailed|does not have authorization|ABAC condition'
 }
 
 # is_transient_error "<text>" - classify captured az stderr as a TRANSIENT server-side failure

@@ -2,7 +2,7 @@
 # Purpose: Manual, guarded, RELIABLE end-to-end teardown of the whole environment or one
 #          root - zero manual deletion (ADR-054 / docs/teardown-redesign.md).
 # Section: 10 - Pipeline & Tooling (ADR-019, ADR-054, OQ-012/OQ-013).
-# Last updated: 2026-08-01
+# Last updated: 2026-08-10
 #
 # Guards (destroy is irreversible):
 #   1. `confirm` must be typed exactly as `destroy` (a cheap pre-check before any login).
@@ -30,12 +30,13 @@
 #             before Phase 1 runs, so the RP-managed resource group cascades cleanly instead of
 #             being retained as an orphan by a later PLAIN terraform destroy (bank-data-p1's
 #             pinned avm-res-databricks-workspace 0.5.0 module issues a plain delete with no
-#             force-deletion). Runs alongside Phase 0 DISARM (both gate on `guard` only, no
-#             ordering dependency between them); `bank-data-p1` (Phase 1, chain position 2)
-#             additionally `needs` this job. Not wired for mode=az-sweep: Phase 1 never runs in
-#             that path, so az-sweep's own step 1 (teardown-az-sweep.sh, unchanged) already
-#             force-deletes the workspace first there - wiring this job there too would be a
-#             redundant duplicate, not a fix.
+#             force-deletion). `needs: [guard, diagnostic-precascade]` (ORDERING ONLY, ADR-076
+#             decision 1, 2026-08-10 - see below and this job's own comment for why); runs
+#             alongside Phase 0 DISARM (no ordering relationship with disarm - genuinely disjoint
+#             scopes). `bank-data-p1` (Phase 1, chain position 2) additionally `needs` this job.
+#             Not wired for mode=az-sweep: Phase 1 never runs in that path, so az-sweep's own
+#             step 1 (teardown-az-sweep.sh) already force-deletes the workspace first there -
+#             wiring this job there too would be a redundant duplicate, not a fix.
 #   Phase 0.5 - DIAGNOSTIC PRECASCADE (scripts/teardown-diagnostic-precascade.sh) - az,
 #             target=all AND mode=terraform only (ADR-071 decision 4b, ADDED 2026-08-01).
 #             Deletes every resource-scoped microsoft.insights/diagnosticSettings object WHILE
@@ -46,16 +47,33 @@
 #             proof and re-collide with `already exists` on the next apply that recreates a
 #             same-named host. Eight such failures across bank-data-p1 and bank-app-p1 on
 #             2026-07-31 are the live evidence. Fixes the SAME ordering regression ADR-066
-#             decision 4 fixed for Databricks: Phase 2's step 2-pre sweeps this class but can
-#             only see LIVE hosts, and it runs after all of Phase 1 has deleted them. Shares its
-#             whole body with step 2-pre via `sweep_resource_diagnostic_settings`
-#             (teardown-common.sh) so the two cannot drift; step 2-pre STAYS as the belt for the
-#             az-sweep path and anything this missed. Runs alongside Phase 0 DISARM and the
-#             Databricks precascade (all three gate on `guard` only, no ordering dependency
-#             between them - disjoint object classes). The Phase 1 CHAIN HEAD (`synthetic`)
-#             `needs` this job for ORDERING ONLY, so the sweep completes before the first destroy
-#             deletes any host; it is NOT in that job's `if:`, so a failure here never skips a
-#             layer (INV-1). Not wired for mode=az-sweep, same reasoning as the Databricks job.
+#             decision 4 fixed for Databricks: Phase 2's step 1-pre (renamed from step 2-pre by
+#             ADR-076 decision 1) sweeps this class but can only see LIVE hosts, and it runs after
+#             all of Phase 1 has deleted them. Shares its whole body with step 1-pre via
+#             `sweep_resource_diagnostic_settings` (teardown-common.sh) so the two cannot drift;
+#             step 1-pre STAYS as the belt for the az-sweep path and anything this missed. Runs
+#             alongside Phase 0 DISARM (genuinely disjoint scopes, no ordering relationship). The
+#             Phase 1 CHAIN HEAD (`synthetic`) `needs` this job for ORDERING ONLY, so the sweep
+#             completes before the first destroy deletes any host; it is NOT in that job's `if:`,
+#             so a failure here never skips a layer (INV-1). Not wired for mode=az-sweep, same
+#             reasoning as the Databricks job.
+#
+#             ORDERING BARRIER (ADR-076 decision 1, 2026-08-10, CORRECTING a prior claim in this
+#             file). This job and the Databricks precascade above used to be wired as CONCURRENT
+#             (both `needs: [guard]` only), on the stated premise that the two "act on disjoint
+#             object classes" - that premise was FALSE for a Databricks-hosted diagnostic setting
+#             (diag-dbw-* is an extension object keyed to the workspace URI the Databricks
+#             precascade force-deletes), so whichever job reached the workspace first silently
+#             won the race, and the diagnostic sweep losing it was invisible (no completeness
+#             assertion existed before ADR-076 decision 2 either). Live evidence: teardown run
+#             `31350223388`'s diagnostic-precascade died mid-enumeration on
+#             rg-bank-data-p1-dbx-managed-globaris-poc (ResourceGroupNotFound) because the
+#             concurrent Databricks precascade had already force-deleted it. The Databricks
+#             precascade now `needs` THIS job (ordering only, `!cancelled()` form, never a gate -
+#             ADR-071 "not a gate" and ADR-066 INV-1 both hold exactly as before). Standing rule
+#             for future actors, added to the ADR-072 mirror table: any job or step that deletes
+#             an estate host outside its owning root's in-order destroy MUST order after this
+#             diagnostic-settings sweep.
 #   Phase 1 - DESTROY  (terraform, per root, incl. synthetic) - mode=terraform only. `needs`
 #             is for ORDERING ONLY; every root job's `if:` uses `!cancelled()` (NOT
 #             `!failure()`), so one root's failure never cascade-skips the others (fixes F1).
@@ -336,16 +354,30 @@ jobs:
         run: bash scripts/teardown-disarm.sh
 
   # Phase 0.5 - DATABRICKS PRECASCADE (ADR-066 decision 4 PREFERRED form; code-review Finding 2,
-  # 2026-07-30). Runs alongside Phase 0 DISARM (both only `need: [guard]`, no ordering
+  # 2026-07-30). Runs alongside Phase 0 DISARM (both gate on `guard` only, no ordering
   # dependency between them) so the Databricks workspace force-delete is submitted WHILE the
   # workspace is still live, ahead of Phase 1's bank-data-p1 destroy. target=all AND
   # mode=terraform only - mode=az-sweep never runs Phase 1 at all, so az-sweep's own step 1
-  # (teardown-az-sweep.sh, unchanged) already force-deletes the workspace first in that path;
-  # wiring this job there too would be a redundant duplicate, not a fix. See
+  # (teardown-az-sweep.sh) already force-deletes the workspace first in that path; wiring this
+  # job there too would be a redundant duplicate, not a fix. See
   # scripts/teardown-databricks-precascade.sh's own header for the full root-cause account.
+  #
+  # `needs: [guard, diagnostic-precascade]` ADDED 2026-08-10 (ADR-076 decision 1). This job and
+  # diagnostic-precascade below were previously wired as CONCURRENT (both `needs: [guard]` only),
+  # on the stated premise that they "act on disjoint object classes" - that premise is FALSE for
+  # a Databricks-hosted diagnostic setting: `diag-dbw-*` is an extension object keyed to the
+  # workspace URI THIS job force-deletes, so whichever job reached the workspace first silently
+  # won the race, and the diagnostic sweep losing that race was invisible (no completeness
+  # assertion existed before ADR-076 decision 2 either). Live evidence: teardown run
+  # `31350223388`'s diagnostic-precascade died mid-enumeration on
+  # rg-bank-data-p1-dbx-managed-globaris-poc (ResourceGroupNotFound) because THIS job had already
+  # force-deleted it out from under the concurrent enumeration. The `needs` edge below is
+  # ORDERING ONLY, never a gate: the `!cancelled()` form of the `if:` (unchanged) means this job
+  # still runs even if diagnostic-precascade failed or was skipped, preserving ADR-071 "not a
+  # gate" and ADR-066 INV-1 exactly as before - only the RELATIVE ORDER changed.
   databricks-precascade:
     name: "Phase 0.5 - DATABRICKS PRECASCADE (force-delete while live)"
-    needs: [guard]
+    needs: [guard, diagnostic-precascade]
     if: ${{ !cancelled() && needs.guard.result == 'success' && inputs.target == 'all' && inputs.mode == 'terraform' }}
     runs-on: ubuntu-latest
     environment: production-destroy
@@ -369,14 +401,25 @@ jobs:
           LANDINGZONES_SUBSCRIPTION_ID: ${{ secrets.LANDINGZONES_SUBSCRIPTION_ID }}
         run: bash scripts/teardown-databricks-precascade.sh
 
-  # Phase 0.5 - DIAGNOSTIC PRECASCADE (ADR-071 decision 4b). Gated IDENTICALLY to
-  # databricks-precascade above (needs: [guard], target=all AND mode=terraform) and, like it,
-  # deliberately NOT wired for mode=az-sweep: Phase 1 never runs in that path, so Phase 2's own
-  # step 2-pre already sweeps this class while hosts are live there, and a second call would be a
-  # redundant duplicate rather than a fix. Runs alongside disarm and databricks-precascade - all
-  # three gate on `guard` only, with no ordering dependency between them, because they act on
-  # disjoint object classes. NOT a gate: a failure is loud but never skips a Phase 1 layer
+  # Phase 0.5 - DIAGNOSTIC PRECASCADE (ADR-071 decision 4b). Gated identically to
+  # databricks-precascade above (target=all AND mode=terraform) and, like it, deliberately NOT
+  # wired for mode=az-sweep: Phase 1 never runs in that path, so Phase 2's own step 1-pre already
+  # sweeps this class while hosts are live there, and a second call would be a redundant
+  # duplicate rather than a fix. NOT a gate: a failure is loud but never skips a Phase 1 layer
   # (ADR-066 INV-1); the residue surfaces later as an `already exists` recovered by runbook B1.
+  #
+  # ORDERING (ADR-076 decision 1, 2026-08-10, CORRECTING the prior claim below). This job used to
+  # run CONCURRENTLY with databricks-precascade above and disarm, on the stated premise that the
+  # three "act on disjoint object classes" - that premise was FALSE for a Databricks-hosted
+  # diagnostic setting (diag-dbw-* is keyed to the workspace URI databricks-precascade
+  # force-deletes), and the race it created is what left run `31350223388`'s enumeration mid-air
+  # on a Databricks-managed RG the concurrent job had already force-deleted. This job still gates
+  # on `guard` only (no incoming `needs` edge itself - it does not depend on disarm or on
+  # databricks-precascade), but databricks-precascade now `needs` THIS job (ordering only, never
+  # a gate - see that job's own comment), so this sweep is guaranteed to complete, one way or the
+  # other, before ANY host-deleting Phase 0.5 actor runs. It still runs alongside disarm (no
+  # ordering relationship with disarm - genuinely disjoint scopes: MG-scope policy assignments
+  # vs. resource-scoped diagnostic settings).
   diagnostic-precascade:
     name: "Phase 0.5 - DIAGNOSTIC PRECASCADE (delete settings while hosts are live)"
     needs: [guard]
