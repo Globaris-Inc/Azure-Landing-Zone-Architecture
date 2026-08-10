@@ -3153,3 +3153,17 @@ query and log is `law-security-globaris-poc-r2`. The retired exact name is BURNE
   GitHub API is exactly the 11-file envelope above - no rider. Docs PR #102 merged alongside as
   `f07a1a4`. **Amendment C is now UNCONDITIONAL: GO for attempt 4.** (A4-RC5 satisfied; operator
   merged both PRs and directed the continuation this session.)
+
+---
+
+# 2026-08-10 REFRESH #6 - AUTHORED AS A STANDALONE FILE; this master document is closed for new refresh sections
+
+**Pointer addendum, append-only.** Refresh #6 (re-clearance for ATTEMPT 8 against `banking` @
+`6ec9fba`, after PRs #109 to #118: ADR-076 landed, ADR-077 rejected, generation r5) lives at
+**`docs/preclearance/2026-08-10-refresh-6-attempt-8.md`**, continuing the section lettering (X)
+and every convention of this series. **Verdict there: GO, with six dispatch-time conditions
+(headSha; the -r5 sole-render marker; the NEW Step 8 azapi address marker from PR #115; the
+OQ-070 window to 2026-08-31; re-confirming the live limbs at dispatch; the in-run gate
+windows).** This 3,155-line document remains the historical record for refreshes R through W
+and Amendments A/B/C; future refreshes continue as standalone dated files in
+`docs/preclearance/`, each pointed from here by a dated addendum like this one.
