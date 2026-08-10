@@ -63,7 +63,7 @@ All scripts honour these env vars:
 | `ENVIRONMENT`  | `poc`      | Matches `envs/poc.tfvars` |
 | `HONEYPOT_UPN` | _(unset)_  | Required by `04-reset.sh` for the honeypot re-disable step |
 | `SECURITY_RG`  | `rg-security-<org>-<env>` | Overrides the LAW lookup if naming differs |
-| `SECURITY_LAW` | `law-security-<org>-<env>-r4` | Same; `-r4` is the ADR-075 generation suffix (tracks `security_law_generation` in `envs/poc.tfvars`) |
+| `SECURITY_LAW` | `law-security-<org>-<env>-r5` | Same; `-r5` is the ADR-075 generation suffix (tracks `security_law_generation` in `envs/poc.tfvars`) |
 
 ## Shell compatibility
 
