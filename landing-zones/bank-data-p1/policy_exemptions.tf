@@ -10,7 +10,7 @@
 # Section: Banking wave B1 (flow-log waiver) + wave B5 (dbstorage waiver,
 #          docs/b5-data-platform-design.md section 4; ADR-048) + ADR-070 (DINE vs
 #          Terraform ownership, decisions 1 and 2)
-# Last updated: 2026-07-31 (ADR-070 DINE ownership exemption unit)
+# Last updated: 2026-08-10 (ADR-076 note on the Databricks diagnostic setting)
 #
 # bank-data-p1 sits under the corp MG in the landingzones subscription (OQ-035
 # resolution), so it inherits the corp archetype Deny-Public-Endpoints initiative.
@@ -262,7 +262,11 @@ resource "time_sleep" "wait_dbx_storage_exemption" {
 #     Deploy-MCSB2-Monitoring, whose allowedValues are AuditIfNotExists and
 #     Disabled only - it cannot write. The diag-dbw-* leg of the twice-failed
 #     apply is therefore NOT a DINE collision; it belongs to OQ-067 item B and no
-#     exemption can fix it.
+#     exemption can fix it. (2026-08-10, ADR-076: mechanism established as the
+#     FM-3 orphan from the out-of-band Databricks force-delete; the setting is
+#     now a root-level azapi resource in databricks.tf, which PUTs idempotently
+#     with no RequiresImport pre-check - same class as the data lake bullet
+#     below.)
 #   - The data lake storage account. Neither microsoft.storage/storageaccounts nor
 #     the flow-log SA type is in the resourceTypeList; its setting is also an
 #     azapi resource, which PUTs idempotently with no RequiresImport pre-check.

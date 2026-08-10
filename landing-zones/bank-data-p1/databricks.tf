@@ -2,10 +2,13 @@
 #          into the two live delegated subnets (snet-databricks-host / -container,
 #          B1), secure cluster connectivity (no_public_ip = true), default storage
 #          firewall with a pre-created access connector, deterministic managed-RG
-#          name, diagnostics to the platform LAW. ALL resources gated behind
-#          var.enable_data_platform (default false, LESSON 42 flag pattern).
+#          name, diagnostics to the platform LAW via a ROOT-LEVEL azapi resource
+#          (ADR-076 decision 4, exercising the ADR-071 4a pre-authorization - see
+#          the block comment on azapi_resource.dbw_diag_platform_law below). ALL
+#          resources gated behind var.enable_data_platform (default false,
+#          LESSON 42 flag pattern).
 # Section: Banking wave B5 (docs/b5-data-platform-design.md sections 3-4; ADR-048)
-# Last updated: 2026-07-18
+# Last updated: 2026-08-10
 #
 # Module (pin re-verified on the Terraform Registry 2026-07-18, schema read from the
 # v0.5.0 tag source - FIRST estate consumption of this module):
@@ -113,14 +116,11 @@ module "databricks_workspace" {
   # production design target (design doc section 8).
   public_network_access_enabled = true
 
-  # Module renders log category groups only (metric categories are declared but
-  # not rendered - verified in the v0.5.0 source); defaults to allLogs.
-  diagnostic_settings = {
-    platform_law = {
-      name                  = "diag-dbw-bank-data-p1-${var.org_prefix}-${var.environment}"
-      workspace_resource_id = var.platform_law_workspace_id
-    }
-  }
+  # diagnostic_settings is deliberately NOT set (ADR-076 decision 4): the
+  # workspace diagnostic setting is the root-level
+  # azapi_resource.dbw_diag_platform_law below, replacing the module interface's
+  # azurerm_monitor_diagnostic_setting 1:1. Do not re-add the input - two writers
+  # for the same setting name would collide.
 
   tags = local.common_tags
 
@@ -141,8 +141,93 @@ module "databricks_workspace" {
   # diag-dbw-* was one of the three "already exists" failures on runs
   # 30661012325 / 30662610292, and no DINE anywhere can have caused any of the
   # three - the disproof in policy_exemptions.tf is about NAME SCOPING and holds
-  # for every resource type, not just this one. That leg is OQ-067 item B, its
-  # cause is NOT established, no exemption fixes it, and its recovery is the
-  # runbook B1 delete-then-retry before the next dispatch.
+  # for every resource type, not just this one. That leg was OQ-067 item B; its
+  # mechanism is now established as the FM-3 orphan minted by the out-of-band
+  # Databricks force-delete (ADR-076 limbs 1-2, attempt 7 run 31348557765), and
+  # the setting itself is now the idempotent azapi resource below, so a surviving
+  # orphan overwrites instead of colliding - no B1 recovery needed for it.
   depends_on = [time_sleep.wait_dbx_storage_exemption]
+}
+
+# ---------------------------------------------------------------------------
+# Workspace diagnostic setting - ROOT-LEVEL azapi (ADR-076 decision 4)
+# ---------------------------------------------------------------------------
+# DEVIATION (ADR-076 decision 4, exercising ADR-071 4a on its fired T3 trigger,
+# attempt 7 run 31348557765): this setting's host is the ONE estate host deleted
+# out-of-band by design (the teardown Databricks force-delete, ADR-072 C4), so an
+# FM-3 orphan record can survive a teardown and is undiscoverable while the host
+# is absent (ADR-076 decision 5). The azurerm provider hard-fails the create on
+# an existing same-name setting (ImportAsExistsError); azapi PUTs with no
+# RequiresImport pre-check, so the create idempotently overwrites any orphan.
+# Scoped to THIS setting only - every other setting in the root stays on its
+# module's supported interface.
+#
+# Shape mirrors the estate-proven azapi diagnostic-setting idiom inside
+# module.datalake (avm-res-storage-storageaccount 0.7.3 modules/diagnostic_setting
+# + Azure/avm-utl-interfaces 0.6.0 locals.diagnostic_settings_v2.tf, read from the
+# vendored source 2026-08-10): same type and api-version (the repo-wide
+# RESOURCE_DIAGNOSTIC_SETTINGS_API_VERSION), same normalization arguments, same
+# logAnalyticsDestinationType lifecycle guard. Body parity with the REMOVED
+# module-rendered setting (avm-res-databricks-workspace 0.5.0 main.tf lines
+# 56-81): same name, same LAW destination, one categoryGroup "allLogs" log entry
+# (module default log_groups = ["allLogs"], log_categories = []), NO metrics (the
+# module declared but never rendered them), NO logAnalyticsDestinationType. The
+# allLogs categoryGroup for Microsoft.Databricks/workspaces is live-proven by this
+# estate's own prior applies of the identical rendering (B1 recovery run
+# 30671577938 created diag-dbw-* green). Diagnostic settings are an extension
+# resource with NO tags property, so common_tags is inapplicable (same as
+# azapi_resource.foundry_pe_dns_zone_group in ai.tf). Uses the root's anchored
+# default azapi provider (LESSON 23). parent_id orders this after the workspace;
+# no DINE exemption gate is needed for this type (see the ADR-070 NOTE above).
+resource "azapi_resource" "dbw_diag_platform_law" {
+  for_each = var.enable_data_platform ? { main = "main" } : {}
+
+  name      = "diag-dbw-bank-data-p1-${var.org_prefix}-${var.environment}"
+  type      = "Microsoft.Insights/diagnosticSettings@2021-05-01-preview"
+  parent_id = module.databricks_workspace[each.key].resource_id
+
+  body = {
+    properties = {
+      logAnalyticsDestinationType = null
+      logs = [
+        {
+          category      = null
+          categoryGroup = "allLogs"
+          enabled       = true
+          retentionPolicy = {
+            days    = 0
+            enabled = false
+          }
+        }
+      ]
+      metrics     = null
+      workspaceId = var.platform_law_workspace_id
+    }
+  }
+
+  # The three arguments below are the proven-idiom normalization set: nulls are
+  # stripped from the PUT and excluded from drift; Azure-returned extra list
+  # items (for example per-category entries materialized from a categoryGroup)
+  # never diff; list items pair on their identity keys, not on order.
+  # ignore_other_items_in_list / list_unique_id_property require azapi >= 2.9.0
+  # (provider CHANGELOG; providers.tf floor raised accordingly).
+  ignore_null_property = true
+  ignore_other_items_in_list = [
+    "properties.logs",
+    "properties.metrics",
+  ]
+  list_unique_id_property = {
+    "properties.logs"    = "category, categoryGroup"
+    "properties.metrics" = "category"
+  }
+
+  # Matches the datalake idiom: the preview api-version is validated by ARM at
+  # PUT time, not by the provider's embedded schema.
+  schema_validation_enabled = false
+
+  lifecycle {
+    # Azure computes and returns a destination type even when none is sent;
+    # same guard as the datalake idiom.
+    ignore_changes = [body.properties.logAnalyticsDestinationType]
+  }
 }
