@@ -1,289 +1,326 @@
-# RUNBOOK.md - Operational Runbooks
+# Operational Runbook
 
-> Section 11 documentation deliverable (PROMPT.md item 3). Concrete, step-by-step operational procedures for the
-> **as-deployed** Globaris CAF Azure Landing Zone POC. Three runbooks: (A) DR failover drill, (B) incident
-> triage, (C) cost-spike response. Procedures use the real resource names, roots, and CI actions that exist in
-> the estate.
->
-> Cross-references: `ARCHITECTURE.md` (topology, RTO/RPO), `SECURITY.md` (threat model, posture),
-> `DECISIONS.md` (ADRs).
+This runbook covers the operational scenarios required by Section 11: regional failover assessment, incident
+triage, and cost-spike response. It also captures the apply/recovery and teardown procedures that were exercised
+during the build.
 
----
+The managed estate is currently greenfield after the verified 2026-08-03 teardown. Procedures that require a
+live estate are ready for the next deployment; they are not evidence that resources are currently running.
 
-## 0. Operator prerequisites and the CI action model
+## 1. Operating model
 
-**How operators act on this estate.** All infrastructure mutation goes through the GitHub Actions workflow
-`.github/workflows/deploy.yml`. Operators do **not** run `terraform apply` locally. The workflow exposes four
-actions via `workflow_dispatch`:
+### 1.1 Sources of truth
 
-| Action | Purpose | Gating | Extra input |
-|--------|---------|--------|-------------|
-| `plan` | Dry-run, read-only | Ungated | - |
-| `apply` | Mutate infra | Runs in the `production` GitHub Environment (**required reviewer**) | - |
-| `untaint` | Clear a tainted resource from state (single root only) | Ungated (plan-path OIDC) | `resource_address` |
-| `force-unlock` | Release a stuck state-lock lease (no Azure mutation) | Ungated | `lock_id` (GUID) |
+Use these in order:
 
-`target` selects a single root (e.g. `landing-zones/corp-a2`, `platform/security`) or `all`. `untaint` and
-`force-unlock` **require a single target** - the workflow has fail-fast guards that reject `target = all` for
-those two (a per-root state write must not fan out across roots).
+1. [`WORKLOG.md`](WORKLOG.md) for current state and active stop conditions.
+2. [`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md) for full rebuild commands and gates.
+3. [`docs/estate-bom.md`](docs/estate-bom.md) for the expected live inventory.
+4. GitHub Actions run logs for plan/apply/destroy evidence.
+5. Direct Azure API/portal checks for live state.
+6. Terraform state as an ownership record, not as proof that Azure contains or does not contain an object.
 
-**Standing accounts to know:** the CI OIDC service principal (no secrets; federated credential) performs all
-applies. Two temporary Entra directory roles and the CI SP standing Owner-at-MG grant (OQ-008) must be revoked
-at teardown - see the teardown note in WORKLOG.
+### 1.2 Severity model
 
-**Resource-name patterns used below** (org prefix `globaris`, environment `poc`):
+| Severity | Definition | Initial response |
+| --- | --- | --- |
+| Sev 0 | Tenant-wide security compromise, destructive automation, or unrecoverable control-plane impact | Stop all changes, revoke/disable automation identity as appropriate, activate leadership/security response. |
+| Sev 1 | Multi-subscription outage, regional platform failure, state corruption, or active high-confidence compromise | Freeze applies, establish incident command, contain, preserve evidence, update stakeholders. |
+| Sev 2 | Single platform/workload outage, failed deployment with material partial state, or major cost anomaly | Stop dependent work, assign owner, diagnose with live evidence, publish recovery plan. |
+| Sev 3 | Degraded performance, non-blocking policy/monitoring failure, or low-confidence alert | Triage in normal operations window; track remediation. |
+| Sev 4 | Documentation, cosmetic drift, or accepted advisory | Backlog with owner and review date. |
 
-| Resource | Name / pattern |
-|----------|----------------|
-| Platform LAW (ops, management sub) | `law-platform-globaris-poc` |
-| Security LAW (Sentinel/SecOps, security sub) | `law-security-globaris-poc` |
-| Platform action group (management sub) | `ag-platform-globaris-poc` |
-| Sentinel scheduled rules | `ar-<rule-key>-globaris-poc` |
-| Sentinel MDC incident rule | `ar-mdc-high-globaris-poc` |
-| MDC continuous export automation | `automation-mdc-export-globaris-poc` |
-| Live Sentinel connector | `dc-mdc-globaris-poc` (subscription-scoped Defender for Cloud) |
-| Per-sub budgets / exports | `budget-sub-<sub>-globaris` / `export-daily-<sub>-globaris` |
-| MG budgets | `budget-mg-{globaris,platform,landingzones}-globaris` |
-| Cost anomaly alert | `anomaly-alert-management-globaris` |
-| DR spoke | corp-a2, centralus, `10.11.0.0/16`, RSV GeoRedundant |
+### 1.3 First five minutes of any incident
 
----
+1. Record UTC start time, reporter, affected subscription/root, and the last known good commit/run.
+2. Stop new applies and overlapping deployment/teardown runs.
+3. Determine whether the issue is Azure service health, identity/authentication, network, policy, quota,
+   application, Terraform state, or cost.
+4. Preserve logs and the exact error before retrying or changing anything.
+5. Decide whether containment is safer than continued availability.
+6. Name an incident owner and a communications owner for Sev 0-2.
 
-## Runbook A - DR failover drill (primary eastus2 -> secondary centralus)
+## 2. Regional failure and failover assessment
 
-### A.0 Scope and honesty note
+### 2.1 What the POC can and cannot fail over
 
-This drill exercises **topology-level failover**: the ability of the secondary region (centralus) to stand up a
-corp workload path when the primary region (eastus2) is degraded. It uses the hub-to-hub Global VNet Peering,
-the secondary hub's Azure Firewall Premium, the standby **corp-a2** spoke, and the corp-a2 Recovery Services
-Vault.
+Central US is primary and East US 2 is secondary/DR.
 
-**Be explicit about what is and is not live:** corp-a2 is the **cold-standby DR landing zone**. Its App Service
-and Azure SQL **workload tiers are gated off** (`enable_app_service = false`, `enable_sql = false`) because the
-landingzones subscription offer-caps dedicated App Service compute and disables Azure SQL provisioning in these
-regions (ADR-031 / ADR-032). So there is **no running application or database to fail over** in the current
-estate. This drill therefore validates the DR *topology and readiness*, not an application cutover. Where a step
-would act on the App Service / SQL tier, it is marked **[GATED - workload tier off]** with the action that would
-run once the tier is enabled.
+| Capability | Available in secondary | Failover reality |
+| --- | --- | --- |
+| Hub network | Secondary VNet and Firewall Premium | Regional network path exists and was live-verified. |
+| Corporate network | `corp-a2` VNet and GRS Recovery Services vault | Cold network/backup pattern; no replicated application was proven. |
+| Corporate SQL/App Service | No | Those tiers were gated off; there is nothing to fail over. |
+| Online workload | No secondary Application Gateway/Static Web App root | No regional application failover. |
+| Banking AKS/APIM/messaging | No secondary platform instances | Single-region POC; production DR is design-only. |
+| Banking data/AI | No secondary service instances | ZRS protects within region; it is not regional DR. |
+| Private DNS | Central zones linked across estate VNets | Zone data is global, but service endpoints still depend on target resources. |
 
-### A.1 RTO / RPO targets (POC, from ARCHITECTURE.md)
+Do not call this “active-active application DR.” The proven result is dual-region network topology and a
+recovery foundation.
 
-| Target | RTO | RPO | Mechanism |
-|--------|-----|-----|-----------|
-| Hub network connectivity | 30 min | N/A | Global VNet Peering between hubs; secondary Firewall Premium active |
-| Private DNS resolution | Near-zero | N/A | Zones linked to both hubs; secondary resolves via primary resolver |
-| SQL (corp-a1 -> corp-a2) | 1 h | 5 min | Active geo-replication **[GATED - SQL tier off]** |
-| App Service (corp-a1 -> corp-a2) | 30 min | Near-zero | Manual cutover, pre-warmed corp-a2 **[GATED - App Service tier off]** |
-| Spoke VM replication | 4 h | 15 min | ASR to corp-a2 RSV **[no IaaS VMs deployed]** |
+### 2.2 Failover decision process
 
-These are demonstration targets, not contractual SLAs.
+1. **Confirm the event.** Check Azure Service Health, Resource Health, AMBA alerts, and the platform/security
+   workspaces. Distinguish a regional outage from a single resource, identity, or routing defect.
+2. **Freeze platform changes.** Do not run a connectivity apply during an unconfirmed regional incident.
+3. **Assess primary dependencies.** Check the Central US hub firewall, peerings, route tables, AKS, APIM,
+   messaging, Databricks, Foundry, Search, and platform Log Analytics.
+4. **Validate the secondary foundation.** Confirm the East US 2 hub firewall is `Succeeded`, peering is
+   `Connected`, `corp-a2` routes to `10.1.0.4`, and its vault is accessible.
+5. **Classify recoverability.** For network-only workloads, recovery may mean deploying a replacement workload
+   into `corp-a2`. For banking platforms, invoke the production DR design process; the POC has no automatic
+   replica to promote.
+6. **Make the business decision.** Compare expected primary recovery time with the time and data risk of
+   building/restoring in East US 2.
+7. **Communicate the limitation.** State which service is restored, reconstructed, degraded, or unavailable.
 
-### A.2 Pre-drill checklist
+### 2.3 Corporate recovery drill
 
-1. Confirm both hubs are healthy: `plan` on `platform/connectivity` (`action = plan`, `target =
-   platform/connectivity`) - expect **No changes** (zero drift is the QA baseline).
-2. Confirm the DR spoke exists: `plan` on `landing-zones/corp-a2` - expect no destroys.
-3. Confirm the corp-a2 RSV is present and GeoRedundant (portal: `rg-corp-a2-*` -> Recovery Services Vault ->
-   Backup Infrastructure).
-4. Announce the drill window and confirm no real change freeze conflicts.
+This drill validates the foundation without claiming data/application failover:
 
-### A.3 Failover procedure
+1. Confirm both regional hub/firewall resources are healthy.
+2. Confirm hub-to-hub and hub-to-spoke peerings are `Connected`.
+3. Confirm `corp-a2` has a `0.0.0.0/0` route to `10.1.0.4`.
+4. Confirm the private DNS zones are linked to the secondary hub and `corp-a2` VNet.
+5. Confirm the `corp-a2` Recovery Services vault is GeoRedundant with cross-region restore enabled.
+6. Deploy a disposable test workload only through an approved Terraform change, then validate DNS and egress.
+7. Remove the test through Terraform and record timing, failures, and evidence.
 
-**Step 1 - Declare the primary region impaired (drill trigger).** Record the start time. In a real event this
-is an Azure Service Health regional advisory on eastus2.
+Target for the network/recovery foundation: 30 minutes to validate the secondary path. Workload RTO/RPO is not
+measurable until a real protected workload and restore procedure exist.
 
-**Step 2 - Verify the DR network path is live.** The secondary hub firewall and hub-to-hub peering are always
-on (not standby-provisioned), so the DR path exists before any action:
-- Confirm the hub-to-hub peering `vnet-hub-primary-...-to-vnet-hub-secondary-...` (and reverse) is `Connected`.
-- Confirm the secondary hub Azure Firewall Premium is `Succeeded` / running in centralus.
-- Confirm corp-a2 spoke peering `peer-corp-a2-to-secondary-hub` is `Connected`.
-Result: east-west and egress for corp-a2 route through the centralus Firewall independently of eastus2.
+### 2.4 Failback
 
-**Step 3 - Confirm DNS resolves in the DR region.** From a host in corp-a2 (or via the DNS Private Resolver),
-resolve a `privatelink.*` PaaS name and confirm it returns the private IP. The private DNS zones are linked to
-both hubs, so resolution does not depend on eastus2. (The DNS Private Resolver itself lives in the primary hub;
-secondary queries traverse the hub peering to reach it - if the primary hub network is fully down, add a
-resolver to the secondary hub as the documented gap, see A.5.)
+1. Confirm Azure Service Health and all Central US platform dependencies are stable.
+2. Plan the primary root and inspect for drift; do not apply merely to “make it healthy.”
+3. Reconcile any data created in the recovery environment through an application-owned process.
+4. Restore traffic only after health, security, data consistency, and monitoring checks pass.
+5. Remove temporary recovery resources through Terraform.
+6. Write a post-incident report with actual RTO/RPO and architecture follow-ups.
 
-**Step 4 - Fail over the data tier. [GATED - SQL tier off]** When `enable_sql = true`: fail over the
-active-geo-replicated SQL to the corp-a2 secondary (portal: SQL server -> Failover, or `az sql failover-group
-set-primary`). Confirm the corp-a2 replica is now the read-write primary. **Today:** no SQL exists; record the
-step as not-applicable and note the RTO/RPO target that would apply.
+## 3. Security incident triage
 
-**Step 5 - Bring up / promote the app tier. [GATED - App Service tier off]** When `enable_app_service = true`:
-confirm the pre-warmed corp-a2 App Service is healthy and cut traffic over (Traffic Manager / Front Door
-endpoint priority, or DNS). **Today:** no App Service exists; record not-applicable.
+### 3.1 Sentinel incident
 
-**Step 6 - Spoke VM replication (if IaaS were present).** ASR enrollment targets the corp-a2 RSV
-(GeoRedundant). There are **no IaaS VMs** in the workload tiers, so there is nothing to trigger. The RSV is
-provisioned and ready to accept ASR replication when a VM tier is added.
+1. Open the incident in the Security subscription's Microsoft Sentinel workspace.
+2. Record alert name, severity, entities, tactics/techniques, creation time, and source connector.
+3. Verify the data source is live. A scheduled rule can exist even when its tenant connector is gated.
+4. Pivot to related identity, Azure Activity, resource, firewall, WAF, and Defender events.
+5. Establish whether the event is true positive, benign positive, expected test, or insufficient data.
+6. Contain using the owning service's procedure; no generic Logic App playbook was proven in this POC.
+7. Preserve evidence before deleting/rebuilding resources.
+8. Close with classification, impacted resources, actions, and a detection/control improvement.
 
-**Step 7 - Validate the DR posture.** Confirm from the DR region: network egress works through the centralus
-firewall, DNS resolves privately, and (when un-gated) the app answers and the DB is writable. Record the
-achieved timings against A.1.
+Useful starting queries:
 
-### A.4 Failback
+```kusto
+SecurityAlert
+| where TimeGenerated > ago(24h)
+| summarize Alerts = count() by AlertSeverity, AlertName
+| order by Alerts desc
+```
 
-1. Confirm eastus2 is healthy (`plan` on `platform/connectivity` clean).
-2. **[GATED]** Reverse the SQL failover group back to corp-a1; re-warm corp-a1 App Service; cut traffic back.
-3. Re-confirm both-hub peering `Connected` and DNS resolution from the primary region.
-4. Record failback time and close the drill.
+```kusto
+AzureActivity
+| where TimeGenerated > ago(4h)
+| where ActivityStatusValue !in ("Success", "Succeeded")
+| project TimeGenerated, SubscriptionId, ResourceGroup, OperationNameValue,
+          ActivityStatusValue, Caller, CorrelationId
+| order by TimeGenerated desc
+```
 
-### A.5 Known DR gaps to disclose in the drill report
+Use `SigninLogs` only after confirming the Entra connector/diagnostic source is enabled for the current
+deployment.
 
-- corp-a2 workload tiers (App Service + SQL) are gated off - this is a *readiness* drill, not an app cutover
-  (ADR-031/032).
-- The DNS Private Resolver is primary-hub-only; a full primary-region outage would need a resolver added to the
-  secondary hub (documented cost trade-off, ARCHITECTURE.md).
-- No IaaS VMs, so ASR replication is provisioned-but-unused.
-- centralus has no VPN Gateway (primary-only, cost); secondary uses the primary VPN via hub peering and
-  gateway transit.
+### 3.2 Defender for Cloud alert
 
----
+1. Confirm the affected subscription. The proven Standard plan set was limited to the Security subscription.
+2. Open the recommendation/alert and record the plan, resource, attack path, severity, and evidence.
+3. Validate the resource still exists and is in Terraform state.
+4. Determine whether the control is preventive, detective, or an Advisor recommendation.
+5. Contain the resource without bypassing Terraform ownership unless active compromise requires emergency
+   action. If emergency portal action is taken, record it and reconcile in code afterward.
+6. Re-query the alert and secure-score state after the documented convergence period.
 
-## Runbook B - Incident triage (Sentinel incident + Defender for Cloud alert)
+### 3.3 Identity compromise
 
-### B.0 Where the signals live
+1. Disable or revoke the affected user/service principal session as appropriate.
+2. For CI identity compromise, pause workflows and remove/disable federated credentials before changing Azure
+   resources.
+3. Enumerate role assignments at Tenant Root, `globaris`, platform child groups, and subscriptions.
+4. Compare to ADR-021 and the live drift register; pay special attention to Owner/User Access Administrator.
+5. Review GitHub workflow runs, commits, environment jobs, Azure Activity and directory audit events.
+6. Rotate or replace any non-OIDC secrets exposed through workload configuration.
+7. Restore the minimum role set and re-enable automation only after a clean plan and independent review.
 
-- **Microsoft Sentinel** is onboarded to the **security LAW** (`law-security-globaris-poc`) in the security
-  subscription. This is the SecOps workspace.
-- **Platform LAW** (`law-platform-globaris-poc`) in the management subscription is the operations workspace and
-  holds Azure Firewall diagnostics + spoke VNet flow logs + Automation diagnostics. Cross-workspace query
-  between the two is proven.
-- **Defender for Cloud** alerts flow into Sentinel via the `dc-mdc-globaris-poc` connector and surface as
-  incidents through the `ar-mdc-high-globaris-poc` MS-security-incident rule (High severity).
-- **Analytics rules** (9 scheduled live + the MDC incident rule) are named `ar-<key>-globaris-poc`. Live
-  scheduled rules: `brute_force_entra`, `blocked_country_signin`, `legacy_auth_attempt`, `kv_bulk_secret_access`,
-  `pim_after_hours_activation`, `mass_resource_deletion`, `anonymous_storage_access`, `new_global_admin`,
-  `mfa_disabled_for_admin`. (`firewall_threat_intel_hit` is gated off - ADR-034.)
-- **Automation rules:** `auto_assign` (assigns new incidents to the SecOps owner group, if configured) and
-  `ti_enrichment_tag` (labels High-severity incidents `TI-enrichment-needed`).
-- **Notifications:** the platform action group `ag-platform-globaris-poc` (email receivers) is the routing
-  target for budget/monitor alerts. Sentinel incident assignment is handled by the `auto_assign` automation
-  rule.
+## 4. Platform and workload triage
 
-**Honesty note:** with the synthetic signal generator deferred (ADR-036/037) and the tenant-scoped connectors
-gated off (dc-aad, dc-ti, dc-mde, UEBA - ADR-033/034), there is **no live Entra SigninLogs / TI feed** and **no
-manufactured incidents** in the current estate. Identity-sourced rules (e.g. `brute_force_entra`,
-`blocked_country_signin`) will not fire until dc-aad is enabled. This runbook is written for when signals are
-present (persistent environment or after the connector grant).
+### 4.1 Network path failure
 
-### B.1 Triage a Sentinel incident
+Check in this order:
 
-1. **Pick up the incident.** Sentinel -> Incidents (on `law-security-globaris-poc`). If `auto_assign` is
-   configured, new incidents are already assigned to the SecOps owner group; otherwise assign yourself.
-2. **Read the rule context.** The incident title maps to an `ar-<key>-globaris-poc` rule. Open the rule to see
-   its MITRE tactics/techniques and KQL. Example: `ar-brute_force_entra-globaris-poc` = >= 10 failed
-   interactive sign-ins for one UPN in 5 min (CredentialAccess / T1110).
-3. **Investigate entities.** Use the incident's mapped Account entity (most rules map a `FullName` account from
-   a UPN, caller, or app id). Pivot on the entity in the investigation graph.
-4. **Check watchlists.** If a `VIPUsers` or `HighValueAssets` watchlist is populated, confirm whether the entity
-   is high-value (elevate severity/priority accordingly).
-5. **Cross-workspace corroboration.** For network-adjacent incidents, query the platform LAW for Firewall /
-   flow-log context: `workspace('law-platform-globaris-poc').AzureDiagnostics | where Category startswith
-   "AzureFirewall"`.
-6. **Classify and act.** Confirm true/false positive. For a confirmed identity compromise: disable the account,
-   revoke sessions, and (path) flip the relevant CA policy from report-only to enforce once break-glass is in
-   place (SECURITY.md section 5). For confirmed exfiltration: isolate the storage/KV resource.
-7. **Close the incident** with a classification (TruePositive / BenignPositive / FalsePositive) and a reason;
-   tune the rule threshold in `sentinel/tuning.md` if it was noise.
+1. Service Health and regional network status.
+2. Hub and spoke peering state.
+3. Spoke route table and expected next hop (`10.0.0.4` primary or `10.1.0.4` secondary).
+4. Firewall provisioning state, policy, rule collection group, and diagnostics.
+5. NSG effective rules.
+6. Private DNS zone link and A record.
+7. Private endpoint connection approval/state.
+8. Target service network/public-access configuration.
 
-### B.2 Triage a Defender for Cloud alert
+Do not “fix” a blackholed route by deleting the UDR. The route/firewall pair is one architectural unit and
+must change through Terraform with dependent services assessed.
 
-1. **Source.** High-severity MDC alerts auto-create Sentinel incidents via `ar-mdc-high-globaris-poc`. You can
-   also work them directly in Defender for Cloud -> Security alerts on the security subscription.
-2. **Read the recommendation / attack path.** With Defender CSPM (CloudPosture plan) enabled, use the attack-path
-   and asset-graph view to see blast radius.
-3. **Continuous export context.** Alerts + assessments are streamed by `automation-mdc-export-globaris-poc` to
-   both the security LAW and the MDC Event Hub (`evh-mdc-export`) for any downstream SIEM.
-4. **Remediate.** Apply the Defender recommendation (e.g. enable a missing control). Regulatory compliance is
-   audit-only (`enforce = false`), so remediation is operator-driven, not automatic.
-5. **Correlate to compliance.** Check whether the alert maps to a NIST SP 800-53 R5 or CIS Azure 2.0.0 control
-   in the regulatory-compliance dashboard; record the control if it affects posture reporting.
+### 4.2 AKS unavailable
 
-### B.3 Escalation and notification
+1. Confirm the cluster and node resource group exist and the control plane reports `Succeeded`.
+2. Check private API DNS resolution from the intended network.
+3. Confirm firewall egress rules required for AKS bootstrap are live.
+4. Confirm the three-node system pool and VMSS power/provisioning state.
+5. Check identity, ACR private endpoint/DNS, and the kubelet `AcrPull` assignment.
+6. Review Container Insights only after verifying its diagnostic/agent configuration.
+7. Stop before recreating the cluster; unexpected replacement is a plan-scan stop condition.
 
-- Monitor/budget alerts route to `ag-platform-globaris-poc` (email). Extend this action group with additional
-  receivers (SMS, webhook, ITSM) for a persistent environment.
-- Sentinel incident ownership is set by the `auto_assign` automation rule; configure
-  `sentinel_owner_group_object_id` to activate it.
+### 4.3 APIM unavailable or unhealthy
 
----
+1. Check APIM provisioning and dependency-network status.
+2. Validate its subnet, route table, service endpoints and firewall egress rule collection group.
+3. Confirm private DNS for the scoped gateway name.
+4. Do not cancel a long create before the provider timeout; an interrupted APIM create can leave a soft-deleted
+   instance that blocks the same name in the next rebuild.
+5. Purge a soft-deleted instance only through the documented preflight procedure.
 
-## Runbook C - Cost-spike response (budget breach -> investigate -> remediate)
+### 4.4 Data/AI platform failure
 
-### C.0 The FinOps signals in the estate
+1. Validate private endpoint status and both private DNS resolution and service health.
+2. For Databricks, distinguish workspace control plane, managed resource group, network intent policies, and
+   compute (the POC did not create clusters/jobs).
+3. For ADLS, validate blob and dfs endpoints separately.
+4. For Foundry/Search, confirm public access remains disabled and the request originates on an approved path.
+5. For Fabric, determine whether capacity is intentionally suspended before treating it as an outage.
 
-- **Budgets** at three MG scopes (`budget-mg-globaris-*`, `budget-mg-platform-*`, `budget-mg-landingzones-*`)
-  and per subscription (`budget-sub-<sub>-globaris`), each with alert thresholds at 50/75/90/100%, emailing the
-  configured FinOps contacts.
-- **Cost anomaly alert** `anomaly-alert-management-globaris` (management subscription scope) - fires on an
-  anomalous cost pattern independent of the fixed budget thresholds.
-- **Daily cost exports** `export-daily-<sub>-globaris` writing FOCUS-aligned data to the cost-exports storage
-  account (management sub, `rg-finops-*`), one root folder per subscription.
-- **Tag governance** initiative at MG scope (Modify + audit) so cost is attributable by `CostCenter`, `Owner`,
-  `Workload`, `BusinessUnit`.
-- **Carbon Optimization workbook** (placeholder JSON - replace before a live demo).
+## 5. Failed Terraform apply and state recovery
 
-### C.1 On a budget breach alert
+### 5.1 Classification
 
-**Step 1 - Read the alert.** Identify which budget fired (`budget-sub-*` vs `budget-mg-*`) and which threshold
-(50/75/90/100%). A 100% breach on `budget-sub-landingzones-globaris` points at the workload subscription; an MG
-breach points at aggregate platform spend.
+| Failure class | Response |
+| --- | --- |
+| Authentication/authorization | Verify OIDC token refresh, ARM role, and Entra directory role. Do not retry until the missing boundary is identified. |
+| Policy Deny | Read the exact assignment and parameter; decide whether the resource is wrong or a scoped exemption is justified. |
+| Quota/offer cap | Do not loop retries. Gate, resize, move region/subscription, or obtain quota. |
+| `already exists`/import message on greenfield | Treat as soft-delete, orphan extension, or state/ownership failure; follow the class-specific runbook. |
+| Unexpected replacement/destroy | Stop; classify every instance before apply. |
+| State lock | Use the workflow's single-root `force-unlock` action after proving no writer is active. |
+| Long-running managed service | Allow its documented timeout; cancellation can make cleanup harder. |
 
-**Step 2 - Confirm it is real, not a false spike.** Cross-check with the `anomaly-alert-management-globaris`
-anomaly alert - a budget breach plus an anomaly alert together strongly indicates a genuine spend change.
+### 5.2 Current Sentinel 401 case
 
-**Step 3 - Investigate via cost exports / Cost Management.**
-- Open Cost Management for the flagged scope: group by Resource Group, then by Service, then by Resource, over
-  the alert window.
-- Or query the daily export in the cost-exports SA (`export-daily-<sub>-globaris` root folder) for the offending
-  subscription and sort by cost delta day-over-day.
-- Use tags (`Workload`, `Owner`, `CostCenter`) to attribute the spike to a team/workload. Untagged spend is a
-  governance smell (tag-governance Modify should backfill missing tags).
+The second rebuild attempt reached Step 3 and nine Sentinel scheduled-rule writes returned 401. Six hypotheses
+were disproved. The remaining check is whether the CI service principal still has Security Administrator in
+Entra. Do not restart from Step 1 before completing that read.
 
-**Step 4 - Identify the driver.** Common candidates in this estate:
-- A firewall / gateway SKU left running (VpnGw1AZ, Firewall Premium, an on-demand Bastion left up).
-- An un-gated workload tier if `enable_app_service` / `enable_sql` were flipped on.
-- Log ingestion growth into a LAW (PerGB2018) - check ingestion volume.
-- The Event Hub namespace auto-inflate on MDC export.
+### 5.3 Full restart rule
 
-**Step 5 - Apply the FinOps levers.**
-- **On-demand resources:** turn off the Bastion (`enable_bastion = false`) and any on-demand SKU when idle -
-  these are default-off by design (ADR-015).
-- **Gated tiers:** confirm `enable_app_service` / `enable_sql` are `false` if the corp workload tiers are not
-  intended to run (ADR-031/032).
-- **Right-size:** reduce LAW retention or the Event Hub throughput units; drop a SKU tier where the POC does not
-  need it.
-- **Tighten the budget / tags:** lower the offending budget amount to catch the pattern earlier; enforce missing
-  tags via the tag-governance initiative.
-- **DDoS Standard** stays off (default) - do not enable it as a cost reaction; it is a large fixed cost
-  (ADR-013).
+The current rebuild policy is: a failed full-estate attempt is torn down to independently verified greenfield,
+the cause is corrected, and the build restarts at Step 1. This prevents partially adopted state and hidden
+greenfield regressions. The policy is expensive late in a build, so preflight and plan-shape gates are the
+primary prevention mechanism.
 
-**Step 6 - Remediate through CI.** Any change to a SKU or gate is a Terraform change: edit the relevant var in
-`envs/poc.tfvars`, run `action = plan` on the affected root to confirm the delta, then `action = apply`
-(reviewer-gated) on that single target. Do not change infra outside the pipeline.
+## 6. Cost-spike response
 
-**Step 7 - Record and close.** Note the driver, the lever applied, and the projected monthly saving. If the
-spend was legitimate, adjust the budget baseline and update the README cost estimate (COST.md) so future alerts
-stay meaningful.
+### 6.1 Signals
 
-### C.2 Emergency spend brake
+- Five subscription budgets at $200 each.
+- Management-group budget at $600.
+- Alerts at 50, 75, 90 and 100 percent.
+- Cost exports, anomaly-notification plumbing and ownership/cost tags.
+- Azure Cost Management, Advisor and billing exports as independent views.
 
-If spend is runaway and a specific root is the driver, the fastest safe brake is to gate the offending tier off
-(flip its `enable_*` var to `false`) and `apply` that single root. There is no automatic stop-runbook wired in
-the current estate (the synthetic hard-budget kill-switch from Section 13 is not deployed - ADR-036). For a
-persistent environment, wire an action-group-triggered Automation runbook to deallocate/stop on a 100% breach.
+### 6.2 Response procedure
 
----
+1. Validate that the alert is current and identify subscription, resource group, meter, region and day-over-day
+   change.
+2. Compare against planned time-boxed resources: two Firewall Premium instances, Service Bus Premium, Fabric
+   F2, AKS nodes, APIM, Search, private endpoints and Log Analytics ingestion.
+3. Attribute using `Workload`, `Owner`, `CostCenter`, environment and resource-group boundaries.
+4. Check whether the spike is usage, an accidentally unsuspended service, a duplicate resource, data
+   ingestion, or a pricing/tier change.
+5. Select the least disruptive lever and record expected savings.
+6. Make the change through the owning root/workflow and validate both cost posture and architecture afterward.
 
-## Appendix - ADR index (operations-relevant)
+### 6.3 Containment levers
 
-| ADR | Relevance |
-|-----|-----------|
-| ADR-009 | Independent per-hub firewall policies (DR: each region self-contained) |
-| ADR-015 | On-demand Bastion, default off (cost lever) |
-| ADR-029 | Entra DS recovery; OIDC token-expiry on long applies (keep applies short) |
-| ADR-031 / ADR-032 | corp-a2 SQL + App Service tiers gated off (DR drill is topology-level) |
-| ADR-033 / ADR-034 | Sentinel connectors + firewall TI rule gated (triage has no live identity/TI feed) |
-| ADR-036 / ADR-037 | Synthetic signal generator deferred (no live incidents / no cost kill-switch) |
+Use roughly this order:
+
+1. Suspend Fabric F2 when validation is complete.
+2. Stop AKS when no workload test is running.
+3. Remove/disable unused banking platform gates through a reviewed plan.
+4. Reduce avoidable Log Analytics ingestion/retention only after security and compliance owners approve.
+5. Remove paid firewalls only as an architecture change: stop dependent AKS/APIM/Databricks paths and reconcile
+   routing/rules first. Never delete a firewall while spokes still route to its private IP.
+6. Run the verified full teardown when the POC window ends.
+
+Do not enable DDoS Network Protection, a VPN Gateway, DNS Resolver, or Bastion as an incident reaction; those
+are additive cost decisions.
+
+### 6.4 After-action review
+
+Record:
+
+- root cause and avoidability;
+- actual daily/monthly impact;
+- which alert fired and at what threshold;
+- time to ownership and containment;
+- lasting configuration/control change; and
+- whether budgets/forecasts need recalibration.
+
+## 7. Teardown and decommissioning
+
+Use `teardown.yml`. A full teardown contains policy disarm, Databricks/diagnostic pre-cascade, serialized root
+destroys, attachment cleanup, Azure remnant sweep, independent verification and state reset.
+
+Completion is not “Terraform destroy exited zero.” It is:
+
+- zero managed resource groups across all five subscriptions;
+- zero relevant soft-deleted workspaces;
+- only intended management groups remain;
+- zero subscription/MG extension objects in scope;
+- protected bootstrap resources remain unless final decommission was requested; and
+- eligible state blobs are canonical-empty.
+
+The 2026-08-03 teardown proved this state with zero managed RGs, zero soft-deleted Log Analytics workspaces,
+Tenant Root only, and 11 canonical-empty state blobs.
+
+## 8. Incident record template
+
+```text
+Incident:
+UTC start/end:
+Severity:
+Owner / communications owner:
+Affected subscriptions, roots and services:
+Last known good commit and workflow run:
+Customer/business impact:
+Detection source:
+Immediate containment:
+Evidence collected:
+Root cause:
+Recovery steps and validation:
+Actual RTO/RPO:
+Security/compliance impact:
+Cost impact:
+Follow-up owner and due date:
+ADR/OQ/runbook changes required:
+```
+
+## 9. References
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md)
+- [`SECURITY.md`](SECURITY.md)
+- [`COST.md`](COST.md)
+- [`DEPLOYMENT.md`](DEPLOYMENT.md)
+- [`docs/estate-bom.md`](docs/estate-bom.md)
+- [`docs/teardown-redesign.md`](docs/teardown-redesign.md)
+- [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md)
+- [`docs/worklog/2026-08-03.md`](docs/worklog/2026-08-03.md)

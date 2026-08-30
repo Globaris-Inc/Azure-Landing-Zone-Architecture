@@ -1,210 +1,341 @@
 # Architecture
 
-> **Status:** 🚧 Diagrams and detail populated incrementally as sections complete.
-> Sections referenced: PROMPT.md §1–13.
+This document describes the Azure architecture implemented by this repository and the complete estate that
+was live-verified on 2026-08-01. The estate is currently greenfield after a verified teardown; the deployed
+shape remains the regression baseline in [`docs/estate-bom.md`](docs/estate-bom.md).
 
----
+## 1. Architecture principles
 
-## Management Group Hierarchy
+1. **Platform and workload separation.** Connectivity, identity, management, and security have dedicated
+   subscriptions; workload spokes share a Landing Zones subscription for POC cost and quota reasons.
+2. **Policy inheritance over per-resource convention.** Management groups provide the control boundary for
+   policy, monitoring, security posture, and subscription placement.
+3. **Private-by-default workload networking.** Workload spokes route through regional firewalls; private
+   endpoints and central private DNS are used where the selected service and POC gate permit them.
+4. **Infrastructure as code is the control plane.** Terraform composition roots, pinned AVM modules, remote
+   state, plan review, and GitHub Actions OIDC replace portal-built infrastructure.
+5. **POC and production targets are explicitly different.** Expensive, quota-constrained, tenant-gated, or
+   operationally immature features are flag-gated or design-only and recorded as such.
+6. **Deletion and recovery are designed capabilities.** Teardown, soft-delete handling, cross-root
+   attachments, and state reset are part of the architecture.
 
-<!-- Populated: Section 2 -->
+## 2. Evidence states
 
-```mermaid
-graph TD
-    TR[Tenant Root]
-    TR --> C[Globaris]
-    C --> P[Platform]
-    C --> LZ[Landing Zones]
-    C --> D[Decommissioned]
-    C --> SB[Sandbox]
-    P --> SEC[Security]
-    P --> MGMT[Management]
-    P --> ID[Identity]
-    P --> CONN[Connectivity]
-    LZ --> CORP[Corp]
-    LZ --> ONL[Online]
-```
+| State | Architectural interpretation |
+| --- | --- |
+| Repository capability | The code can create the roots and feature-gated resources documented here. |
+| Proven deployment | The 2026-08-01 BOM is the authoritative live snapshot: 404 top-level ARM resources, 30 comparable resource groups, 12 management groups including Tenant Root, and 8 connected peerings. |
+| Current Azure state | Verified greenfield after run `30785098012`; the bootstrap backend remains and the managed root states are canonical-empty. |
 
----
+This distinction prevents a destroyed POC from being described as “currently deployed” while preserving the
+fact that the architecture was built and verified.
 
-## Hub & Spoke Network Topology
-
-<!-- Populated: Sections 3, 8, 9 -->
-
-```mermaid
-graph LR
-    subgraph eastus2 [Primary — eastus2]
-        HUB1[Hub VNet 10.0.0.0/16\nAzure Firewall Premium IDPS\nVPN GW VpnGw1AZ\nDNS Private Resolver]
-        CA1[corp-a1 10.10.0.0/16\nApp Service + SQL\nPrivate Endpoints]
-        OP1[online-p1 10.20.0.0/16\nApp Gateway WAF v2\nStatic Web App]
-    end
-    subgraph centralus [DR — centralus]
-        HUB2[Hub VNet 10.1.0.0/16\nAzure Firewall Premium IDPS\nno VPN GW — uses primary via peering]
-        CA2[corp-a2 10.11.0.0/16\nApp Service + SQL\nRecovery Services Vault]
-    end
-    subgraph dns [Connectivity sub — DNS]
-        PDNS[Private DNS Zones\nrg-dns-globaris-poc\nAll privatelink.* zones]
-    end
-
-    CA1 <-->|VNet Peering + UDR| HUB1
-    CA2 <-->|VNet Peering + UDR| HUB2
-    HUB1 <-->|Global VNet Peering| HUB2
-    OP1 <-->|VNet Peering| HUB1
-    HUB1 --- PDNS
-    HUB2 --- PDNS
-```
-
----
-
-## Zero Trust Pillar Mapping
-
-<!-- Populated: Section 5 -->
-
-| Pillar | Control | Implementation |
-|--------|---------|----------------|
-| Identity | MFA for all admins | Conditional Access policy |
-| Identity | No legacy auth | CA block policy |
-| Identity | PIM for privileged roles | eligible-only, 8h max |
-| Devices | Compliant device required | CA — Azure portal + mgmt API |
-| Network | Private Endpoints only | Azure Policy Deny on Landing Zones MG |
-| Network | Firewall inspection | Azure Firewall Premium TLS inspection |
-| Data | CMK on state storage | Customer-managed key on SA |
-| Applications | WAF in front of online workloads | App Gateway WAF v2 |
-| Infrastructure | JIT VM access | Defender for Cloud JIT |
-
----
-
-## DR / Business Continuity
-
-<!-- Populated: Section 3 -->
-
-### RTO / RPO Targets
-
-| Target | RTO | RPO | Mechanism | Status |
-|--------|-----|-----|-----------|--------|
-| Synthetic workload VMs (corp-a1) | 4 hours | 15 min | Azure Site Recovery — RSV in corp-a2 | RSV deployed; ASR enrollment in Section 13 |
-| SQL Database (corp-a1 → corp-a2) | 1 hour | 5 min | Active Geo-Replication via `creation_source_database_id` | Deferred to Section 12 (both servers must exist first) |
-| App Service (corp-a1 → corp-a2) | 30 min | Near-zero | Manual traffic manager cutover; corp-a2 App Service pre-warmed | corp-a2 App Service deployed |
-| FinOps archive data | Near-zero | Near-zero | GZRS storage account (finops SA) | GZRS enabled Section 3 |
-| Hub network connectivity | 30 min | N/A | Global VNet Peering between hubs; secondary Firewall active | Both hubs peered Section 3 |
-| Private DNS resolution | Near-zero | N/A | DNS zones linked to both hub VNets | Section 4 complete |
-
-> RTO/RPO values are POC targets for demo purposes; they are not contractual SLAs.
-> Values assume Azure regional infrastructure is available in the DR region.
-
-### DR Topology
-
-- **Primary** (eastus2): Hub VNet + Firewall Premium + VPN Gateway (VpnGw1AZ) + DNS Resolver
-- **Secondary** (centralus): Hub VNet + Firewall Premium only — no VPN GW (cost reduction for POC)
-- **Hub-to-hub transit**: Global VNet Peering; `allow_gateway_transit = true` on primary side — secondary can use primary VPN GW if needed
-- **Firewall policy**: Independent Premium policies in each hub (shared parent policy deferred — see DECISIONS.md ADR-009)
-- **Spoke VNets**: All traffic forced through regional Firewall via UDR default route (`0.0.0.0/0 → VirtualAppliance`)
-
----
-
-## Private DNS Zone Architecture
-
-<!-- Populated: Section 4 -->
-
-- All `privatelink.*` zones hosted in Connectivity subscription
-- Zones linked to every hub VNet and spoke VNet
-- DNS Private Resolver in each hub forwards to Azure DNS and receives on-premises queries
-- No public DNS resolution for PaaS resources in `Corp` landing zone
-
----
-
-## Defender for Cloud + Sentinel
-
-<!-- Populated: Section 6 -->
+## 3. Management-group and subscription topology
 
 ```mermaid
-graph LR
-    D[Defender for Cloud]
-    A[Azure Activity]
-    E[Entra ID Sign-in/Audit]
-    FW[Azure Firewall Logs]
-    NS[NSG Flow Logs]
-    D -->|Continuous Export| SEC_LA[Security LA Workspace]
-    A --> SEC_LA
-    E --> SEC_LA
-    FW --> SEC_LA
-    NS --> SEC_LA
-    SEC_LA --> S[Microsoft Sentinel]
-    S --> AR[Analytics Rules\n8–12 high-value]
-    S --> WB[Workbooks]
-    S --> PB[Playbooks\nauto-assign / isolate VM]
+flowchart TD
+    TR[Tenant Root Group]
+    G[globaris]
+    P[platform]
+    LZ[landingzones]
+    CON[connectivity]
+    ID[identity]
+    MGT[management]
+    SEC[security]
+    CORP[corp]
+    ONLINE[online]
+    DECOM[decommissioned]
+    SBX[sandbox]
+
+    TR --> G
+    G --> P
+    G --> LZ
+    G --> DECOM
+    G --> SBX
+    P --> CON
+    P --> ID
+    P --> MGT
+    P --> SEC
+    LZ --> CORP
+    LZ --> ONLINE
+
+    CON --> SCON[Connectivity subscription]
+    ID --> SID[Identity subscription]
+    MGT --> SMGT[Management subscription]
+    SEC --> SSEC[Security subscription]
+    CORP --> SLZ[Landing Zones subscription]
 ```
 
----
+The August 1 live verification found:
 
-## Architectural Decision Records
+- 12 management groups including Tenant Root;
+- 147 policy assignments directly at management-group scopes;
+- 6 additional subscription-scope assignments;
+- 292 custom policy definitions and 59 custom initiatives at `globaris`; and
+- 29 RBAC assignments directly at `globaris`, including two known Owner assignments tracked as privilege debt.
 
-<!-- See DECISIONS.md for full ADR text. Listed here for quick reference. -->
+All five workload spokes are hosted in the single Landing Zones subscription. Because a subscription can have
+only one management-group parent, it sits under `corp`. The `online` management group proves the archetype
+shape but does not govern a separate subscription in this POC.
 
-| ADR | Title | Date | Status |
-|-----|-------|------|--------|
-| ADR-001 | Repo root is the working directory, not a nested alz-poc/ subfolder | 2026-05-04 | Accepted |
+## 4. Regional and network topology
 
----
+Central US is primary; East US 2 is secondary/DR. ADR-069 reversed the original suggestion after multiple
+East US 2 capacity constraints affected AI Search, Fabric, compute, SQL, and App Service choices.
 
-## ALZ Reference Architecture Fidelity Map
+```mermaid
+flowchart LR
+    subgraph CUS[Central US - primary]
+        HP[Primary hub\n10.0.0.0/16\nFirewall Premium 10.0.0.4]
+        IDV[Identity VNet\n10.2.0.0/24\nEntra Domain Services]
+        CA1[corp-a1\n10.10.0.0/16]
+        ONL[online-p1\n10.20.0.0/16\nApp Gateway WAF_v2]
+        BAPP[bank-app-p1\n10.30.0.0/16\nAKS / APIM / messaging]
+        BDATA[bank-data-p1\n10.32.0.0/16\nData / AI]
+    end
 
-<!-- Gap analysis: this repo vs the Microsoft "Azure landing zone (ALZ) – Hub & Spoke"
-     reference diagram, version 2026-04-02. Author: architect gap-analysis, 2026-06-25.
-     Legend: ✅ Built · ⚠️ Deviation (by-design, see ADR) · ❌ Gap (not built) · ➖ N/A for POC -->
+    subgraph EUS2[East US 2 - secondary / DR]
+        HS[Secondary hub\n10.1.0.0/16\nFirewall Premium 10.1.0.4]
+        CA2[corp-a2\n10.11.0.0/16]
+    end
 
-Compared against the Microsoft **ALZ Hub & Spoke** reference (diagram version **2026-04-02**). This is
-the *platform* landing zone; the diagram's application-workload internals are out of scope by design.
+    PDNS[Central private DNS\n89 zones in Connectivity subscription]
 
-| # | Reference element | Status | Where / note |
-|---|-------------------|--------|--------------|
-| C | MG hierarchy (Platform / Landing Zones / Decommissioned / Sandbox) | ✅ | `platform/management-groups` — `avm-ptn-alz` 0.19.1, custom *Globaris* root (ADR-007) |
-| — | Platform **Security** sub — Sentinel + Defender + security LAW | ✅ | `platform/security/{sentinel,defender,diagnostics}.tf` — 7 Defender plans, 10 analytics rules |
-| D | Platform **Management** sub — platform LAW, dashboards, Automation, Update Manager | ✅ ⚠️ | `platform/management` — dashboard workbook JSON is a **placeholder** (replace before demo) |
-| E | **Connectivity** sub — hub VNet, Firewall Premium (IDPS), VPN GW, DNS Private Resolver | ✅ | `platform/connectivity` — `avm-ptn-alz-connectivity-hub-and-spoke-vnet` 0.17.1 |
-| E | — Azure **DDoS Protection** plan | ❌ | Not deployed (cost ~$3k/mo) — POC deviation; flag if faithful posture required |
-| E | — **ExpressRoute** circuits / gateway | ⚠️ | `express_route = false` — no on-premises in POC |
-| E | — Azure **Bastion** | ✅ | **On-demand** in the primary hub via `var.enable_bastion` (Standard SKU, **default off** = $0 idle; ~+$140/mo while up). Secondary hub stays `bastion = false`. Closed Wave 1 / ADR-015 (G6) |
-| B | IAM — MFA, PIM, Conditional Access | ✅ | `platform/identity` — 8 CA policies (report-only), PIM eligible at MG scope |
-| B | — Approval workflow / access reviews | ⚠️ | PIM activation only; access-review + approval-flow not modelled |
-| — | **Identity** sub — DCs (DC1–3) *or* Entra Domain Services + identity VNet + RSV | ✅ | **`identity_mode = "entra-ds"`** (ADR-010, supersedes OQ-002) — `platform/identity/{identity-network,domain-services}.tf`: identity VNet (`avm-res-network-virtualnetwork` 0.17.1) + Entra DS subnet/NSG, native `azurerm_active_directory_domain_service` (Standard), RSV (`avm-res-recoveryservices-vault` 1.1.3), peered to primary hub. Closed Wave 3 (G1) |
-| F | Landing-zone spokes — VNet, Key Vault, Storage, LAW, private endpoints | ✅ | `landing-zones/{corp-a1,corp-a2,online-p1}` |
-| F | — Backup / Site Recovery vault | ✅ | corp-a2 RSV (GeoRedundant, AVM module) ✅; corp-a1 RSV (ZoneRedundant, `avm-res-recoveryservices-vault` 1.1.3) ✅ — closed Wave 2 / ADR-012 |
-| F | Separate **Online** LZ subscription (multi-sub A-series) | ⚠️ | Online MG exists; `online-p1` deploys into the **shared** LZ sub (ADR-003) |
-| H | **Sandbox** subscription (separate) | ⚠️ | Sandbox MG exists but empty; collapsed into LZ sub (ADR-003) |
-| G | **Compliant VM template** — gallery, in-guest DSC, backup policy, extensions, tagging | ❌ | No golden-image / guest-configuration construct anywhere in the repo |
-| I | DevOps — Git, pipelines, policy + role definitions | ✅ ⚠️ | `.github/workflows`, `policies/` — Section 10b/c (pre-commit, drift, OPA, PSRule) deferred |
-| A | EA / MCA billing hierarchy | ➖ | Billing construct, not IaC |
-| — | On-premises AD / hybrid bridge | ➖ | No on-premises in POC |
+    HP <-->|Global VNet peering| HS
+    HP <-->|Peering| IDV
+    HP <-->|Peering + UDR| CA1
+    HP <-->|Peering + UDR| ONL
+    HP <-->|Peering + UDR| BAPP
+    HP <-->|Peering + UDR| BDATA
+    HS <-->|Peering + UDR| CA2
+    PDNS --- HP
+    PDNS --- HS
+```
 
-### Gap checklist (decisions made 2026-06-25 — see ADR-010…016 + `docs/gap-closure-plan.md`)
+### 4.1 Proven network properties
 
-- [x] **G1 — Identity subscription domain services** — **CLOSED / Wave 3** (2026-06-28). **Microsoft Entra
-  Domain Services** (`identity_mode = "entra-ds"`, Standard, ~$110/mo) + identity VNet (NSG) + RSV, peered
-  to primary hub. ADR-010 (supersedes OQ-002 → `entra-ds`). Native `azurerm_active_directory_domain_service`
-  (no AVM module). One-time manual tenant pre-step (DS SP + `AAD DC Administrators` group) documented in
-  `platform/identity/README.md`. `terraform validate` clean.
-- [ ] **G2 — Compliant VM template (design area G)** — **CLOSE / Wave 4**. Azure Compute Gallery + image
-  definition (`avm-res-compute-gallery` 0.2.0) + built-in machineConfiguration baseline Guest-Config
-  initiative + backup policy (reuse G4 RSV) + tag enforcement (reuse ADR-008). ADR-011.
-- [ ] **G3 — DDoS Protection plan** — **CONDITIONAL / Wave 5**. Built behind `var.enable_ddos_protection`
-  (`avm-res-network-ddosprotectionplan` 0.3.0), **default false** (~$2,944/mo if enabled). ADR-013; user
-  decides default via **OQ-009**.
-- [x] **G4 — corp-a1 backup vault** — **CLOSED / Wave 2 (2026-06-25)**. RSV in corp-a1
-  (`landing-zones/corp-a1/backup.tf`), same module/pin (1.1.3) as corp-a2, ZoneRedundant. ADR-012.
-- [ ] **G5 — Separate Sandbox / Online subscriptions** — **CONDITIONAL / Wave 5**. Recommend **keep
-  collapsed (deviation)** — it's a subscription-*count* gap, not a capability gap (MG nodes + policy
-  inheritance already present). ADR-014; user may override via **OQ-010**.
-- [x] **G6 — Azure Bastion** — **CLOSED / Wave 1 (2026-06-27)**. Enabled on the **primary** hub via the
-  existing `avm-ptn-alz-connectivity-hub-and-spoke-vnet` 0.17.1 `bastion` flag, deploy-**on-demand** behind
-  `var.enable_bastion` (Standard SKU, **default false** = $0 idle; ~+$140/mo while up). Module auto-creates
-  the Standard public IP; `AzureBastionSubnet` /26 at `10.0.0.64/26`. Secondary hub unchanged. ADR-015.
+- Both Azure Firewall instances were Premium, zone-redundant across zones 1, 2, and 3.
+- Primary and secondary firewall private IPs were fixed at `10.0.0.4` and `10.1.0.4`.
+- All five spoke default routes pointed to the appropriate regional firewall.
+- All eight peerings were `Connected`.
+- The online WAF policy was enabled in Prevention mode.
+- Private DNS was centralized in the Connectivity subscription and linked to hubs and workload VNets.
+- VNet flow logs and Traffic Analytics were used on supported spokes; VNet diagnostic settings remain a
+  documented hardening gap.
 
-### Project backlog (not reference gaps, but open)
+### 4.2 Gated connectivity features
 
-- [ ] Section 10b/c — pre-commit, drift detection, OPA/Conftest, PSRule gates
-- [ ] Section 11 — documentation deliverables (`SECURITY.md`, `RUNBOOK.md`, `COST.md` are linked from
-  README but not yet authored)
-- [ ] Section 12 — platform acceptance validation + **OQ-008** (scope OIDC SP down from Owner-at-Tenant-Root)
-- [ ] Replace placeholder workbook JSON (Sentinel, Carbon Optimization) before any live demo
-- [ ] Housekeeping: this ADR quick-ref table lists only ADR-001 — DECISIONS.md has ADR-001…009
+The following are represented in code or design but were absent from the August 1 BOM:
+
+- DDoS Network Protection;
+- VPN Gateway;
+- DNS Private Resolver;
+- Azure Bastion; and
+- ExpressRoute/on-premises connectivity.
+
+The firewalls were re-enabled for the banking build and were time-boxed because they dominate idle cost.
+
+## 5. Platform layers
+
+### 5.1 Governance layer
+
+`platform/management-groups` uses `Azure/avm-ptn-alz/azurerm` version `0.19.1` with the ALZ provider and a
+pinned ALZ library reference. The layer creates the hierarchy, subscription placement, policy definitions,
+initiatives, assignments, remediation identities, allowed-location guardrails, and AMBA-related assignments.
+
+The allowed-location policy is enforced at the `globaris` root for nine continental US regions excluding
+Azure canary/staging regions. It intentionally excludes `global` resources through the built-in policy rule.
+
+### 5.2 Management and FinOps layer
+
+`platform/management` provides:
+
+- the central platform Log Analytics workspace with 90-day retention;
+- an Automation Account and platform action group;
+- subscription and management-group budgets;
+- cost exports and anomaly-notification plumbing;
+- platform and carbon-optimization workbooks; and
+- the supporting resources for AMBA when the O&M phase is enabled.
+
+The proven POC configured five subscription budgets at $200 each and management-group budgets, with alerts at
+50, 75, 90, and 100 percent. Budget start dates are calendar-sensitive; a stale month caused a real rebuild
+failure and is tracked as a required preflight control.
+
+### 5.3 Security layer
+
+`platform/security` provides a dedicated security Log Analytics workspace, Microsoft Sentinel onboarding,
+analytics rules and workbooks, Defender for Cloud pricing configuration, subscription diagnostics, regulatory
+compliance views, and a security Key Vault.
+
+The August 1 snapshot verified 11 Defender plans at Standard in the Security subscription. Defender coverage
+was not extended to all five subscriptions; that is a documented hardening decision, not an estate-wide claim.
+See [`SECURITY.md`](SECURITY.md).
+
+### 5.4 Identity layer
+
+`platform/identity` provides:
+
+- a dedicated `10.2.0.0/24` identity VNet;
+- Microsoft Entra Domain Services Standard;
+- a Recovery Services vault;
+- eight Conditional Access policies in report-only mode; and
+- code for PIM and privileged-group inputs.
+
+The Entra DS build produced important operational lessons: a custom deny-all NSG rule broke the platform's
+required inbound behavior, and its multi-hour create exceeded the lifetime of a single OIDC assertion. The
+current operator procedure uses a two-pass identity deployment with refresh-enabled OIDC and separates the
+long ARM operation from directory changes.
+
+### 5.5 Connectivity layer
+
+`platform/connectivity` uses the AVM ALZ hub-and-spoke pattern module version `0.17.1` and the private DNS
+pattern module version `0.23.1`. It owns the two hubs, regional firewall policies, global hub peering, central
+private DNS zones, diagnostics, and workload-specific firewall rule collection groups.
+
+Independent regional firewall policies were selected for the POC rather than a shared parent policy. This
+keeps regional rollout and troubleshooting isolated but duplicates policy management.
+
+## 6. Workload landing zones
+
+| Root | Proven role | Key implementation | Deliberate boundary |
+| --- | --- | --- | --- |
+| `corp-a1` | Primary corporate network landing zone | VNet, subnets, NSG, UDR, flow logs, ZRS Recovery Services vault | SQL and App Service were gated off by subscription offer caps. |
+| `corp-a2` | Secondary corporate network landing zone | VNet, UDR, flow logs, GRS Recovery Services vault with cross-region restore | Cold network/backup pattern, not a running application failover target. |
+| `online-p1` | Internet-facing pattern | Application Gateway WAF_v2, WAF policy in Prevention, Static Web App | Not isolated in a separate Online subscription. |
+| `bank-app-p1` | Banking application platform | Private AKS, Premium ACR, APIM Developer, Event Hubs Standard, Service Bus Premium, private endpoints | Single-region POC; no user node pool or geo-replication. |
+| `bank-data-p1` | Banking data and AI platform | Databricks Premium VNet injection/NPIP, ADLS Gen2, Fabric F2, Foundry AIServices + model, AI Search Basic, private endpoints | No Databricks clusters/jobs, Fabric artifacts, or full CMK implementation. |
+
+The banking extension deliberately chose current-generation services. Microsoft Fabric and Databricks were
+used instead of anchoring a new platform on Synapse. Microsoft Foundry was deployed using the AIServices
+resource shape rather than the classic hub model.
+
+## 7. Observability and operations
+
+The architecture separates platform and security telemetry:
+
+```mermaid
+flowchart LR
+    AZ[Azure resources and activity]
+    PL[Platform Log Analytics]
+    SL[Security Log Analytics]
+    AMBA[AMBA baseline alerts]
+    SENT[Microsoft Sentinel]
+    AG[Platform action group]
+
+    AZ --> PL
+    AZ --> SL
+    PL --> AMBA
+    SL --> SENT
+    AMBA --> AG
+    SENT --> AG
+```
+
+Diagnostic settings were implemented for major banking resources, while VNet diagnostics remain missing.
+AMBA and Service/Resource Health were implemented as an operations capability, but the current greenfield
+configuration keeps `enable_om_phase1 = false` until the later rebuild pass. Sentinel automation playbooks and
+the synthetic incident generator were not part of the proven live estate.
+
+## 8. Delivery and state architecture
+
+```mermaid
+sequenceDiagram
+    participant Dev as Engineer / pull request
+    participant GH as GitHub Actions
+    participant OIDC as Entra workload identity
+    participant State as Azure Storage state backend
+    participant ARM as Azure control plane
+
+    Dev->>GH: Validate or dispatch one root
+    GH->>OIDC: Exchange GitHub OIDC token
+    GH->>State: Open JIT firewall window and lock state
+    GH->>ARM: Terraform plan
+    Dev->>GH: Inspect plan shape and approve apply decision
+    GH->>ARM: Terraform apply
+    GH->>State: Persist state and close firewall window
+```
+
+Important design facts:
+
+- Bootstrap state is local and never committed; it creates the remote backend and federated identity.
+- Each root has a separate state key and pinned dependency lock file.
+- Full-estate apply is sequential single-target only; `target=all` apply is blocked.
+- Cross-root outputs are passed through deterministic repository variables/secrets rather than implicit
+  remote-state coupling.
+- Identity and the AKS-to-ACR binding use deliberate two-pass operations.
+- A plan scan treats unexpected replacement or destroy as a stop condition.
+- Branch protection exists, but the claimed local review hook and GitHub environment reviewer behavior have
+  known enforcement limitations. Documentation does not treat them as proven controls.
+
+## 9. Resilience and recovery objectives
+
+The original POC contained design targets, but the August 1 build did not deploy replicated application or
+database workloads across both regions. The table distinguishes implemented mechanisms from targets.
+
+| Capability | RTO target | RPO target | Proven mechanism | Status |
+| --- | --- | --- | --- | --- |
+| Regional network path | 30 minutes | N/A | Two hubs, two active firewalls, global peering, regional spoke UDRs | Topology proven; failover drill not load-tested. |
+| Corporate workload recovery | 4 hours | 15 minutes | Secondary spoke and Recovery Services vaults | Vault/topology proven; workload replication not configured. |
+| Corporate SQL | 1 hour | 5 minutes | Intended active geo-replication | SQL gated off; target not implemented. |
+| Corporate App Service | 30 minutes | Near-zero | Intended pre-warmed secondary and traffic cutover | App Service gated off; target not implemented. |
+| Banking application platform | Not established for POC | Not established for POC | Single-region AKS/APIM/messaging POC | Multi-region design deferred; production targets require business service objectives. |
+| Banking data platform | Not established for POC | Not established for POC | ZRS lake storage plus single-region managed services | Regional DR and CMK deferred; production targets require data-loss and recovery objectives. |
+| IaC recovery | Rebuild measured in hours | Last successful state write | Separate state keys, sequential rebuild runbook, BOM and plan bars | Full build and multiple full teardowns proven. |
+
+These are engineering targets, not contractual SLAs.
+
+## 10. Security and Zero Trust summary
+
+| Pillar | Implemented evidence | Mode/boundary |
+| --- | --- | --- |
+| Identity | OIDC workload identity, eight CA policies, Entra DS isolation | OIDC enforced; CA report-only; PIM not proven active. |
+| Network | Firewalls, forced routing, WAF, private endpoints and DNS | Enforced where deployed; DDoS plan and resolver absent. |
+| Applications | Private AKS, Entra-only cluster auth, internal APIM pattern, WAF edge | Single-region and POC SKUs. |
+| Data | ADLS/Foundry/Search private access, AAD-only messaging, isolated security workspace | CMK design not implemented; some Key Vault/storage hardening remains. |
+| Visibility | Log Analytics, Sentinel, Defender configuration, AMBA capability | Defender proven only in Security subscription; some connectors tenant-gated. |
+| Governance | ALZ policies, allowed locations, budgets, tag policies, ADRs | Mix of Deny, Modify, DINE, Audit and exemptions; see `SECURITY.md`. |
+
+## 11. Major architectural decisions
+
+| ADR | Decision | Tradeoff demonstrated |
+| --- | --- | --- |
+| 003 | Four platform subscriptions plus one shared Landing Zones subscription | Preserved platform/workload boundaries while accepting a shared workload subscription. |
+| 009 | Independent regional firewall policies | Regional isolation over centralized reuse. |
+| 021 | Scoped CI role model | Least privilege was designed, but live Owner drift remained and was documented. |
+| 038 | Consume AVM directly in composition roots | Avoided an unused wrapper abstraction. |
+| 042/044 | Flag-gate and time-box paid hub appliances | Cost control without deleting capability. |
+| 048/051 | Databricks/Fabric and Foundry/Search platform choices | Current service direction and regional capacity over stale or unavailable defaults. |
+| 055 | Refresh-enabled OIDC plus two-pass identity apply | Durable handling for multi-hour managed-domain provisioning. |
+| 060 | Sequential single-target full rebuild | Reliability and state-firewall safety over parallel speed. |
+| 063-073 | Teardown, recovery keys, ownership, and region controls | Operational failure evidence drove the architecture, not just greenfield design. |
+| 069 | Central US primary, East US 2 DR | Capacity evidence over an unexamined prompt default. |
+| 070 | Terraform owns diagnostics and PE DNS zone groups | Prevented DINE/Terraform dual-writer collisions. |
+| 074 | Enforced continental-US allowed locations | Closed a preventive-governance gap found through live inspection. |
+
+Full rationale and amendments are in [`DECISIONS.md`](DECISIONS.md).
+
+## 12. Fidelity and known gaps
+
+| Area | Status | Evidence or boundary |
+| --- | --- | --- |
+| ALZ management groups and policy engine | Built and proven | 12-MG topology, 147 MG-scope assignments, 292 definitions, 59 initiatives. |
+| Multi-region hub-and-spoke | Built and proven | Two hubs, two firewalls, five spokes, eight connected peerings. |
+| Central private DNS | Built and proven | 89-zone inventory in Connectivity subscription. |
+| Identity platform | Built and proven | Entra DS and eight report-only CA policies. |
+| Security operations | Built with qualifications | Sentinel and Defender configuration; tenant connectors and automation partly gated. |
+| Banking application/data/AI platforms | Built and proven | BOM verified AKS, ACR, APIM, messaging, Databricks, ADLS, Fabric, Foundry and Search. |
+| Operations-monitoring target | Implemented capability, staged | AMBA pass proven; flag reset for greenfield rebuild sequence. |
+| DDoS, VPN, DNS Resolver, Bastion | Gated/absent in proven BOM | Cost and scope decisions. |
+| Corporate SQL/App Service | Gated/absent | Subscription offer caps. |
+| CMK for banking data tier | Designed, not implemented | ADR-053 and B9 design only. |
+| VNet diagnostic settings | Missing | Hardening plan item. |
+| Production-grade multi-region banking workloads | Designed/deferred | POC uses single-region service instances. |
+| Current rebuild | Held | Sentinel scheduled-rule 401 investigation requires directory-role verification. |
+
+## 13. Authoritative evidence
+
+- [`docs/estate-bom.md`](docs/estate-bom.md): live-verified August 1 estate.
+- [`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md): proven build procedure and plan bars.
+- [`docs/worklog/2026-08-03.md`](docs/worklog/2026-08-03.md): current greenfield state and rebuild hold.
+- [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md): post-build gaps and hardening order.
+- [`docs/acceptance-validation.md`](docs/acceptance-validation.md): original acceptance results and explicit misses.
+- [`DECISIONS.md`](DECISIONS.md): full ADR history.
