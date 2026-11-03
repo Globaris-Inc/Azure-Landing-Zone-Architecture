@@ -20,8 +20,7 @@ generalized process.** It applies to the next LZ too (e.g. a security landing zo
 | [LESSONS.md](LESSONS.md) | **The live-apply reality checklist** — the gotchas static review/`validate` can't catch, as pre-emptive guardrails |
 | [OPEN-QUESTIONS-template.md](OPEN-QUESTIONS-template.md) | The recurring decision forks (identity, region, RBAC, state posture, gating…) with recommended defaults |
 
-The **code templates** (the things you copy) are the proven repo artifacts themselves — see
-The reusable artifacts are `bootstrap/`, `envs/`, `.github/workflows/`, `scripts/preflight.sh`,
+The **code templates** (the things you copy) are the proven repo artifacts themselves: `bootstrap/`, `envs/`, `.github/workflows/`, `scripts/preflight.sh`,
 `.githooks/pre-commit`.
 
 ---
