@@ -7,9 +7,9 @@
 
 - **Validated:** 2026-07-11
 - **Method:** `az` / `az rest` live queries against all 5 project subscriptions, `gh run list` for
-  CI history, `terraform`/PowerShell tooling checks, and cross-reference against `WORKLOG.md`,
+  CI history, `terraform`/PowerShell tooling checks,,
   `DECISIONS.md` (ADR-031, ADR-032, ADR-036, ADR-037), `RUNBOOK.md`, `COST.md`, `README.md`.
-- **Scope:** the 8 criteria in `PROMPT.md` Section 12, tested against the deployed estate:
+- **Scope:** the 8 criteria in the project requirements, tested against the deployed estate:
   management-groups, connectivity, management, identity, security, and the 3 landing-zone spokes
   (corp-a1, corp-a2, online-p1). `synthetic` is not deployed (ADR-036/037, designed-now/built-later).
 
@@ -20,7 +20,7 @@
 | # | Criterion | Verdict | Evidence (command -> key result) |
 |---|-----------|---------|-----------------------------------|
 | 1 | `terraform apply` succeeds end-to-end from clean tenant in under 90 minutes | **PARTIAL / qualified** | `gh run list --limit 200` -> 92 total "Deploy (manual)" runs between 2026-05-06T13:31Z and 2026-07-11T05:52Z (66 days), 42 success / 49 failure / 1 cancelled. Every root reached green, but via multiple retries across many sessions, not one clean-tenant run. See interpretation below. |
-| 2 | PSRule for Azure scan >= 90% pass | **UNVERIFIED** | `Get-Module -ListAvailable PSRule*` (Windows PowerShell) -> no output, module not installed. `pwsh` (PowerShell 7, PSRule's usual host) is not present on this machine. No `ps-rule.yaml` config file exists in the repo, and no CI workflow step runs PSRule despite `CLAUDE.md`/`PROMPT.md` referencing it. No historical scan result exists to check retroactively. |
+| 2 | PSRule for Azure scan >= 90% pass | **UNVERIFIED** | `Get-Module -ListAvailable PSRule*` (Windows PowerShell) -> no output, module not installed. `pwsh` (PowerShell 7, PSRule's usual host) is not present on this machine. No `ps-rule.yaml` config file exists in the repo, and no CI workflow step runs PSRule despite `CLAUDE.md`/the project requirements referencing it. No historical scan result exists to check retroactively. |
 | 3 | Defender for Cloud Secure Score >= 75% on day one | **FAIL** | `az rest --method GET .../providers/Microsoft.Security/secureScores?api-version=2020-01-01` per subscription. See table below. Blended score across the 4 subscriptions with a populated score is **56.8%** (21/37), below the 75% bar. The security subscription itself returns an empty `secureScores` array (Defender plans set to Standard about 3 hours before this check; score has not yet converged, see notes). |
 | 4 | All PaaS resolves via Private Endpoint (`nslookup` from spoke VM) | **PARTIAL / DEFERRED** | Plumbing confirmed: `az network private-dns zone list` -> 89 zones in the connectivity subscription, hub VNet links present. Zero actual resolution confirmed: `az resource list --resource-type Microsoft.Network/privateEndpoints` returns empty in **all 5 subscriptions**, there are no private endpoints deployed anywhere in the estate today. The `nslookup`-from-VM portion is doubly untestable: no spoke workload VM exists (App Service/SQL gated off, ADR-031/032) and there is no PE record to resolve even if one did. |
 | 5 | Failover drill runbook fails corp workload primary -> DR | **DEFERRED (topology PASS, workload N/A)** | DR topology live: `az network vnet peering list` on both hubs -> hub-to-hub peering `Connected` both directions; `peer-secondary-hub-to-corp-a2` `Connected`. `az resource list` in the landingzones subscription for `Microsoft.Compute/virtualMachines`, `Microsoft.Web/sites`, `Microsoft.Sql/servers` -> empty (confirms cold-standby, no live workload to fail over). `RUNBOOK.md` Runbook A already documents this honestly as a topology-readiness drill, not an app cutover (ADR-031/032 gating). |

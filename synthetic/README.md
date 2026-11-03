@@ -1,6 +1,6 @@
 # synthetic/ — Synthetic Workload Layer
 
-Implements [`PROMPT.md`](../PROMPT.md) §13 — workloads, telemetry, security
+Workloads, telemetry, security
 signals, and cost-generating patterns layered on top of the platform.
 
 This layer is **separate from `platform/` and `landing-zones/`** so it can be

@@ -245,7 +245,6 @@ The post-build hardening order is documented in
 | 070 | Terraform sole ownership of diagnostics and private-endpoint DNS zone groups. |
 | 074 | Enforced continental-US location restrictions. |
 
-See [`DECISIONS.md`](DECISIONS.md) for full context and amendments.
 
 ## 10. Reporting a vulnerability
 

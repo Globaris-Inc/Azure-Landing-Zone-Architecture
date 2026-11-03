@@ -2,8 +2,8 @@
 
 > **Status:** Design (architect). Implementation owned by `devsecops-engineer`.
 > **Section:** 10 (Pipeline & Tooling) — extends the bootstrap pipeline.
-> **ADR:** [ADR-019](../DECISIONS.md#adr-019-cicd-deploy--teardown--parameterized-deployyml--guarded-teardownyml-two-environments)
-> (teardown mechanics amended by [ADR-020](../DECISIONS.md#adr-020-teardown-mechanics--uniform-terraform-destroy-supersedes-the-adr-019-brute-force-split))
+> **ADR:** ADR-019
+> (teardown mechanics amended by ADR-020)
 > **Last updated:** 2026-06-27
 
 This document specifies how CI/CD deploys and tears down the ALZ POC. It is the design the

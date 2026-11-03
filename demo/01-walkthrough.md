@@ -186,7 +186,7 @@ Talking points:
   `k6_enabled` / `red_team_enabled` / `red_team_signin_enabled` /
   `cost_patterns_enabled`).
 - Setting the flag to `false` plans to **destroy** every synthetic resource
-  — about 35 resources, applied in <5 minutes per the PROMPT.md §13.6
+  — about 35 resources, applied in <5 minutes per the the project requirements
   acceptance criterion.
 - The platform + landing zone stacks are untouched. The synthetic layer is
   truly drop-in / rip-out.
@@ -209,7 +209,7 @@ Talking points:
   SQL Server + DB, GeoRedundant Recovery Services Vault all present from
   Section 9).
 - The failover drill script wraps SQL Failover Group failover + App Service
-  swap. ASR per PROMPT.md is conceptual here — the LZ spokes carry no IaaS
+  swap. ASR per the project requirements is conceptual here — the LZ spokes carry no IaaS
   VMs to replicate.
 - Production path: add a SQL Failover Group between `sql-corp-a1-...` and
   `sql-corp-a2-...`, attach ASR to the §13.4 oversized VM, schedule a
@@ -227,9 +227,7 @@ Talking points:
 
 Final pointers:
 
-- **Source of truth:** this repo. `CLAUDE.md` for operating rules,
-  `PROMPT.md` for the original requirements, `WORKLOG.md` for the
-  per-session build history, `DECISIONS.md` for the ADRs.
+- **Source of truth:** this repo.
 - **Open items:** OQ-008 (OIDC SP scope-down at §12), workbook JSON
   placeholders before a real demo, honeypot Entra user manual creation,
   pre-commit / drift detection / OPA (§10b/10c, ~Day 12).

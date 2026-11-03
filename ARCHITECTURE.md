@@ -311,7 +311,7 @@ These are engineering targets, not contractual SLAs.
 | 070 | Terraform owns diagnostics and PE DNS zone groups | Prevented DINE/Terraform dual-writer collisions. |
 | 074 | Enforced continental-US allowed locations | Closed a preventive-governance gap found through live inspection. |
 
-Full rationale and amendments are in [`DECISIONS.md`](DECISIONS.md).
+
 
 ## 12. Fidelity and known gaps
 
@@ -334,7 +334,5 @@ Full rationale and amendments are in [`DECISIONS.md`](DECISIONS.md).
 ## 13. Authoritative evidence
 
 - [`docs/estate-bom.md`](docs/estate-bom.md): live-verified August 1 estate.
-- [`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md): proven build procedure and plan bars.
 - [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md): post-build gaps and hardening order.
 - [`docs/acceptance-validation.md`](docs/acceptance-validation.md): original acceptance results and explicit misses.
-- [`DECISIONS.md`](DECISIONS.md): full ADR history.

@@ -18,7 +18,6 @@
 #      the teardown scripts already carry `# shellcheck disable=SC2154` /
 #      `# shellcheck source=` directives for their legitimate indirect-assignment and
 #      dynamic-source patterns.
-#   6. check-adr-landed.sh - Accepted ADRs from ADR-068 on must say where they landed.
 #      Catches the ADR-034 class: a sanctioned control that nobody ever wired up.
 #   7. check-worktrees.sh - uncommitted work in a volatile path (Temp/scratchpad) fails.
 #      This repo has lost agent output twice that way; see the script header. Also WARNs
@@ -104,14 +103,6 @@ else
 fi
 
 # --- 6. Accepted ADRs record where they landed ---
-hr; echo "[6] check-adr-landed (Accepted ADRs cite a landing)"
-if bash scripts/check-adr-landed.sh > /tmp/pf_adr.log 2>&1; then
-  note "OK: $(tail -2 /tmp/pf_adr.log | head -1)"
-else
-  note "FAIL:"; sed 's/^/    /' /tmp/pf_adr.log; fail=1
-fi
-
-# --- 7. no uncommitted work parked somewhere volatile ---
 hr; echo "[7] check-worktrees (uncommitted work in volatile paths)"
 if bash scripts/check-worktrees.sh > /tmp/pf_wt.log 2>&1; then
   note "OK: $(tail -1 /tmp/pf_wt.log)"

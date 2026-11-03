@@ -113,7 +113,7 @@ action** to drive while narrating.
 ### Scene 11 — Closing (14:30 → 15:00)
 
 - Window: title card.
-- OSD: `github.com/.../Azure-Architecture · CLAUDE.md · WORKLOG.md`.
+- OSD: `github.com/.../Azure-Landing-Zone-Architecture · README.md`.
 - Action: hold static title for 5s, then fade.
 
 ---

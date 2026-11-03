@@ -163,7 +163,7 @@ echo "== script integrity =="
 # This broke check-claims.sh and check-adr-landed.sh three times during one session, always
 # from ordinary prose in a comment (repo's, file's, codebase's). Cheaper to test than to
 # rediscover.
-for s in scripts/check-claims.sh scripts/check-adr-landed.sh scripts/check-worktrees.sh scripts/preflight.sh; do
+for s in scripts/check-claims.sh scripts/check-worktrees.sh scripts/preflight.sh; do
   if bash -n "$s" 2>/dev/null; then
     printf '  PASS  %s parses\n' "$s"; pass=$((pass + 1))
   else

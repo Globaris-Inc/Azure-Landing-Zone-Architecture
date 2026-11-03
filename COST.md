@@ -196,4 +196,3 @@ Re-price using official sources:
 - [`docs/banking-platform-design.md`](docs/banking-platform-design.md): original banking cost envelope.
 - [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md): cost-bearing hardening decisions.
 - [`RUNBOOK.md`](RUNBOOK.md): cost-spike response.
-- ADR-013, ADR-042, ADR-044-053, ADR-060 and ADR-069 in [`DECISIONS.md`](DECISIONS.md).

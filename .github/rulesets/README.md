@@ -28,5 +28,5 @@ gh api --method POST repos/Globaris-Inc/Azure-Architecture/rulesets \
   renders its matrix job as `validate — <root>` with an **em dash** (`—`) — reproduced exactly here. Rename
   the jobs and this file must change in lock-step.
 - **Scope:** this gates code merges into `main`, not the deploy apply run (deploys are `workflow_dispatch`,
-  LESSON 17). The apply-run reviewer gate is tracked in `OPEN-QUESTIONS.md` (OQ-015).
+  LESSON 17).
 - Full rationale: `docs/cicd-deploy-teardown.md` §7 "Branch protection (`main`) — repo ruleset".

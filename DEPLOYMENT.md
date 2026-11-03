@@ -3,11 +3,6 @@
 This is the supported deployment model for the Azure Landing Zone and banking-platform POC. It describes
 prerequisites, identity/state bootstrap, root ordering, feature gates, verification, and teardown boundaries.
 
-The command-by-command full-estate procedure is
-[`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md). That runbook
-contains current pre-clearance gates, recovery matrices, and operator commands; do not reconstruct them from
-this summary.
-
 ## 1. Current stop condition
 
 The managed Azure estate is greenfield after teardown run `30785098012`. Do **not** restart the full rebuild
@@ -246,9 +241,6 @@ After teardown, verify Azure and state independently. A green workflow conclusio
 
 ## 11. References
 
-- [`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md): authoritative operator procedure.
-- [`docs/preclearance/2026-07-22-full-estate-rebuild.md`](docs/preclearance/2026-07-22-full-estate-rebuild.md): current pre-clearance evidence and amendments.
 - [`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md): workflow mechanics.
 - [`docs/estate-bom.md`](docs/estate-bom.md): proven live inventory and comparison method.
 - [`docs/teardown-redesign.md`](docs/teardown-redesign.md): teardown architecture.
-- [`docs/identity-two-pass-dispatch-runbook.md`](docs/identity-two-pass-dispatch-runbook.md): identity-specific two-pass procedure.

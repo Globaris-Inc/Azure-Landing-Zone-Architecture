@@ -27,7 +27,7 @@ mean the resources are currently incurring cost.
 - Custom `globaris` management-group hierarchy with Platform and Landing Zones branches, plus Corp,
   Online, Sandbox, and Decommissioned archetypes.
 - Central US primary and East US 2 secondary/DR, selected after recorded capacity constraints
-  ([ADR-069](DECISIONS.md)).
+  (ADR-069).
 - Dual hub VNets with Azure Firewall Premium, global hub peering, and forced-tunnel routes from five spokes.
 - Five workload spokes:
   - `corp-a1`: primary private corporate network landing zone.
@@ -85,7 +85,7 @@ Provider and AVM selections are pinned per composition root, and each deployable
 ```
 
 AVM is consumed directly in composition roots; unused local wrapper scaffolds were deliberately removed
-under [ADR-038](DECISIONS.md).
+under ADR-038.
 
 ## Deployment
 
@@ -113,9 +113,7 @@ management-groups
   -> management-groups AMBA policy pass
 ```
 
-Every root is planned, its resource shape is inspected, and only then is it applied. Use
-[`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md) for the
-current 14-step operator procedure and [`DEPLOYMENT.md`](DEPLOYMENT.md) for the supported deployment model.
+Every root is planned, its resource shape is inspected, and only then is it applied. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the supported deployment model.
 
 ## Cost posture
 
@@ -150,12 +148,11 @@ proven again on 2026-08-03. See [`docs/teardown-redesign.md`](docs/teardown-rede
 - [`RUNBOOK.md`](RUNBOOK.md): failover, incident, cost-spike and platform recovery procedures.
 - [`SECURITY.md`](SECURITY.md): threat model, Zero Trust mapping and compliance posture.
 - [`COST.md`](COST.md): cost model and FinOps levers.
-- [`DECISIONS.md`](DECISIONS.md): 74 architectural decision records and amendments.
 - [`docs/acceptance-validation.md`](docs/acceptance-validation.md): original Section 12 validation, including failed criteria.
 - [`docs/estate-bom.md`](docs/estate-bom.md): live-verified August 1 estate baseline.
 - [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md): post-build hardening findings.
 
-Session worklogs and AI-assistant tooling are kept private. References to them in ADRs, pre-clearance records, and code comments point to records that are not published here.
+ADR and OQ numbers in the code and documents refer to internal decision records, which are kept private along with session worklogs and AI-assistant tooling.
 
 ## Known boundaries
 

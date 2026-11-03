@@ -1,7 +1,7 @@
 # demo/ — Walkthrough Orchestration
 
 Scripted walkthrough, manual incident triggers, and reset helpers for the
-Azure Landing Zone POC. Implements [`PROMPT.md`](../PROMPT.md) §13.5.
+Azure Landing Zone POC.
 
 | File | Purpose |
 | ---- | ------- |

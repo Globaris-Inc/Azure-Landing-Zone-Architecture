@@ -1,6 +1,6 @@
 # 06-acceptance.md — Section 13.7 acceptance criteria
 
-> Companion to [`06-acceptance.sh`](06-acceptance.sh). PROMPT.md §13.7 lists
+> Companion to [`06-acceptance.sh`](06-acceptance.sh). the project requirements lists
 > five acceptance criteria for the synthetic layer; this document defines
 > the validation method, the pass threshold, and the operator-facing
 > command for each.
@@ -28,7 +28,7 @@ Required env vars (with sensible defaults):
 
 ## Criterion 1 — Sentinel ≥ 5 distinct incident types in 24h
 
-> **Source:** PROMPT.md §13.7 — "Sentinel ≥ 5 distinct incident types
+> **Source:** the project requirements — "Sentinel ≥ 5 distinct incident types
 > within 24 hours."
 
 ### Validation
@@ -73,7 +73,7 @@ fired.
 
 ## Criterion 2 — Cost dashboard ≥ 3 distinct cost trends
 
-> **Source:** PROMPT.md §13.7 — "Cost dashboard ≥ 3 distinct cost trends."
+> **Source:** the project requirements — "Cost dashboard ≥ 3 distinct cost trends."
 
 ### Validation
 
@@ -112,7 +112,7 @@ Six+ distinct categories are expected; threshold of 3 is the floor.
 
 ## Criterion 3 — Defender ≥ 10 active recommendations, ≥ 3 auto-remediable
 
-> **Source:** PROMPT.md §13.7 — "Defender for Cloud ≥ 10 active
+> **Source:** the project requirements — "Defender for Cloud ≥ 10 active
 > recommendations across synthetic resources, ≥ 3 auto-remediable."
 
 ### Validation
@@ -159,7 +159,7 @@ the 24h evaluation window completes.
 
 ## Criterion 4 — Walkthrough script executes end-to-end < 20 min
 
-> **Source:** PROMPT.md §13.7 — "Walkthrough script executes end-to-end
+> **Source:** the project requirements — "Walkthrough script executes end-to-end
 > < 20 min."
 
 ### Validation
@@ -187,7 +187,7 @@ the recording to a release artifact.
 
 ## Criterion 5 — Disabling flag returns env to clean platform state
 
-> **Source:** PROMPT.md §13.7 — "Disabling flag returns env to clean
+> **Source:** the project requirements — "Disabling flag returns env to clean
 > platform state."
 
 ### Validation

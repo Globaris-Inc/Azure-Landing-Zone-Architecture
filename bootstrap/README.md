@@ -153,7 +153,7 @@ Deterministic name: `st<org_prefix>tfstate<instance>` (no random suffix). Global
 
 ## Bootstrap ordering — MG-scoped grants (ADR-021)
 
-The scoped RBAC set in [ADR-021](../DECISIONS.md#adr-021-oidc-sp-least-privilege-scope-down--replace-tenant-root-owner-with-a-scoped-role-set-refinessupersedes-adr-006)
+The scoped RBAC set in ADR-021
 includes role assignments scoped at the **Globaris** and **Landing Zones** management
 groups. Those MGs do **not** exist at the first bootstrap apply — `platform/management-groups`
 creates them later. A role assignment whose `scope` is an MG resource ID still requires

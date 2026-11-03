@@ -14,11 +14,10 @@ live estate are ready for the next deployment; they are not evidence that resour
 Use these in order:
 
 1. [`README.md`](README.md) for current state.
-2. [`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md) for full rebuild commands and gates.
-3. [`docs/estate-bom.md`](docs/estate-bom.md) for the expected live inventory.
-4. GitHub Actions run logs for plan/apply/destroy evidence.
-5. Direct Azure API/portal checks for live state.
-6. Terraform state as an ownership record, not as proof that Azure contains or does not contain an object.
+2. [`docs/estate-bom.md`](docs/estate-bom.md) for the expected live inventory.
+3. GitHub Actions run logs for plan/apply/destroy evidence.
+4. Direct Azure API/portal checks for live state.
+5. Terraform state as an ownership record, not as proof that Azure contains or does not contain an object.
 
 ### 1.2 Severity model
 
