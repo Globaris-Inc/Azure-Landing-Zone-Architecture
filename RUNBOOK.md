@@ -13,7 +13,7 @@ live estate are ready for the next deployment; they are not evidence that resour
 
 Use these in order:
 
-1. [`WORKLOG.md`](WORKLOG.md) for current state and active stop conditions.
+1. [`README.md`](README.md) for current state.
 2. [`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md) for full rebuild commands and gates.
 3. [`docs/estate-bom.md`](docs/estate-bom.md) for the expected live inventory.
 4. GitHub Actions run logs for plan/apply/destroy evidence.
@@ -323,4 +323,3 @@ ADR/OQ/runbook changes required:
 - [`docs/estate-bom.md`](docs/estate-bom.md)
 - [`docs/teardown-redesign.md`](docs/teardown-redesign.md)
 - [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md)
-- [`docs/worklog/2026-08-03.md`](docs/worklog/2026-08-03.md)

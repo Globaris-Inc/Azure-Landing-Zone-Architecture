@@ -37,12 +37,9 @@ synthetic/apps/**/node_modules/
 *.swo
 .DS_Store
 
-# Claude Code — ignore memory and session state, but track the shared workflow
-# artifacts (role agents, review-gate hooks, settings) per landing-zone-kit/templates.md.
-.claude/*
-!.claude/agents/
-!.claude/hooks/
-!.claude/settings.json
+# Local AI-assistant state
+.claude/
+.codex/
 
 # Secrets — never commit
 *.pem
@@ -52,10 +49,10 @@ synthetic/apps/**/node_modules/
 .env.*
 !.env.example
 
-# Local learning/interview notes - personal study material, never commit.
-docs/INTERVIEW-PREP.local.md
-docs/BANK-IT-ESTATE-OPERATIONS-GUIDE.local.md
+# Local notes
+docs/*.local.md
 
 # Plan outputs
 *.tfplan
+tfplan
 plan.out

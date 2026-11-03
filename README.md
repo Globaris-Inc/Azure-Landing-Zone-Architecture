@@ -16,7 +16,7 @@ This project distinguishes three different facts:
 | --- | --- | --- |
 | **Repository capability** | Terraform and workflows can build the complete platform described below. | Composition roots, pinned lock files, CI workflows, ADRs |
 | **Proven deployment** | A complete 14-step build was live-verified on 2026-08-01: 5 subscriptions, 12 management groups including Tenant Root, 5 spokes, 8 connected peerings, and 404 top-level ARM resources by the BOM counting method. | [`docs/estate-bom.md`](docs/estate-bom.md) |
-| **Current Azure state** | The managed estate is intentionally greenfield after teardown run `30785098012` on 2026-08-03. All five subscriptions had zero managed resource groups, soft-deleted Log Analytics workspaces were zero, only Tenant Root remained, and the 11 state blobs were reset to canonical empty documents. A rebuild is held pending the documented Sentinel 401 investigation. | [`WORKLOG.md`](WORKLOG.md), [`docs/worklog/2026-08-03.md`](docs/worklog/2026-08-03.md) |
+| **Current Azure state** | The managed estate is intentionally greenfield. The last recorded live verification was on 2026-08-10: all five subscriptions had zero managed resource groups, soft-deleted Log Analytics workspaces were zero, and only Tenant Root remained. | [`docs/teardown-redesign.md`](docs/teardown-redesign.md) |
 
 “Built” in this documentation means implemented in Terraform and proven in a live deployment. It does not
 mean the resources are currently incurring cost.
@@ -154,7 +154,8 @@ proven again on 2026-08-03. See [`docs/teardown-redesign.md`](docs/teardown-rede
 - [`docs/acceptance-validation.md`](docs/acceptance-validation.md): original Section 12 validation, including failed criteria.
 - [`docs/estate-bom.md`](docs/estate-bom.md): live-verified August 1 estate baseline.
 - [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md): post-build hardening findings.
-- [`WORKLOG.md`](WORKLOG.md): current state and session history index.
+
+Session worklogs and AI-assistant tooling are kept private. References to them in ADRs, pre-clearance records, and code comments point to records that are not published here.
 
 ## Known boundaries
 
@@ -166,6 +167,6 @@ proven again on 2026-08-03. See [`docs/teardown-redesign.md`](docs/teardown-rede
   implemented or designed as gated capabilities but were absent from the August 1 BOM.
 - Customer-managed keys for the banking data tier were designed but not implemented.
 - VNet diagnostic settings and several Azure Advisor hardening items remain follow-up work.
-- The current rebuild is held until the Sentinel 401 directory-role hypothesis is resolved.
+- A second full 14-step build has not been recorded since August 1. The last recorded attempt, on 2026-08-09, passed Steps 1-7 and stopped at Step 8.
 
 These boundaries are documented to separate a credible POC from an unsupported production-readiness claim.

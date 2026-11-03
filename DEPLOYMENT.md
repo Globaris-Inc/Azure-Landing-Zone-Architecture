@@ -18,7 +18,7 @@ until the current handoff is cleared:
 3. If present, the last remaining role hypothesis for the Sentinel scheduled-rule 401 is refuted and a clean
    retry can determine whether the error was transient/Azure-side.
 
-See [`docs/worklog/2026-08-03.md`](docs/worklog/2026-08-03.md). A teardown resets Azure resources; it does not
+A teardown resets Azure resources; it does not
 reset an identity or repository-side cause.
 
 ## 2. Deployment model
@@ -252,4 +252,3 @@ After teardown, verify Azure and state independently. A green workflow conclusio
 - [`docs/estate-bom.md`](docs/estate-bom.md): proven live inventory and comparison method.
 - [`docs/teardown-redesign.md`](docs/teardown-redesign.md): teardown architecture.
 - [`docs/identity-two-pass-dispatch-runbook.md`](docs/identity-two-pass-dispatch-runbook.md): identity-specific two-pass procedure.
-- [`WORKLOG.md`](WORKLOG.md): current state and handoff.

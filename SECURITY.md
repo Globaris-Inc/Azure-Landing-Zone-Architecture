@@ -246,3 +246,9 @@ The post-build hardening order is documented in
 | 074 | Enforced continental-US location restrictions. |
 
 See [`DECISIONS.md`](DECISIONS.md) for full context and amendments.
+
+## 10. Reporting a vulnerability
+
+Report suspected vulnerabilities through GitHub's private vulnerability reporting on this repository's
+**Security** tab. Please do not open a public issue. This is a portfolio proof of concept with no deployed
+estate or support commitment, so reports are handled on a best-effort basis.

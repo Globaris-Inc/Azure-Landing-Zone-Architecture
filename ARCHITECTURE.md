@@ -25,7 +25,7 @@ shape remains the regression baseline in [`docs/estate-bom.md`](docs/estate-bom.
 | --- | --- |
 | Repository capability | The code can create the roots and feature-gated resources documented here. |
 | Proven deployment | The 2026-08-01 BOM is the authoritative live snapshot: 404 top-level ARM resources, 30 comparable resource groups, 12 management groups including Tenant Root, and 8 connected peerings. |
-| Current Azure state | Verified greenfield after run `30785098012`; the bootstrap backend remains and the managed root states are canonical-empty. |
+| Current Azure state | Last verified greenfield on 2026-08-10; the bootstrap backend remains and the managed root states are canonical-empty. |
 
 This distinction prevents a destroyed POC from being described as “currently deployed” while preserving the
 fact that the architecture was built and verified.
@@ -335,7 +335,6 @@ Full rationale and amendments are in [`DECISIONS.md`](DECISIONS.md).
 
 - [`docs/estate-bom.md`](docs/estate-bom.md): live-verified August 1 estate.
 - [`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md): proven build procedure and plan bars.
-- [`docs/worklog/2026-08-03.md`](docs/worklog/2026-08-03.md): current greenfield state and rebuild hold.
 - [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md): post-build gaps and hardening order.
 - [`docs/acceptance-validation.md`](docs/acceptance-validation.md): original acceptance results and explicit misses.
 - [`DECISIONS.md`](DECISIONS.md): full ADR history.
