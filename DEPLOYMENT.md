@@ -1,327 +1,255 @@
-# DEPLOYMENT.md - Greenfield End-to-End Deploy Guide
+# Deployment Guide
 
-> **Section:** 11 (Documentation Deliverables). Planned in [ADR-022](DECISIONS.md).
-> **What this is:** the ordered operator procedure to stand up the whole platform from a clean tenant.
-> **What this is not:** the pipeline internals. For workflow mechanics, gating, teardown, and the firewalled
-> state account, [`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md) is the reference; this guide
-> tells you which button to press, in what order, and how to verify each step. It does not duplicate that doc.
-> **Last updated:** 2026-07-11
+This is the supported deployment model for the Azure Landing Zone and banking-platform POC. It describes
+prerequisites, identity/state bootstrap, root ordering, feature gates, verification, and teardown boundaries.
 
----
+The command-by-command full-estate procedure is
+[`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md). That runbook
+contains current pre-clearance gates, recovery matrices, and operator commands; do not reconstruct them from
+this summary.
 
-## 0. How the deploy works (one paragraph)
+## 1. Current stop condition
 
-**Bootstrap is the only local Terraform step.** It creates the remote state backend and the OIDC federation.
-**Everything after bootstrap is CI-driven** through the `Deploy (manual)` GitHub Actions workflow
-([`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)), which authenticates with **OIDC (no stored
-secrets)** and applies one Terraform root at a time in dependency order. You never run `terraform apply` locally
-for a platform or landing-zone root. You dispatch the workflow with a `target` (one root, or `all`) and an
-`action` (`plan` then `apply`); `apply` is gated by the `production` GitHub Environment.
+The managed Azure estate is greenfield after teardown run `30785098012`. Do **not** restart the full rebuild
+until the current handoff is cleared:
 
----
+1. Check whether the CI service principal is assigned the Microsoft Entra **Security Administrator** role.
+2. If absent, restore the time-bounded role before Step 1.
+3. If present, the last remaining role hypothesis for the Sentinel scheduled-rule 401 is refuted and a clean
+   retry can determine whether the error was transient/Azure-side.
 
-## 1. Prerequisites
+See [`docs/worklog/2026-08-03.md`](docs/worklog/2026-08-03.md). A teardown resets Azure resources; it does not
+reset an identity or repository-side cause.
 
-### 1.1 Azure tenant + subscriptions
+## 2. Deployment model
 
-| Requirement | Detail |
-|-------------|--------|
-| Entra ID tenant | One tenant; you (or the bootstrap operator) hold **Global Administrator** for the MG + Entra work |
-| Subscriptions | **5** subscriptions, one each for **management, connectivity, identity, security, landing zones** |
-| Elevated access | "Access management for Azure resources" enabled so the operator can create the Tenant Root MG grant |
-| Region availability | `eastus2` (primary) and `centralus` (DR) available to the subscriptions |
-| Entra DS pre-step | One-time manual tenant step (DS service principal + `AAD DC Administrators` group) - see [`platform/identity/README.md`](platform/identity/README.md) |
-| Domain | An org-owned domain for the managed-domain FQDN (`identity_domain_name`, e.g. a subdomain like `aadds.<org>.org`) |
+| Operation | Supported path | Reason |
+| --- | --- | --- |
+| Bootstrap | Local Terraform from `bootstrap/` | Creates the remote backend and OIDC identity before either exists. |
+| Validate | GitHub Actions matrix | Validates every deployable root against pinned providers/modules. |
+| Plan | GitHub Actions, one root or `target=all` | Read-only; plans may run across the graph. |
+| Apply | GitHub Actions, **one root at a time** | The state account firewall opens for one runner; `target=all` apply is blocked by ADR-060. |
+| State recovery | Single-root `force-unlock` or `untaint` action | Avoids unmanaged local state access. |
+| Teardown | GitHub Actions `teardown.yml` | Reverse dependency order, remnant verification, then canonical state reset. |
 
-> **Offer caveat (observed on this POC).** The landing-zones subscription used here was **compute-restricted**:
-> dedicated App Service and Azure SQL provisioning were capped by the subscription offer, so those tiers are
-> gated **off** (ADR-031 / ADR-032). A production landing-zones subscription without those caps can flip
-> `enable_sql` / `enable_app_service` to `true`. Plan the subscription type accordingly.
+Every apply follows: **plan -> inspect resource shape -> resolve stop conditions -> apply -> verify live state**.
 
-### 1.2 Bootstrap identity + state backend (the one local step)
+## 3. Prerequisites
 
-The [`bootstrap/`](bootstrap/) root (local state - ADR-005, never committed) creates:
+### 3.1 Azure and tenant prerequisites
 
-- The **OIDC app registration + service principal** (`sp-alz-poc-cicd`) with federated credentials - no client
-  secret is ever created.
-- The **remote state backend**: a CMK-encrypted, versioned, Entra-only (shared-key-disabled) Storage Account in
-  `rg-tfstate-mgmt-*`, firewalled `default_action = Deny` (ADR-025). One state blob per root.
-- The SP **RBAC**: the scoped role matrix from [ADR-021](DECISIONS.md) (Management Group Contributor at Tenant
-  Root, Resource Policy Contributor + User Access Administrator at the Globaris / landingzones MGs, Contributor +
-  UAA at each of the 5 subs, Storage Blob Data Contributor on the state SA). ADR-006 (Owner at Tenant Root) is
-  the historical build-phase grant that ADR-021 supersedes.
+- One Microsoft Entra tenant.
+- Five pre-provisioned subscriptions: Management, Connectivity, Identity, Security, and Landing Zones.
+- Bootstrap operator permissions for management-group creation, RBAC assignment, and required directory work.
+- Elevated access at Tenant Root while establishing the hierarchy and bootstrap role model.
+- Microsoft Entra Domain Services tenant prerequisites described in
+  [`platform/identity/README.md`](platform/identity/README.md).
+- An organization-owned subdomain for the immutable managed-domain name.
+- Resource providers, service quotas, and regional availability required by the selected feature gates.
+- Central US available as primary and East US 2 as secondary/DR.
 
-**Federated-credential subjects must include the gated environments.** Bootstrap must federate, at minimum:
-`repo:<org>/<repo>:ref:refs/heads/main`, `repo:<org>/<repo>:pull_request`,
-`repo:<org>/<repo>:environment:production`, and `repo:<org>/<repo>:environment:production-destroy`. Without the
-two `environment:*` subjects, gated `apply` / `destroy` jobs fail at `azure/login`
-(`docs/cicd-deploy-teardown.md` §7).
+Known offer constraints in the POC subscription are handled explicitly:
 
-### 1.3 GitHub repository configuration
+- Corporate App Service and SQL tiers remain off.
+- AKS uses a small, single system node pool.
+- Region-specific capacity drove Fabric and AI Search to Central US.
 
-Split per LESSON 15 - **OIDC login IDs are Variables, per-resource values are Secrets** (never the reverse).
+### 3.2 Tool versions
 
-**Repository Variables** (`Settings -> Secrets and variables -> Actions -> Variables`):
+| Tool | Repository requirement |
+| --- | --- |
+| Terraform | `1.15.6` in CI; use the same for bootstrap. |
+| Azure CLI | 2.x. |
+| GitHub Actions | Hosted runners with OIDC federation. |
+| Providers | Pinned in each root; most roots use `azurerm ~> 4.71.0`, with root-specific `azapi`, `azuread`, `alz`, `modtm`, `random`, and `time` pins. |
 
-| Variable | Purpose |
-|----------|---------|
-| `AZURE_CLIENT_ID` | OIDC app (client) ID for `azure/login` |
-| `AZURE_TENANT_ID` | Tenant ID for `azure/login` |
-| `AZURE_SUBSCRIPTION_ID` | Default subscription for the login context |
+### 3.3 GitHub identity and configuration
 
-**Repository Secrets** - the `TF_VAR_*` values consumed by [`_tf-root.yml`](.github/workflows/_tf-root.yml).
-The workflow maps these Secrets to `TF_VAR_*` env vars; supply each before the root that needs it (§3 lists which
-root consumes which). The core set:
+The bootstrap identity uses GitHub workload-identity federation; no Azure client secret is created.
+Federated subjects must cover pull requests, the deployment branch/ref, `production`, and
+`production-destroy` environment jobs.
 
-| Secret | Consumed by |
-|--------|-------------|
-| `AZURE_TENANT_ID` | all (as `TF_VAR_tenant_id`) |
-| `MANAGEMENT_SUBSCRIPTION_ID`, `CONNECTIVITY_SUBSCRIPTION_ID`, `IDENTITY_SUBSCRIPTION_ID`, `SECURITY_SUBSCRIPTION_ID`, `LANDINGZONES_SUBSCRIPTION_ID` | all roots (provider sub selection) |
-| `TERRAFORM_SP_OBJECT_ID` | policy remediation / role assignments |
-| `BUDGET_ALERT_EMAIL`, `SECURITY_CONTACT_EMAIL` | management, security |
-| `PRIMARY_HUB_VNET_ID` / `_NAME` / `PRIMARY_HUB_RG_NAME` / `PRIMARY_FIREWALL_PRIVATE_IP` and the `SECONDARY_*` set | identity + spokes (from connectivity outputs - see §3.4) |
-| `PLATFORM_LAW_WORKSPACE_ID` (from management outputs) | connectivity (firewall diagnostics) + all five spokes |
-| `PLATFORM_ACTION_GROUP_ID` (from management outputs) | required by corp-a1, corp-a2, online-p1 (declared, not read on any create path yet) |
-| `PLATFORM_LAW_CUSTOMER_ID` (from management outputs, workspace GUID) | corp-a1, online-p1, bank-app-p1, bank-data-p1 (not corp-a2 - Traffic Analytics is omitted on the DR flow log, LESSON 43; not `platform/security`, which uses its own workspace) |
-| `SQL_AAD_ADMIN_OBJECT_ID`, `SQL_AAD_ADMIN_LOGIN` | corp spokes (only if `enable_sql = true`) |
-| `BREAK_GLASS_GROUP_OBJECT_ID`, `PIM_PRIVILEGED_GROUP_OBJECT_ID`, `PIM_APPROVER_GROUP_OBJECT_ID` | identity (PIM + CA) |
-| `SENTINEL_OWNER_GROUP_OBJECT_ID`, `HONEYPOT_USER_PRINCIPAL_NAME` | security / synthetic |
-| `AADDS_IMPORT_REPLICA_SET_ID` | identity - leave **unset** on greenfield (import block is a no-op; ADR-029) |
+Repository variables provide OIDC login identifiers. Secrets provide Terraform IDs and operational values:
 
-> The "deferred per-root Secrets" (the cross-root outputs - hub VNet IDs, firewall IPs, platform LAW / action
-> group IDs) do not exist until an earlier root has been applied. You add them **between** steps, as §3.4 and
-> §3.7 call out. Greenfield sequencing is: apply the producing root, read its `terraform output`, paste those
-> values into the consuming root's Secrets, then apply the consuming root.
+- tenant and five subscription IDs;
+- CI service-principal object ID;
+- alert/security contact destinations;
+- hub VNet IDs/names/resource groups and firewall private IPs;
+- platform Log Analytics workspace ID/customer ID and action-group ID;
+- privileged, break-glass, AKS admin, Sentinel owner, and Fabric admin identities; and
+- workload-specific values that are never committed.
 
-**GitHub Environments** (`Settings -> Environments`): `production` (gates `apply`) and `production-destroy`
-(gates teardown), each with a required reviewer where the plan entitlement allows (reviewer gate status:
-OQ-015). Both exist **ungated** in the interim, so the pipeline is functional either way.
+Cross-root values are set only after their producer is live. The main handoffs are:
 
-### 1.4 Tooling versions
+1. Management outputs -> Log Analytics and action-group repository values.
+2. Connectivity outputs -> hub IDs/names/resource groups, firewall private IPs, and private DNS resource group.
+3. Workload/identity-specific principal values -> their later roots or second pass.
 
-| Tool | Version | Where used |
-|------|---------|------------|
-| Terraform | **1.15.6** (pinned in `_tf-root.yml`; use the same locally for bootstrap) | CI + bootstrap |
-| Azure CLI | 2.x | bootstrap, portal-value lookups |
-| `azurerm` provider | `>= 4.0`, pinned per root | all roots |
-| `azuread` provider | `>= 3.0`, pinned | identity |
-| `alz` provider / library | `~> 0.21.0` / `platform/alz@2026.04.2` (ADR-023) | management-groups |
+### 3.4 Approval and review reality
 
----
+- Main-branch protection is configured and version-controlled.
+- `production` and `production-destroy` environments exist so the OIDC subjects resolve.
+- Required environment reviewers were not supported by the active GitHub billing entitlement; the
+  environments are not a proven human approval gate (OQ-015).
+- The local review hook has known fail-open/worktree limitations. A review claim must cite the actual reviewer
+  verdict and reviewed tree hash, not merely the fact that a commit succeeded.
 
-## 2. Deploy order (the dependency graph)
+## 4. Bootstrap
 
-This is the topological order the `deploy.yml target=all` `needs:` graph enforces
-(`docs/cicd-deploy-teardown.md` §2). Deploying out of order fails or orphans (e.g. spokes before the hub they
-peer to). **Synthetic is deferred** (ADR-036 / ADR-037) and is not applied.
+The `bootstrap/` root uses local state, which is ignored and never committed. It creates:
 
-```
-bootstrap  (local, one-time)
-  -> 1 platform/management-groups
-       -> 2 platform/management ──┬─> 3 platform/connectivity ─┐
-       │                          └─> 5 platform/security ─────┼─> 6 corp-a1 ─┐
-       └─> 4 platform/identity                                 │   7 corp-a2  ├─> (9 synthetic - DEFERRED)
-                                                               └─> 8 online-p1┘
-```
+- the OIDC application/service principal and federated credentials;
+- a dedicated bootstrap resource group in East US 2;
+- a purge-protected Key Vault and RSA key;
+- a Storage Account with shared-key access disabled, CMK encryption, versioning, and network restrictions;
+- a state container; and
+- the RBAC assignments needed to build the estate.
 
-Parallelism the graph allows: **identity** runs alongside the management -> connectivity/security chain; the
-**three spokes** run concurrently once connectivity + security are done.
-
----
-
-## 3. Ordered deploy procedure
-
-For every CI step the pattern is the same:
-
-1. Open **Actions -> `Deploy (manual)` -> Run workflow**.
-2. Set `target` to the root, `action = plan`. Review the plan output. (`plan` is ungated.)
-3. Re-run with the same `target`, `action = apply`. **Approve the `production` environment gate** when prompted.
-4. Run the step's validation, capture any `terraform output` the next step needs.
-
-> **Firewalled state (JIT firewall, ADR-025).** The state SA is `default_action = Deny`. For **single-root** runs
-> from a hosted runner, the workflow opens the SA (`manage_runner_ip`, auto-set when `target != all`) for the job
-> window and restores `Deny` on exit. For `target = all`, the runner IP(s) must instead be pre-listed in bootstrap
-> `ip_allow_list` (the documented prerequisite; the JIT flip is disabled on `all` to avoid a parallel-mutation
-> race). See `docs/cicd-deploy-teardown.md` §8.
-
-### Step 0 - bootstrap (local, one-time)
-
-```bash
-cd bootstrap
+```powershell
+Set-Location bootstrap
 terraform init
-terraform plan      # review: OIDC app + SP + federated creds, state SA (CMK, versioned, firewalled), RBAC
+terraform plan
 terraform apply
 ```
 
-Then set the GitHub **Variables** and **Secrets** from §1.3, and confirm `envs/poc.backend.hcl` carries the
-state SA name / RG / container that bootstrap produced. **Validate:** the OIDC app has the four federated
-subjects (incl. both `environment:*`); the state SA is `default_action = Deny` with shared keys disabled.
+The bootstrap resource group is outside normal full-estate teardown. Destroy it only during deliberate final
+decommissioning, after all remote state is no longer needed.
 
-> Re-bootstrap caveat: bootstrap names the state SA/KV with a random suffix, so a full scorched-earth teardown
-> (`include_bootstrap = true`) yields a new name and `poc.backend.hcl` must be re-pasted (LESSON 18 gap,
-> `docs/cicd-deploy-teardown.md` §8). The default teardown keeps the backend, so this only matters on full
-> decommission.
+## 5. Greenfield preflight
 
-### Step 1 - `platform/management-groups`
+Before Step 1, verify all of the following through the current rebuild runbook:
 
-- **Creates:** the Globaris MG hierarchy (Platform / Landing Zones / Decommissioned / Sandbox and children),
-  places the 5 subscriptions, assigns the ALZ policy initiatives (tag governance, deny-public-network, and the
-  `Enable-DDoS-VNET` assignment set to `DoNotEnforce` at Connectivity + landingzones MGs - ADR-026).
-- **Depends on:** bootstrap. **Secrets:** the 5 subscription IDs + `TERRAFORM_SP_OBJECT_ID`.
-- **Run:** `target = platform/management-groups`, `plan` then `apply`.
-- **Validate:** the MG tree exists with 5 subs placed; policy assignments present; no `Enable-DDoS-VNET`
-  enforcement (else spoke/hub VNet creates will 403, ADR-026).
+- no managed resource groups remain in the five subscriptions;
+- no soft-deleted Log Analytics workspace can be recovered into a conflicting name;
+- the management-group hierarchy is absent except Tenant Root;
+- the 11 root state blobs are canonical-empty;
+- the state Storage Account rests at `defaultAction = Deny`;
+- no stale state leases exist;
+- `budget_start_date` is the first day of the current UTC month;
+- region and feature flags match the certified plan;
+- the Security Administrator directory-role prerequisite above is resolved;
+- current pre-clearance applies to the exact commit being deployed; and
+- no second deployment run is active.
 
-### Step 2 - `platform/management`
+Do not rely on Terraform state alone to prove greenfield. Soft-deleted resources, extension objects, policy
+assignments, and subscription-scope resources require Azure API checks.
 
-- **Creates:** the **platform Log Analytics workspace** (operations hub), budgets ($200/sub, $600/MG, alerting
-  50/75/90/100%), the daily **cost export**, the **cost anomaly alert**, tag governance, the **platform action
-  group**, and the **Automation Account** (Update Manager).
-- **Depends on:** 1. **Secrets:** subscription IDs, `BUDGET_ALERT_EMAIL`.
-- **Run:** `plan` then `apply`.
-- **Carry forward:** `terraform output` -> set `PLATFORM_LAW_WORKSPACE_ID`, `PLATFORM_ACTION_GROUP_ID`, and the
-  workspace GUID `PLATFORM_LAW_CUSTOMER_ID` as Secrets. Consumed by connectivity and the spokes, per-Secret
-  detail in §1.3 - **not** by `platform/security`, which creates and uses its own Log Analytics workspace.
+## 6. Feature-gate posture
 
-### Step 3 - `platform/connectivity`
+| Gate | Greenfield/rebuild posture | Reason |
+| --- | --- | --- |
+| `enable_firewall` | `true` for the banking build | Required for forced-tunnel AKS/APIM/Databricks paths; time-box cost. |
+| `enable_kubernetes_platform` | `true` | Builds private AKS and Premium ACR. |
+| `enable_acr_kubelet_binding` | `false` in Pass 1, then `true` in Pass 2 | Cluster identity does not exist during the greenfield plan. |
+| `enable_messaging_platform` | `true` | Builds Event Hubs and Service Bus. |
+| `enable_api_platform` | `true` | Builds internal-mode APIM. |
+| `enable_data_platform` | `true` | Builds Databricks and ADLS. |
+| `enable_fabric_capacity` | `true` during build, suspend after validation | Capacity is independently cost-bearing. |
+| `enable_ai_platform` | `true` | Builds Foundry and AI Search. |
+| `enable_om_phase1` | `false` for Steps 1-12, then `true` for Steps 13-14 | Prevents AMBA policy architecture from landing before its identity/supporting resources. |
+| `enable_synthetic_workload` | `false` | Synthetic signal generator was not part of the proven estate. |
+| Corporate SQL/App Service | `false` | Subscription offer caps. |
+| DDoS/VPN/DNS Resolver/Bastion | off | Cost/scope controls; absent from the August 1 BOM. |
+| Conditional Access override | `false` in identity Pass 1, `true` in Pass 2 | Separates multi-hour Entra DS ARM work from directory operations. |
 
-- **Creates:** the two regional **hub VNets**, **Azure Firewall Premium** (IDPS) in each hub, **VPN Gateway
-  `VpnGw1AZ`** (active-active) in the primary hub, **DNS Private Resolver**, the **89 private DNS zones** in
-  `rg-dns-globaris-poc` linked to both hubs, global hub-to-hub peering, and the GZRS finops storage. DDoS stays
-  off (`enable_ddos_standard = false`). Bastion is on-demand (`enable_bastion = false`).
-- **Depends on:** 2. **Run:** `plan` then `apply`. (This is the longest, most expensive root - see COST.md.)
-- **Carry forward (§3.4):** `terraform output` -> set `PRIMARY_HUB_VNET_ID`, `PRIMARY_HUB_VNET_NAME`,
-  `PRIMARY_HUB_RG_NAME`, `PRIMARY_FIREWALL_PRIVATE_IP` and the `SECONDARY_*` equivalents as Secrets. **Identity
-  and all three spokes consume these** - they cannot be applied until these Secrets exist.
+## 7. Ordered full-estate build
 
-### Step 4 - `platform/identity` (parallelizable with 2/3/5)
+Dispatch one plan and one apply for each step. Never overlap runs.
 
-- **Creates:** the identity VNet (peered to the primary hub), **Entra Domain Services** (Standard managed
-  domain, `identity_mode = "entra-ds"`), the identity **Recovery Services Vault**, PIM eligible assignments, and
-  **8 Conditional Access policies** (report-only; `geo_block` is enabled by default - ADR-030 resolved the
-  Graph 1040 root cause - so all 8 create, not 7 of 8).
-- **Depends on:** 1 (MGs, incl. the identity-MG `Deny-Public-IP` assignment the ADR-028 exemption targets by
-  literal ID) + the primary-hub Secrets from step 3 for the peering. **Secrets:** identity sub ID, the
-  PIM/break-glass group object IDs (optional - skip harmlessly if unset); leave `AADDS_IMPORT_REPLICA_SET_ID`
-  **unset** on greenfield (the import block is a no-op - ADR-029).
-- **Pre-step:** the one-time manual DS SP + `AAD DC Administrators` group (§1.1).
-- **Run (greenfield TWO-PASS, ADR-055 - `enable_conditional_access` defaults to `true` in code. The per-run
-  override is the `Deploy (manual)` workflow_dispatch input `enable_conditional_access_override`, wired ONLY
-  into the identity job, NOT a tfvars or code change. Full step-by-step procedure, pre-dispatch checklist
-  mapped to every GO-CONDITIONAL bar, plan-scan gates, recovery paths, live-monitoring rule, and a
-  STOP/rollback matrix: [`docs/identity-two-pass-dispatch-runbook.md`](docs/identity-two-pass-dispatch-runbook.md).
-  Summary:**
-  - **Pass 1:** `plan` then `apply` with `enable_conditional_access_override=false`. This creates the
-    identity VNet/NSG and the Entra DS managed domain as an azurerm-ONLY apply - no azuread Graph writes run
-    at the tail, so the 1-3 hour create-wait has no trailing-Graph-op exposure even on a multi-hour create.
-    Proven token-safe: azurerm re-mints a fresh OIDC assertion on every access-token acquisition, and Part 2's
-    explicit `ARM_OIDC_REQUEST_URL` / `ARM_OIDC_REQUEST_TOKEN` export (`_tf-root.yml`, ADR-055) makes that
-    refresh reliable for every root, not just this one.
-  - **Pass 1 recovery** (only if the create-wait itself times out, e.g. a slow DC2 / `AADDS104`): either
-    `action=untaint` on `azurerm_active_directory_domain_service.this[0]` (the proven path, run
-    `29068343843`), or reinstate ADR-029's config-driven `import {}` block via the
-    `AADDS_IMPORT_REPLICA_SET_ID` Secret (composite ID `<domain resource ID>/initialReplicaSetId/<replica
-    set GUID>`, GUID supplied by the operator), and re-apply, still with
-    `enable_conditional_access_override=false`.
-  - **Pass 2:** `apply` with `enable_conditional_access_override=true`. The domain already exists, so azurerm
-    does a Read (seconds) and the azuread Conditional Access writes (named location + CA-001..CA-008 - 9
-    azuread resources + 1 `time_sleep` = 10 plan addresses) run early in a short apply under a fresh,
-    just-minted token.
-  - **Steady-state and every non-greenfield apply is exactly Pass 2 alone** (single apply,
-    `enable_conditional_access_override` left BLANK so the code default `true` applies) - the two-pass
-    sequence is a GREENFIELD-ONLY runbook step, never a permanent workflow or default change. `deploy.yml`'s
-    `untaint` / `force-unlock` state-recovery actions still apply if either pass is interrupted.
-- **Validate:** after Pass 1, managed domain `provisioningState: Succeeded` (no CA policies yet - expected,
-  since the flag is false). After Pass 2, all 8/8 CA policies present including `geo_block` (ADR-030
-  resolved; see the dispatch runbook §0 for the corrected plan-scan count).
+| Step | Root/pass | August 1 proven bar | Next certified bar | Key gate |
+| --- | --- | ---: | ---: | --- |
+| 1 | `platform/management-groups` | 537 | 537 | Policy shape and region restrictions. |
+| 2 | `platform/management` | 36 | 38 | Current-month budgets; reset LAW handoff. |
+| 3 | `platform/security` | 48 | 48 | Sentinel LAW purge and directory role; `-parallelism=1`. |
+| 4 | `platform/connectivity` | 696 | 696 | DDoS policy override; firewall IP contract. |
+| 5 | `landing-zones/corp-a1` | 24 | 24 | Primary hub/security ready. |
+| 6 | `landing-zones/corp-a2` | 24 | 24 | Secondary hub/security ready. |
+| 7 | `landing-zones/online-p1` | 26 | 26 | WAF shape and primary hub ready. |
+| 8 | `landing-zones/bank-data-p1` | 73 | 76 | Data exemption, diagnostics ownership, no unexpected replacement. |
+| 9 | `landing-zones/bank-app-p1` Pass 1 | 67 | 67 | Firewall/rule groups live; ACR binding off; allow long APIM create. |
+| 10 | `platform/identity` Pass 1 | 16 | 16 | Conditional Access override off; allow long Entra DS create. |
+| 11 | `platform/identity` Pass 2 | 10 | 10 | Conditional Access override on. |
+| 12 | `bank-app-p1` Pass 2 | 1 | 1 | Enable only the kubelet `AcrPull` binding. |
+| 13 | `platform/management` O&M pass | 3 | 3 | Enable O&M support identity/resources only. |
+| 14 | `platform/management-groups` O&M pass | 223 | 223 | AMBA policy architecture; no existing policy churn. |
 
-### Step 5 - `platform/security`
+Plan counts are regression bars for the pinned dependency set, not resource inventory totals. AVM telemetry
+objects inflate Terraform counts; a module/version change requires re-deriving the bar rather than blindly
+accepting a mismatch.
 
-- **Creates:** the **security Log Analytics workspace** (RBAC-isolated), **Microsoft Sentinel**, the **Defender
-  for Cloud** Standard plans, **regulatory compliance** (NIST SP 800-53 R5 + CIS Azure Foundations 2.0), the
-  security **Key Vault**, the MDC **Event Hub** export (1 TU), and the analytics rules.
-- **Gated off by default** (need a Security Administrator directory role the CI SP lacks, or are latent debt):
-  `enable_aad_diagnostics`, `enable_ueba`, `enable_aad_connector`, `enable_ti_connector`, `enable_mde_connector`,
-  `enable_firewall_ti_rule` (ADR-033 / ADR-034). Result: the sub-scoped MDC connector + 10 of 11 analytics rules
-  land; the tenant-scoped connectors are one flag-flip away once the directory role is granted.
-- **Depends on:** 2 (the `deploy.yml` `needs:` graph sequences it after management). It does **not** consume
-  the platform LAW workspace or customer ID Secrets - it creates and reads only its own Log Analytics
-  workspace (see Creates, above). **Secrets:** security sub ID, `SECURITY_CONTACT_EMAIL`,
-  `SENTINEL_OWNER_GROUP_OBJECT_ID`.
-- **Run:** `plan` then `apply`. **Validate:** Defender plans Standard; Sentinel onboarded; compliance assignments
-  at root MG.
+High-level dispatch pattern:
 
-### Step 6-8 - landing-zone spokes (parallel after 3 + 5)
+```powershell
+gh workflow run deploy.yml `
+  -R Globaris-Inc/Azure-Architecture `
+  --ref banking `
+  -f target="platform/management-groups" `
+  -f action="plan"
+```
 
-Each spoke: `plan` then `apply`. All three consume the hub Secrets from step 3 and
-`PLATFORM_LAW_WORKSPACE_ID` from step 2. `PLATFORM_LAW_CUSTOMER_ID` is read by corp-a1 and online-p1 only,
-not corp-a2 (Traffic Analytics is deliberately omitted from the DR flow log, LESSON 43).
-`PLATFORM_ACTION_GROUP_ID` is a required Secret on all three (an unset value fails `plan`) but is not
-actually read by any of them on their current create path.
+After the plan is inspected, repeat with `action="apply"`. Use the exact commands and inputs from the full
+rebuild runbook, especially for the two identity passes.
 
-| Root | Creates | Notes |
-|------|---------|-------|
-| `landing-zones/corp-a1` | eastus2 network spoke - VNet, hub peering, NSG, UDR-to-firewall, RSV (ZRS), VNet flow logs + Traffic Analytics, policy compliance | App Service + SQL **gated off** (ADR-031/032). Network landing zone. |
-| `landing-zones/corp-a2` | centralus DR cold-standby spoke - same shape, RSV GeoRedundant, geo-paired to corp-a1 | App Service + SQL gated off. DR topology. |
-| `landing-zones/online-p1` | internet-facing spoke - **App Gateway WAF_v2** (`WAF_mode = Prevention`, `appgw_capacity = 1`) + **Static Web App** | **Live workload.** Public entry point. |
+## 8. Plan inspection rules
 
-- **corp SQL only:** set `SQL_AAD_ADMIN_OBJECT_ID` / `SQL_AAD_ADMIN_LOGIN` and flip `enable_sql = true` **only**
-  in an unrestricted subscription (else `ProvisioningDisabled`, ADR-031).
-- **Validate:** spoke VNets peered to the correct regional hub; default route `0.0.0.0/0 -> firewall`; online-p1
-  App Gateway healthy and reachable.
+Stop before apply if any of the following appears without a written disposition:
 
-### Step 9 - `synthetic` - DEFERRED, do not deploy
+- an unexpected destroy or `-/+` replacement;
+- a plan count or resource class outside the certified shape;
+- an import/adoption requirement on a supposedly greenfield resource;
+- policy assignment, definition, initiative, or management-group churn during the O&M re-land;
+- a live resource absent from state;
+- an expired or missing policy exemption;
+- an unresolved soft-delete recovery;
+- a firewall address different from `10.0.0.4` or `10.1.0.4`; or
+- an output/secret handoff that cannot be independently verified.
 
-`enable_synthetic_workload = false`. The synthetic root is repositioned toward a future Day-2 Operations and
-Monitoring capability (ADR-036 / ADR-037, [`docs/operations-monitoring-design.md`](docs/operations-monitoring-design.md))
-and is **not** applied. Skip this step.
+Do not use a bare retry. Diagnose the failure, change the repository or external prerequisite that caused it,
+run a new plan, and scan it again.
 
----
+## 9. Verification after the build
 
-## 4. Full-environment deploy (shortcut)
+At minimum, compare the result to [`docs/estate-bom.md`](docs/estate-bom.md):
 
-Once every consuming Secret exists (i.e. after at least one full manual pass, or when re-deploying after a
-non-bootstrap teardown), you can run the whole graph in one dispatch:
+- management-group topology and policy counts;
+- resource-group and resource-type counts;
+- both firewalls' zones and private IPs;
+- eight peering states;
+- five spoke default routes;
+- WAF Prevention mode;
+- private endpoint and DNS inventory;
+- Defender pricing state;
+- AKS, APIM, messaging, Databricks, Fabric, Foundry, and Search properties;
+- diagnostic-setting coverage; and
+- resources that must remain absent.
 
-- `target = all`, `action = plan` - review the aggregate plan.
-- `target = all`, `action = apply` - the `needs:` graph applies all roots in order; each `apply` job hits the
-  `production` gate. Synthetic is skipped by policy (gated off).
+The BOM records non-deterministic naming rules. Compare those resources by stable prefix and count, not by a
+GUID-bearing name.
 
-> `target = all` disables the per-job JIT state-firewall flip (race-prone in parallel), so the runner IP must be
-> covered by bootstrap `ip_allow_list` first (§3 firewalled-state note; `docs/cicd-deploy-teardown.md` §8).
-> First-time greenfield still needs the **per-root** order in §3 because the cross-root output Secrets do not
-> exist yet.
+## 10. Teardown and rebuild
 
----
+Use `teardown.yml`, not ad hoc portal deletion. Full teardown performs:
 
-## 5. What is CI-only vs local (be honest about it)
+1. guard and policy disarm;
+2. Databricks and diagnostic pre-cascade handling;
+3. serialized reverse-order Terraform destroys for owned roots;
+4. cross-root attachment cleanup;
+5. Azure API remnant sweep;
+6. independent verification; and
+7. canonical state reset.
 
-| Action | Where | Why |
-|--------|-------|-----|
-| Bootstrap (`apply`) | **Local** (or optional `bootstrap.yml`) | Local state, one-time; creates the very backend + OIDC the CI needs (ADR-005) |
-| Every platform / landing-zone `apply` | **CI only** (`deploy.yml`) | OIDC federation, `production` gate, JIT state firewall - deploys are explicit dispatches, never merge-triggered (LESSON 17) |
-| `plan` on any root | CI (ungated) or local | Local plan needs the state SA reachable + `-var-file` overrides; CI plan is the supported path |
-| State recovery (`untaint`, `force-unlock`) | **CI only** (`deploy.yml` actions) | Pure state writes against the firewalled backend (ADR-029) |
-| Teardown (`destroy`) | **CI only** (`teardown.yml`) | Reverse-order `terraform destroy`, `production-destroy` gate + typed confirm |
+The management-group root uses the API cascade in the full path because provider refresh was measured at more
+than five hours before issuing a delete. Single-root Terraform destroy remains available when exact provider
+ownership is needed.
 
----
+After teardown, verify Azure and state independently. A green workflow conclusion alone is not sufficient.
 
-## 6. Teardown
+## 11. References
 
-Teardown is CI-driven and covered in full by [`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md)
-(§5-§6) and the runbook - this guide does not duplicate it. In short: `teardown.yml`, `target = all`, typed
-`confirm = destroy`, `production-destroy` gate, uniform `terraform destroy` in **reverse** dependency order
-(ADR-020). `include_bootstrap` defaults to **false** (keeps the state backend + OIDC app so redeploy is
-immediate); set it `true` only for full decommission (then re-paste `poc.backend.hcl`, per the LESSON 18 gap).
-Single-root teardown (`target = <one root>`) is the cheap "cut cost on one spoke" path.
-
----
-
-## 7. References
-
-- [`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md) - pipeline mechanics, gating, teardown, firewalled state (authoritative)
-- [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) + [`_tf-root.yml`](.github/workflows/_tf-root.yml) - the workflows
-- [ARCHITECTURE.md](ARCHITECTURE.md) - topology, RTO/RPO, fidelity map
-- [COST.md](COST.md) - per-component monthly estimate + FinOps levers
-- [DECISIONS.md](DECISIONS.md) - ADRs (notably 019/020/021/022/025/026/029/031/032/033/034/036/037)
-- [`platform/identity/README.md`](platform/identity/README.md) - the one-time Entra DS tenant pre-step
+- [`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md): authoritative operator procedure.
+- [`docs/preclearance/2026-07-22-full-estate-rebuild.md`](docs/preclearance/2026-07-22-full-estate-rebuild.md): current pre-clearance evidence and amendments.
+- [`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md): workflow mechanics.
+- [`docs/estate-bom.md`](docs/estate-bom.md): proven live inventory and comparison method.
+- [`docs/teardown-redesign.md`](docs/teardown-redesign.md): teardown architecture.
+- [`docs/identity-two-pass-dispatch-runbook.md`](docs/identity-two-pass-dispatch-runbook.md): identity-specific two-pass procedure.
+- [`WORKLOG.md`](WORKLOG.md): current state and handoff.

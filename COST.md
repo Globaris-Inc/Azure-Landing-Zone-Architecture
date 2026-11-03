@@ -1,157 +1,199 @@
-# COST.md - Estimated Monthly Cost + FinOps Levers
+# Cost Model and FinOps Controls
 
-> **Section:** 11 (Documentation Deliverables), item 5. See [PROMPT.md](PROMPT.md) §7 (FinOps) and §11.
-> **Scope:** the estate as actually deployed and gated today (see [WORKLOG.md](WORKLOG.md) Section Status
-> Tracker and [ARCHITECTURE.md](ARCHITECTURE.md)). Config sourced from [`envs/poc.tfvars`](envs/poc.tfvars).
-> **Last updated:** 2026-07-11
+This document explains the cost shape of the architecture proven on 2026-08-01, the current greenfield cost
+posture, and the controls used to avoid accidental POC spend. Values are planning ranges, not an invoice or a
+current Azure quote.
 
----
+## 1. Read this first
 
-## Read this first - these are estimates, not a bill
+- The managed estate is currently greenfield after the 2026-08-03 teardown. Only the protected bootstrap
+  backend remains, so the full-estate monthly range is not the current run rate.
+- The last complete estate existed for validation and was time-boxed.
+- Azure pricing varies by region, agreement, currency, data volume, operations, egress, reservations and
+  feature configuration.
+- The estimates below use the project's July/August 2026 planning assumptions and the exact August 1 BOM.
+- Re-price through the Azure Pricing Calculator before funding a new deployment.
 
-Every figure below is a **list-price estimate** at **POC scale**, computed from public Azure retail prices for
-US regions (`eastus2` primary, `centralus` DR), using **730 hours/month**. They are **not** billed actuals and
-carry **no** Enterprise Agreement / MCA discount, reservation, or Azure Hybrid Benefit. Data-plane charges
-(egress, log ingestion, backup storage, per-transaction Defender) scale with real traffic, which a POC with no
-live workload keeps near the floor. Treat the numbers as a planning envelope, and reconcile against Azure Cost
-Management once the estate has run for a full billing cycle (the FinOps cost export and budgets described in §7
-exist precisely for that reconciliation).
+## 2. Cost states
 
-**Headline:** as deployed and gated today the estate lands at roughly **$3,600 to $4,800 per month**. The two
-**Azure Firewall Premium** instances alone are ~$2,555/mo fixed (about 55-65% of the bill), so they plus the
-**Defender for Cloud** plans are the dominant cost levers. Prices flagged with a dagger (`†`) are the ones I am
-least certain of - see [Prices I was unsure about](#prices-i-was-unsure-about).
+| State | Cost interpretation |
+| --- | --- |
+| Current greenfield | Protected bootstrap Key Vault, key, Storage Account, state blobs, identity and alerting only. No full-estate estimate is claimed. |
+| Proven August 1 estate | Planning envelope approximately **$4,500-$6,200/month** if left running for a full month at the validated POC scale. |
+| Production target | Not estimated as one number. Multi-region banking, full Defender coverage, DDoS, CMK, higher availability, backups, ingestion and traffic require workload measurements and business RTO/RPO. |
 
----
+The full-estate range is consistent with the pre-build banking design. It has not been reconciled to a full
+month of invoice data because the estate was torn down after validation.
 
-## Per-component estimate (as-deployed, gated)
+## 3. Proven estate cost model
 
-The "as-deployed" column reflects the live gating: DDoS off, corp App Service + SQL gated off (ADR-031 /
-ADR-032), Bastion on-demand and idle (ADR-015), synthetic layer deferred (ADR-036 / ADR-037).
+| Component | Proven shape | Planning range/month | Confidence and driver |
+| --- | --- | ---: | --- |
+| Azure Firewall Premium | 2 instances, zone-redundant | $2,500-$3,000 | High confidence that this dominates fixed cost; data processing adds usage cost. |
+| Service Bus Premium | 1 namespace, 1 messaging unit | $650-$750 | High fixed-cost component selected because private endpoints require Premium. |
+| AKS compute | 3 `D2s_v4` system nodes | $250-$450 | VM/disk/uptime dependent; control-plane cost depends on tier. |
+| Application Gateway WAF_v2 | 1 gateway/capacity unit | $250-$400 | Fixed gateway plus capacity/data processing. |
+| Microsoft Fabric | F2 capacity | $250-$350 while active | Pausable; should be suspended outside validation windows. |
+| Entra Domain Services | Standard | $100-$150 | Managed identity platform fixed cost. |
+| APIM | Developer tier, single region | $50-$100 | POC tier; production Premium/multi-region changes the order of magnitude. |
+| ACR | Premium | $45-$75 | Premium chosen for private-link capability. |
+| Event Hubs | Standard, 1 throughput unit | $25-$75 | Throughput/capture/retention dependent. |
+| AI Search | Basic | $70-$110 | Fixed service tier; capacity/replicas change cost. |
+| Databricks | Premium workspace, no clusters/jobs | $0-$100 platform idle/limited validation | DBUs and VM compute dominate when clusters or warehouses run. |
+| ADLS Gen2 | ZRS account, private endpoints | $20-$100 | Capacity, transactions, redundancy and PE hours/data. |
+| Foundry/model usage | AIServices account and small model deployment | $20-$150 | Token/request consumption; no PTU reservation. |
+| Log Analytics and Sentinel data | 2 workspaces, 90-day retention | $100-$600 | Ingestion/retention is usage-driven; Sentinel service cost follows eligible data tiers. |
+| Defender for Cloud | 11 Standard plans in Security subscription | $100-$700 | Resource-count and plan dependent; extending to all subscriptions is a separate cost decision. |
+| Private endpoints | Approximately 8 service paths in the BOM | $50-$100 plus data | Per-endpoint hours and processed data. |
+| Storage, DNS, Public IPs, RSVs, flow logs | 89 private DNS zones, multiple storage accounts, vaults and IPs | $100-$350 | Operations, stored data, retention and backup instances. |
+| Static Web App and supporting low-cost resources | POC scale | $0-$50 | Tier/traffic dependent. |
 
-| # | Component | Where | Unit basis (list price) | Est. monthly (USD) |
-|---|-----------|-------|--------------------------|--------------------|
-| 1 | **Azure Firewall Premium x2** (fixed) | connectivity, both hubs | $1.75 / deployment-hour x 730 x 2 | **~$2,555** |
-| 2 | Azure Firewall data processing | connectivity | $0.016 / GB (POC traffic low) | ~$5 - $30 |
-| 3 | **VPN Gateway `VpnGw1AZ`** (primary, active-active) | connectivity primary hub | ~$0.36 / hour x 730 `†` | ~$260 `†` |
-| 4 | **DNS Private Resolver** (inbound + outbound endpoints) | connectivity primary hub | $180 / mo per endpoint x 2 `†` | ~$360 `†` |
-| 5 | **App Gateway WAF_v2** (capacity 1) | online-p1 | $0.443 / gw-hr x 730 + ~1 CU x $0.0144 x 730 | ~$335 |
-| 6 | Log Analytics x2 workspaces (ingest + retention) | management LAW + security LAW | ~$2.76 / GB ingest; +$0.10 / GB-mo over 31d | ~$60 - $150 |
-| 7 | Microsoft Sentinel (analytics on security LAW) | security | per-GB analyzed (POC low; some free tier) | ~$0 - $50 |
-| 8 | **Defender for Cloud plans** (Standard) | all subs | per-resource, see breakdown below | ~$75 - $250 |
-| 9 | Event Hub (Standard, 1 TU) - MDC export | security | ~$0.03 / TU-hr + per-event ingestion | ~$25 |
-| 10 | **Entra Domain Services** (Standard managed domain) | identity | ~$0.15 / hour x 730 | ~$110 |
-| 11 | Recovery Services Vaults x3 (corp-a1 ZRS, corp-a2 GRS, identity) | landing zones + identity | vault free; pay per protected instance + backup storage | ~$5 - $30 |
-| 12 | Static Web App (Standard) | online-p1 | ~$9 / mo per app | ~$9 |
-| 13 | Private DNS zones (89) | connectivity (`rg-dns-globaris-poc`) | $0.50 / zone (first 25) + $0.10 / zone after + query | ~$20 - $30 |
-| 14 | Storage - GZRS finops + CMK state SA + cost exports | connectivity / management | GZRS ~2x LRS; low volume | ~$10 - $30 |
-| 15 | Public IPs (Standard static: 2x firewall, VPN GW, App GW) | connectivity + online-p1 | ~$3.65 / IP-mo | ~$15 - $30 |
-| 16 | VNet peering data transfer (incl. global hub-to-hub) | connectivity | ~$0.035 / GB each direction (POC low) | ~$5 - $20 |
-| 17 | Automation Account + Update Manager | management | base free; runbook minutes minimal | ~$0 - $5 |
-| 18 | Budgets, cost anomaly alerts, cost export, tag policy | management + management-groups | Azure Cost Management + Policy | $0 (free) |
-| | **Estimated total (as-deployed, gated)** | | | **~$3,600 - $4,800 / mo** |
+Ranges overlap and are not additive with accounting precision; the **$4,500-$6,200** envelope is the governing
+planning estimate. The table explains its shape.
 
-### Defender for Cloud plan detail (row 8)
+## 4. Cost excluded from the proven August 1 BOM
 
-Defender is billed **per protected resource**, so the total tracks the resource count, which the gating keeps
-low. The plans onboarded (per [ARCHITECTURE.md](ARCHITECTURE.md) and `platform/security`):
+| Capability | Status | Historical planning impact |
+| --- | --- | --- |
+| DDoS Network Protection | Off/absent | Approximately $2,944/month avoided in the project's planning model. |
+| VPN Gateway | Off/absent | Fixed gateway and public-IP cost avoided. |
+| DNS Private Resolver | Off/absent | Endpoint-hour cost avoided. |
+| Azure Bastion | Off/absent | On-demand capability not kept running. |
+| Corporate App Service and SQL | Gated off | Subscription offer caps prevented deployment. |
+| Synthetic workload/signal generator | Off | No demo load or cost-pattern resources. |
+| Databricks clusters/jobs/warehouses | Not created | Avoided DBU and VM compute spend. |
+| Fabric artifacts/workloads | Not created | Capacity only; no in-Fabric platform build. |
+| Multi-region banking services | Design-only | Avoided duplicate AKS/APIM/messaging/data/AI service cost. |
+| Banking data-tier CMK | Designed, not implemented | Key Vault/key/identity/transaction costs not included. |
+| Full Defender coverage across all 5 subscriptions | Not implemented | Cost-bearing expansion requires explicit decision. |
 
-| Plan | List basis | POC exposure |
-|------|-----------|--------------|
-| Servers P2 | ~$15 / server-mo | Near $0 - Entra DS DCs are managed (not billable VMs); no spoke VMs |
-| Storage (DefenderForStorageV2) | ~$10 / storage account-mo + malware scan per GB | Several storage accounts - a few tens of $ |
-| Key Vault | ~$0.02 / 10K transactions | Cents at POC transaction volume |
-| Resource Manager (Arm) | per subscription | Small, per-sub (held as latent debt, ADR-034) |
-| Containers | per vCore-hour | $0 - no AKS / container hosts |
-| App Service | ~$14.60 / instance-mo | $0 - App Service gated off (ADR-032) |
-| SQL (servers / SQL-on-VM) | ~$15 / server-mo | $0 - SQL gated off (ADR-031) |
-| CSPM (CloudPosture) | foundational free; advanced per-resource | Low |
+## 5. Cost allocation and governance
 
-> With App Service and SQL gated off and no billable VMs, Defender sits at the **low** end of its range today.
-> Turning the corp workload tiers on (App Service + SQL) would add both the compute cost **and** the matching
-> Defender plan cost, which is why item 8 is a top production lever, not just a POC line.
+### 5.1 Budgets
 
----
+The environment configuration defines:
 
-## What the total is NOT counting (gated / deferred today)
+- $200 monthly budget per subscription across five subscriptions;
+- $600 management-group budget; and
+- alerts at 50, 75, 90 and 100 percent.
 
-These are **off** in the live estate, so they are excluded from the total above. This is the FinOps story: the
-architecture is faithful, but the expensive knobs are deliberately turned down for the POC.
+Budgets are alerts, not hard spending caps. They will not stop a firewall, messaging unit or capacity.
 
-| Deferred / gated item | If enabled | Monthly delta | Reference |
-|-----------------------|-----------|----------------|-----------|
-| **DDoS Network Protection** | `enable_ddos_standard = false` | **~+$2,944** (flat plan) | ADR-026, [`envs/poc.tfvars`](envs/poc.tfvars) |
-| **corp App Service tier** (B2) | `enable_app_service = false` | ~+$25 - $60 compute + Defender for App Service | ADR-032 |
-| **corp SQL tier** (Basic/5 DTU) | `enable_sql = false` | ~+$5 - $15 + Defender for SQL | ADR-031 |
-| **Azure Bastion** (Standard) | `enable_bastion = false` (idle = $0) | ~+$140 while running | ADR-015 |
-| **Synthetic workload layer** | `enable_synthetic_workload = false` | ~+$50 - $150 (ACI, k6, idle demo VM, disks) | ADR-036 / ADR-037 |
-| Second-hub DNS Private Resolver | present in primary only today `†` | ~+$360 if added to DR hub | see §4 note |
+The Azure Consumption API requires the monthly budget/export start date to be in the current month. This
+caused a real Step 2 rebuild failure when the calendar rolled from July to August. The durable control is a
+preflight property check; a comment reminding an operator is not sufficient.
 
----
+### 5.2 Tags and ownership
 
-## FinOps levers
+Management-group policy applies/assesses common tags such as environment, workload, owner, cost center and
+managed-by. Azure Policy also injects a `CreatedDate` tag, which creates accepted Terraform cosmetic drift
+because policy adds the tag and Terraform removes it from its desired tag set.
 
-### Already pulled for cost (the POC is cost-tuned by design)
+Cost analysis should start at:
 
-- **DDoS Network Protection is off** - the single biggest saving, ~$2,944/mo avoided. The ALZ `Enable-DDoS-VNET`
-  Modify policy is also neutralised (`DoNotEnforce`) so it does not inject a plan (ADR-026).
-- **corp App Service + SQL tiers gated off** - the corp spokes stand as **network** landing zones (VNet, peering,
-  NSG, UDR-to-firewall, RSV, flow logs, policy), with the billable app + database tiers pre-staged behind
-  single-variable flags (ADR-031 / ADR-032). Removes both the compute cost and the matching Defender plan cost.
-- **Bastion is on-demand** - Standard Bastion costs $0 while `enable_bastion = false`; it is flipped on only for a
-  session and back off, instead of running ~$140/mo idle (ADR-015).
-- **Synthetic layer deferred** - no k6 load generator in ACI, no red-team simulator, no oversized idle demo VM or
-  unattached premium disk drawing cost (ADR-036 / ADR-037).
-- **VPN Gateway in the primary hub only** - the DR hub has no gateway; it transits via global VNet peering,
-  avoiding a second ~$260/mo gateway (ARCHITECTURE.md DR topology).
-- **Independent per-hub firewall policies** (no premium shared-policy tier), **single App Gateway capacity unit**
-  (`appgw_capacity = 1`), and **7-day flow-log retention** (`flow_log_retention_days = 7`) all keep variable costs
-  at the floor.
-- **Budgets + anomaly alerts are live** - $200/sub (5 subs = $1,000/mo sub-scope ceiling) and $600 at MG scope,
-  alerting at 50 / 75 / 90 / 100% (`budget_amount_per_subscription`, `budget_amount_per_mg`). Note: the estate's
-  *modeled* run-rate (~$3,600-$4,800/mo) exceeds the per-sub budget once concentrated in the connectivity sub
-  (the two firewalls sit there), so those thresholds will fire - by design, as an early-warning FinOps signal.
+1. subscription;
+2. resource group;
+3. service/meter;
+4. region;
+5. workload/owner/cost-center tag; and
+6. daily change versus the deployment calendar.
 
-### What a production build would add (and cost)
+### 5.3 Exports and anomaly monitoring
 
-- **Turn DDoS on** (~+$2,944/mo) for a faithful edge-security posture, driven by a single `enable_ddos_standard`
-  toggle that also restores the `Enable-DDoS-VNET` policy enforcement (OQ-019).
-- **Enable the corp workload tiers** - move App Service off the B2 POC SKU to `P1v3` (per the tfvars note) and
-  bring SQL online in an unrestricted subscription/region; add the matching Defender plans.
-- **Scale App Gateway WAF_v2** above capacity 1 and Log Analytics ingestion up as real traffic and Sentinel
-  connectors (Entra ID, TI, MDE - currently gated) come online; both are per-unit / per-GB and grow with load.
-- **Add a second-hub DNS Private Resolver**, run Bastion continuously, and lengthen backup/flow-log retention for
-  forensic and DR requirements - each a bounded, known increment from the table above.
-- **Reservations / savings plans** on the always-on fixed components (both firewalls, the VPN gateway, App
-  Gateway) would materially cut the ~55-65% firewall share that dominates this estate.
+The Management root includes cost exports, anomaly-notification plumbing, budgets and FinOps workbooks. These
+improve visibility but were not validated against a full billing month. The carbon-optimization workbook must
+not be treated as production reporting without content and data-source verification.
 
----
+## 6. Cost-control levers
 
-## Prices I was unsure about
+### 6.1 Fastest safe levers
 
-Called out honestly so a reviewer can re-verify before quoting these to a customer:
+1. Suspend Fabric F2 after validation.
+2. Stop AKS when no workload test is running.
+3. Keep Databricks free of running clusters/jobs unless a test requires them.
+4. Disable or destroy unused workload gates through their Terraform root.
+5. Control Log Analytics retention and ingestion with security/compliance approval.
+6. Run the full verified teardown when the POC window ends.
 
-1. **`VpnGw1AZ` hourly rate (`†`, row 3).** Public sources disagreed: one search returned an implausible
-   $1.34/hr (rejected - outside the documented $0.15-$0.55/hr gateway-SKU band), so I used **~$0.36/hr**
-   (~$260/mo) as the zone-redundant VpnGw1 estimate. Re-confirm on the VPN Gateway pricing page for the exact
-   `eastus2` `VpnGw1AZ` rate; active-active may add a second Standard public IP (~$4/mo) but is billed as one
-   gateway resource.
-2. **DNS Private Resolver endpoint count (`†`, rows 4 / second-hub row).** Priced as **one resolver in the
-   primary hub with an inbound + outbound endpoint pair (~$360/mo)**. PROMPT §4/§8 call for "a resolver in each
-   hub"; the ARCHITECTURE mermaid shows it in the primary hub only. If the DR hub also carries a resolver, add
-   ~$360/mo. Confirm against the deployed `platform/connectivity` resolver resources.
-3. **Defender for Cloud total (row 8).** Highly resource-count dependent; the ~$75-$250 range assumes today's
-   gated resource set. It rises directly with any enabled workload tier.
-4. **Log Analytics / Sentinel ingestion (rows 6 / 7).** Driven by real log volume, which a no-live-workload POC
-   keeps near the floor; the range widens sharply under production traffic and once the gated Sentinel
-   connectors are enabled.
+### 6.2 High-impact architectural levers
 
----
+- **Firewalls:** biggest fixed cost. Removing them requires stopping or redesigning dependent AKS/APIM/
+  Databricks routes and applying connectivity; never delete while spokes route to `10.0.0.4`/`10.1.0.4`.
+- **Service Bus:** Premium was selected for private endpoints. Standard is cheaper but changes network and
+  policy posture; it is an architectural tradeoff, not a right-size setting.
+- **Fabric:** suspend when idle; do not provision a larger SKU without measured CU demand.
+- **Defender:** decide coverage by subscription/resource type and quantify the security benefit/cost before
+  extending the 11-plan set.
+- **Multi-region:** production resilience duplicates service capacity and data transfer. Fund it from business
+  RTO/RPO, not from an unqualified “must be highly available” statement.
 
-## Sources
+### 6.3 Rightsizing sequence
 
+1. Remove idle resources.
+2. Stop/suspend pausable compute.
+3. Right-size SKUs and node counts from metrics.
+4. Reduce unnecessary data retention/ingestion.
+5. Use schedules/autoscale where the service and workload support them.
+6. Evaluate reservations/savings plans only after a stable utilization baseline.
+7. Revisit architecture choices such as Premium/private-link and multi-region with risk owners.
+
+## 7. Cost-performance-security tradeoffs demonstrated
+
+| Decision | Cost result | Security/performance result |
+| --- | --- | --- |
+| Premium Service Bus | Higher fixed cost | Enabled private endpoint and local-auth-disabled posture. |
+| Two Firewall Premium instances | Largest fixed cost | Regional forced routing, policy and IDPS capability. |
+| DDoS plan off | Avoided major idle cost | Accepted reliance on DDoS Basic/WAF/firewall for POC. |
+| Single Landing Zones subscription | Lower subscription/operational overhead | Online and Corp cannot receive distinct subscription placement. |
+| Single-region banking POC | Avoided duplicate platform cost | Does not meet production regional availability objectives. |
+| Report-only Conditional Access | No direct Azure resource savings | Reduced lockout risk during rollout but did not enforce access controls. |
+| Fabric F2 with suspension | Demonstrates platform at small scale | Requires operational discipline to avoid idle capacity cost. |
+| Databricks without clusters/jobs | Proves workspace/network architecture cheaply | Does not demonstrate data processing performance or governance. |
+
+## 8. Cost review checklist
+
+Before deployment:
+
+- re-price every fixed-cost Premium service;
+- confirm flags and region/SKU values;
+- confirm `budget_start_date` is current;
+- set real notification recipients through secrets;
+- define the validation window and teardown owner;
+- record expected daily burn and the stop/suspend schedule; and
+- obtain approval for any new Defender, DDoS, multi-region or reserved capacity.
+
+During deployment:
+
+- compare actual resource creation to the plan bars and BOM;
+- watch Firewall, Service Bus, Fabric, AKS, APIM, Search and Log Analytics first;
+- suspend Fabric and stop idle compute promptly; and
+- investigate duplicates or unexpected region placement.
+
+After teardown:
+
+- verify resources and soft-deleted billable objects are gone;
+- confirm Fabric/AKS/Databricks are not still consuming capacity;
+- validate the next Cost Management export/invoice; and
+- compare actual cost against the deployment timeline and update this model.
+
+## 9. Pricing references
+
+Re-price using official sources:
+
+- [Azure Pricing Calculator](https://azure.microsoft.com/en-us/pricing/calculator/)
 - [Azure Firewall pricing](https://azure.microsoft.com/en-us/pricing/details/azure-firewall/)
-- [VPN Gateway pricing](https://azure.microsoft.com/en-us/pricing/details/vpn-gateway/)
-- [Azure DNS (Private Resolver) pricing](https://azure.microsoft.com/en-us/pricing/details/dns/)
-- [Application Gateway pricing](https://azure.microsoft.com/en-us/pricing/details/application-gateway/)
-- [Web Application Firewall pricing](https://azure.microsoft.com/en-us/pricing/details/web-application-firewall/)
+- [Service Bus pricing](https://azure.microsoft.com/en-us/pricing/details/service-bus/)
+- [API Management pricing](https://azure.microsoft.com/en-us/pricing/details/api-management/)
+- [Microsoft Fabric pricing](https://azure.microsoft.com/en-us/pricing/details/microsoft-fabric/)
+- [Azure Kubernetes Service pricing](https://azure.microsoft.com/en-us/pricing/details/kubernetes-service/)
+- [Azure AI Search pricing](https://azure.microsoft.com/en-us/pricing/details/search/)
+- [Microsoft Defender for Cloud pricing](https://azure.microsoft.com/en-us/pricing/details/defender-for-cloud/)
+- [Azure Monitor pricing](https://azure.microsoft.com/en-us/pricing/details/monitor/)
+
+## 10. Evidence and decisions
+
+- [`docs/estate-bom.md`](docs/estate-bom.md): exact resource shape used for this model.
+- [`docs/banking-platform-design.md`](docs/banking-platform-design.md): original banking cost envelope.
+- [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md): cost-bearing hardening decisions.
+- [`RUNBOOK.md`](RUNBOOK.md): cost-spike response.
+- ADR-013, ADR-042, ADR-044-053, ADR-060 and ADR-069 in [`DECISIONS.md`](DECISIONS.md).

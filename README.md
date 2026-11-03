@@ -1,113 +1,171 @@
-# Azure Landing Zone POC
+# Azure Landing Zone and Banking Platform POC
 
-> **Status:** 🚧 In progress - See [WORKLOG.md](WORKLOG.md) for current state.
+Portfolio-grade Azure platform engineering project built with Terraform, Azure Verified Modules (AVM),
+GitHub Actions, and Microsoft Cloud Adoption Framework landing-zone patterns.
 
-Portfolio-grade Proof of Concept implementing the **Microsoft Cloud Adoption Framework Azure Landing Zone (Hub & Spoke)** architecture using Terraform with Azure Verified Modules (AVM).
+The repository started as a five-subscription hub-and-spoke Azure Landing Zone and was extended with a
+private banking application and data platform. It includes governance, identity, security, FinOps,
+multi-region networking, workload landing zones, deployment automation, teardown automation, operational
+runbooks, and an evidence trail of architectural decisions and live failures.
 
----
+## Project state
+
+This project distinguishes three different facts:
+
+| State | Meaning | Evidence |
+| --- | --- | --- |
+| **Repository capability** | Terraform and workflows can build the complete platform described below. | Composition roots, pinned lock files, CI workflows, ADRs |
+| **Proven deployment** | A complete 14-step build was live-verified on 2026-08-01: 5 subscriptions, 12 management groups including Tenant Root, 5 spokes, 8 connected peerings, and 404 top-level ARM resources by the BOM counting method. | [`docs/estate-bom.md`](docs/estate-bom.md) |
+| **Current Azure state** | The managed estate is intentionally greenfield after teardown run `30785098012` on 2026-08-03. All five subscriptions had zero managed resource groups, soft-deleted Log Analytics workspaces were zero, only Tenant Root remained, and the 11 state blobs were reset to canonical empty documents. A rebuild is held pending the documented Sentinel 401 investigation. | [`WORKLOG.md`](WORKLOG.md), [`docs/worklog/2026-08-03.md`](docs/worklog/2026-08-03.md) |
+
+“Built” in this documentation means implemented in Terraform and proven in a live deployment. It does not
+mean the resources are currently incurring cost.
+
+## Proven architecture
+
+- Five Azure subscriptions: Connectivity, Identity, Landing Zones, Management, and Security.
+- Custom `globaris` management-group hierarchy with Platform and Landing Zones branches, plus Corp,
+  Online, Sandbox, and Decommissioned archetypes.
+- Central US primary and East US 2 secondary/DR, selected after recorded capacity constraints
+  ([ADR-069](DECISIONS.md)).
+- Dual hub VNets with Azure Firewall Premium, global hub peering, and forced-tunnel routes from five spokes.
+- Five workload spokes:
+  - `corp-a1`: primary private corporate network landing zone.
+  - `corp-a2`: secondary/DR corporate network landing zone.
+  - `online-p1`: internet-facing Application Gateway WAF_v2 and Static Web App pattern.
+  - `bank-app-p1`: private AKS, Premium ACR, APIM, Event Hubs, and Service Bus platform.
+  - `bank-data-p1`: Databricks, ADLS Gen2, Fabric F2, Microsoft Foundry, and AI Search platform.
+- Microsoft Entra Domain Services in a dedicated identity VNet.
+- Central Log Analytics workspaces, Microsoft Sentinel, Defender for Cloud configuration, budgets, cost
+  exports, policy-as-governance, and AMBA/operations-monitoring capability.
+- GitHub Actions OIDC authentication with no stored Azure client secret.
+- Plan-before-apply, sequential single-root deployment, plan-shape gates, two-pass identity/AKS operations,
+  and independent teardown verification.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for diagrams and the fidelity map, and
+[`docs/estate-bom.md`](docs/estate-bom.md) for the live-verified resource inventory.
 
 ## Prerequisites
 
-- Terraform **1.15.6** (pinned in CI) + Azure CLI >= 2.x
-- **5 Azure subscriptions** (management, connectivity, identity, security, landing zones) in one Entra tenant
-- GitHub Actions with **OIDC** federated credentials - no stored client secrets (see [`bootstrap/`](bootstrap/))
-- Permissions to run bootstrap: **Global Administrator** on the tenant (MG + Entra) with elevated access; the CI
-  service principal then runs on the scoped role matrix in [ADR-021](DECISIONS.md)
-- Full prerequisite list (Variables/Secrets, Environments, Entra DS pre-step) is in [DEPLOYMENT.md](DEPLOYMENT.md)
+- Terraform `1.15.6` in CI. Individual roots declare minimum versions of `>= 1.9` or `>= 1.11`.
+- Azure CLI 2.x.
+- One Microsoft Entra tenant and five pre-provisioned Azure subscriptions.
+- GitHub Actions with workload-identity federation.
+- Bootstrap permissions for management-group, subscription RBAC, and required directory operations.
+- Required Azure resource-provider registrations, quotas, and tenant prerequisites documented in
+  [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
-## Repository Layout
+Provider and AVM selections are pinned per composition root, and each deployable root carries a committed
+`.terraform.lock.hcl` except the one-time local bootstrap root by design.
 
-```
+## Repository layout
+
+```text
 .
-├── bootstrap/               # OIDC service principal, remote state backend, MG seeding
-├── modules/                 # Reusable local Terraform modules
-│   ├── management-groups/
-│   ├── policy-baseline/
-│   ├── hub-network/
-│   ├── spoke-network/
-│   ├── private-dns/
-│   ├── monitoring/
-│   ├── security-sentinel/
-│   ├── identity/
-│   ├── finops/
-│   └── synthetic-workload/
-├── platform/                # Root module deployments per platform subscription
-│   ├── connectivity/
-│   ├── identity/
-│   ├── management/
-│   └── security/
-├── landing-zones/           # Landing zone spoke deployments
-│   ├── corp-a1/             # Primary region, private workloads
-│   ├── corp-a2/             # DR region, geo-paired to corp-a1
-│   └── online-p1/           # Internet-facing, WAF-protected
-├── synthetic/               # Synthetic workload + security signal generators
-├── demo/                    # Demo orchestration scripts and walkthrough
-├── envs/                    # Environment-specific tfvars and backend config
-├── policies/                # OPA/Conftest policy files for PR gates
-└── .github/workflows/       # CI/CD pipelines
+|-- bootstrap/                    # One-time local state backend and OIDC bootstrap
+|-- platform/
+|   |-- management-groups/        # ALZ hierarchy and policy assignments
+|   |-- management/               # Logging, FinOps, alerts, AMBA support
+|   |-- security/                 # Defender for Cloud and Microsoft Sentinel
+|   |-- connectivity/             # Regional hubs, firewalls, DNS and routing
+|   `-- identity/                 # Entra DS, Conditional Access and PIM code
+|-- landing-zones/
+|   |-- corp-a1/                  # Primary corporate spoke
+|   |-- corp-a2/                  # DR corporate spoke
+|   |-- online-p1/                # WAF-protected online spoke
+|   |-- bank-app-p1/              # AKS, ACR, APIM and messaging
+|   `-- bank-data-p1/             # Databricks, ADLS, Fabric, Foundry and Search
+|-- modules/finops/               # The only local reusable Terraform module
+|-- synthetic/                    # Implemented but default-off signal generator
+|-- .github/workflows/            # Validate, plan, deploy and teardown automation
+|-- scripts/                      # Preflight, claim checks and teardown safeguards
+|-- docs/                         # Designs, runbooks, pre-clearance and evidence
+|-- demo/                         # Demonstration and acceptance assets
+`-- envs/                         # Non-secret environment configuration
 ```
 
-## Quick Deploy
+AVM is consumed directly in composition roots; unused local wrapper scaffolds were deliberately removed
+under [ADR-038](DECISIONS.md).
 
-**Bootstrap is the only local step; every other root deploys via CI** (GitHub Actions, OIDC, gated). Full
-ordered runbook with per-step validation and the Secrets each root needs: **[DEPLOYMENT.md](DEPLOYMENT.md)**.
+## Deployment
 
-```bash
-# 1. Bootstrap remote state + OIDC (local, one-time) - creates the backend the CI needs
-cd bootstrap && terraform init && terraform apply
+Bootstrap is the only local apply. All platform and workload roots deploy through GitHub Actions.
+
+```powershell
+Set-Location bootstrap
+terraform init
+terraform apply
 ```
 
-Then set the GitHub Variables/Secrets and Environments, and deploy each root via the
-`Deploy (manual)` workflow ([`deploy.yml`](.github/workflows/deploy.yml)) - `action=plan`, then `action=apply`
-(gated by the `production` environment) - in dependency order:
+Full-estate applies are intentionally dispatched one root at a time. `target=all` is not a supported apply
+path because the state account uses a just-in-time firewall window per runner. The proven high-level order is:
 
+```text
+management-groups
+  -> management
+  -> security
+  -> connectivity
+  -> five landing-zone spokes
+  -> identity pass 1
+  -> identity pass 2
+  -> bank-app-p1 ACR binding pass
+  -> management AMBA pass
+  -> management-groups AMBA policy pass
 ```
-management-groups -> management -> {connectivity, security, identity} -> spokes (corp-a1, corp-a2, online-p1)
-```
 
-`target=all` runs the whole graph in order once the cross-root output Secrets exist. The `synthetic` root is
-**deferred** and not deployed (ADR-036 / ADR-037). See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact procedure and
-[`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md) for pipeline mechanics.
+Every root is planned, its resource shape is inspected, and only then is it applied. Use
+[`docs/2026-07-22-full-estate-rebuild-runbook.md`](docs/2026-07-22-full-estate-rebuild-runbook.md) for the
+current 14-step operator procedure and [`DEPLOYMENT.md`](DEPLOYMENT.md) for the supported deployment model.
 
-## Cost Estimate
+## Cost posture
 
-As deployed and gated today (DDoS off, corp App Service + SQL gated, Bastion on-demand, synthetic deferred), the
-estate is estimated at **~$3,600 to $4,800 per month** (list prices, POC scale, not billed actuals). The two
-**Azure Firewall Premium** instances (~$2,555/mo fixed, ~55-65% of the bill) plus the **Defender for Cloud**
-plans are the dominant levers.
+The last full deployment was intentionally time-boxed. The dominant cost drivers were the two Azure Firewall
+Premium instances and Service Bus Premium. DDoS Network Protection, VPN Gateway, DNS Private Resolver,
+Bastion, corporate SQL/App Service tiers, and the synthetic workload were not part of the proven August 1
+inventory. Fabric capacity was designed to be suspended outside its validation window.
 
-| Component | Monthly (USD) | Notes |
-|-----------|--------------|-------|
-| Azure Firewall Premium (x2) | ~$2,555 | Primary + DR hub, fixed hourly (biggest line) |
-| VPN Gateway (VpnGw1AZ, primary only) | ~$260 | DR hub transits via peering (no 2nd gateway) |
-| DNS Private Resolver + App Gateway WAF_v2 | ~$695 | inbound/outbound endpoints + WAF cap 1 |
-| Log Analytics x2 + Defender for Cloud plans | ~$135 - $400 | scales with traffic + resource count |
-| Entra DS, Event Hub, RSVs, Static Web App, DNS zones, storage, IPs | ~$220 | per COST.md |
-| **Estimated total** | **~$3,600 - $4,800/mo** | Varies by traffic; full breakdown in [COST.md](COST.md) |
-
-> Biggest saving already applied: DDoS off (~$2,944/mo avoided). Run teardown (`teardown.yml`) and keep
-> `enable_synthetic_workload=false` / Bastion off when not demoing. See [COST.md](COST.md) for FinOps levers.
+Cost figures are planning estimates, not invoices. See [`COST.md`](COST.md) for the component-level model,
+assumptions, and shutdown levers.
 
 ## Teardown
 
-Teardown is **CI-driven** via the `teardown.yml` workflow (uniform `terraform destroy` in reverse dependency
-order, `production-destroy` gate + typed `confirm=destroy`, ADR-020). `include_bootstrap` defaults to **false**
-(keeps the state backend + OIDC so redeploy is immediate); set `true` only for full decommission. Single-root
-teardown (`target=<one root>`) is the cheap "cut cost on one spoke" path.
+Teardown is a first-class engineering capability, not an afterthought. The `teardown.yml` workflow provides:
 
-Full procedure and the scorched-earth fallback: [`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md)
-§5-§6 and [DEPLOYMENT.md](DEPLOYMENT.md) §6.
+- a typed destruction guard and dedicated environment;
+- policy disarm before resource deletion;
+- Databricks and diagnostic-setting pre-cascade handling;
+- serialized reverse-dependency Terraform destroys;
+- an Azure API remnant sweep;
+- independent verification across subscriptions and management groups; and
+- canonical empty-state reset after verified deletion.
 
----
+Two complete estate teardowns were proven on 2026-08-01, and the shallow post-failure estate teardown was
+proven again on 2026-08-03. See [`docs/teardown-redesign.md`](docs/teardown-redesign.md),
+[`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md), and ADR-054 through ADR-073.
 
-## Further Reading
+## Documentation
 
-- [DEPLOYMENT.md](DEPLOYMENT.md) - greenfield end-to-end deploy runbook (ordered, per-root, with validation)
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Mermaid diagrams, RTO/RPO, decisions, ALZ fidelity map
-- [COST.md](COST.md) - per-component monthly estimate and FinOps levers
-- [SECURITY.md](SECURITY.md) - threat model, Zero Trust mapping, compliance posture
-- [RUNBOOK.md](RUNBOOK.md) - failover drill, incident triage, cost spike response
-- [DECISIONS.md](DECISIONS.md) - architectural decision records
-- [`docs/cicd-deploy-teardown.md`](docs/cicd-deploy-teardown.md) - CI/CD deploy + teardown pipeline reference
-- [`docs/operations-monitoring-design.md`](docs/operations-monitoring-design.md) - Day-2 Operations and Monitoring target architecture (ADR-037)
-- [landing-zone-kit/](landing-zone-kit/README.md) - reusable LZ build kit: live-apply lessons, decision framework, role process
+- [`ARCHITECTURE.md`](ARCHITECTURE.md): architecture layers, diagrams, RTO/RPO and fidelity.
+- [`DEPLOYMENT.md`](DEPLOYMENT.md): deployment prerequisites, ordering and verification.
+- [`RUNBOOK.md`](RUNBOOK.md): failover, incident, cost-spike and platform recovery procedures.
+- [`SECURITY.md`](SECURITY.md): threat model, Zero Trust mapping and compliance posture.
+- [`COST.md`](COST.md): cost model and FinOps levers.
+- [`DECISIONS.md`](DECISIONS.md): 74 architectural decision records and amendments.
+- [`docs/acceptance-validation.md`](docs/acceptance-validation.md): original Section 12 validation, including failed criteria.
+- [`docs/estate-bom.md`](docs/estate-bom.md): live-verified August 1 estate baseline.
+- [`docs/advisor-remediation-plan.md`](docs/advisor-remediation-plan.md): post-build hardening findings.
+- [`WORKLOG.md`](WORKLOG.md): current state and session history index.
+
+## Known boundaries
+
+- The five subscriptions are pre-provisioned; this repository does not vend subscriptions.
+- All five workload spokes share one Landing Zones subscription, so the subscription is placed under the
+  Corp management group. Online is represented as an archetype and network pattern, not a separate subscription.
+- Conditional Access policies were proven in report-only mode.
+- DDoS Network Protection, private DNS Resolver, VPN Gateway, Bastion, and the synthetic workload are
+  implemented or designed as gated capabilities but were absent from the August 1 BOM.
+- Customer-managed keys for the banking data tier were designed but not implemented.
+- VNet diagnostic settings and several Azure Advisor hardening items remain follow-up work.
+- The current rebuild is held until the Sentinel 401 directory-role hypothesis is resolved.
+
+These boundaries are documented to separate a credible POC from an unsupported production-readiness claim.
