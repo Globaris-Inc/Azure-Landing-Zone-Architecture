@@ -17,13 +17,11 @@ generalized process.** It applies to the next LZ too (e.g. a security landing zo
 | File | What it gives you |
 |------|-------------------|
 | [README.md](README.md) | This — how to use the kit + order of operations |
-| [process.md](process.md) | The operating contract, the **3-role hand-off**, and the **enforced review gate** |
 | [LESSONS.md](LESSONS.md) | **The live-apply reality checklist** — the gotchas static review/`validate` can't catch, as pre-emptive guardrails |
 | [OPEN-QUESTIONS-template.md](OPEN-QUESTIONS-template.md) | The recurring decision forks (identity, region, RBAC, state posture, gating…) with recommended defaults |
-| [templates.md](templates.md) | Which existing repo artifacts to copy + the parameterization checklist |
 
 The **code templates** (the things you copy) are the proven repo artifacts themselves — see
-[templates.md](templates.md): `bootstrap/`, `envs/`, `.github/workflows/`, `scripts/preflight.sh`,
+The reusable artifacts are `bootstrap/`, `envs/`, `.github/workflows/`, `scripts/preflight.sh`,
 `.githooks/pre-commit`.
 
 ---
@@ -35,10 +33,10 @@ The **code templates** (the things you copy) are the proven repo artifacts thems
 2. **Answer the [decision framework](OPEN-QUESTIONS-template.md)** with the project owner. Lock identity
    model, region, subscription/RG topology, RBAC scope, state-backend posture, and deploy gating *before*
    writing Terraform. Record each as an ADR.
-3. **Copy the templates** per [templates.md](templates.md) and parameterize (names, the new workload
+3. **Copy the templates** and parameterize (names, the new workload
    token, the design areas). The CI workflows + state backend + review gate are largely generic — they
    carry over with minimal edits.
-4. **Work the build under the [process](process.md):** one section per session, **Architect → (Cloud
+4. **Work the build under the process:** one section per session, **Architect → (Cloud
    Engineer | DevSecOps) → Code Reviewer** per change, the review gate enforced by hooks + `preflight.sh`.
 5. **Bootstrap, then deploy via CI.** `bootstrap` once (creates the deterministic-named CMK state backend
    + OIDC), then `manual-deploy` (plan → apply, gated). `cleanup-demo` resets between demos.

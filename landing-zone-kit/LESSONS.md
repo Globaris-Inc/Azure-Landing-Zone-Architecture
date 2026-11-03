@@ -11,7 +11,7 @@ misses it → the guardrail to apply up front.* Most are not AVD-specific.
 
 > **Meta-principle: "validate the way CI runs."** Don't trust "it validated locally." Validate with the
 > *same* Terraform version CI pins, run `terraform init` so transitive module constraints are exercised,
-> and lint the workflows. The kit's [`preflight.sh`](templates.md) automates this.
+> and lint the workflows. The kit's `scripts/preflight.sh` automates this.
 >
 > **Proven the hard way (ALZ build):** in the ALZ platform build, **5 of 10 roots the worklog had marked
 > 🟢 Complete did not actually `validate`** — because validate was logged "NOT RUN" every session. The
